@@ -1,0 +1,60 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  --background: #09090b;
+  --foreground: #f4f4f5;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    linear-gradient(90deg, rgba(250, 204, 21, 0.05) 1px, transparent 1px),
+    linear-gradient(rgba(250, 204, 21, 0.035) 1px, transparent 1px),
+    radial-gradient(circle at 20% 0%, rgba(245, 158, 11, 0.16), transparent 30%),
+    #09090b;
+  background-size: 44px 44px, 44px 44px, auto, auto;
+  color: var(--foreground);
+  font-family: ui-monospace, "SFMono-Regular", "Cascadia Code", "Liberation Mono", Menlo, monospace;
+}
+
+::selection {
+  background: rgba(252, 211, 77, 0.35);
+}
+
+.archive-panel {
+  border: 1px solid rgba(63, 63, 70, 0.85);
+  background: rgba(9, 9, 11, 0.84);
+  box-shadow: 0 18px 70px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(18px);
+}
+
+.thin-scrollbar {
+  scrollbar-color: #71717a #18181b;
+  scrollbar-width: thin;
+}
+
+@keyframes copy-pop {
+  0% {
+    opacity: 0;
+    transform: translateY(4px) scale(0.92);
+  }
+  60% {
+    transform: translateY(0) scale(1.04);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-\[copy-pop_220ms_ease-out\] {
+    animation: none !important;
+  }
+}

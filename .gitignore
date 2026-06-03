@@ -1,0 +1,7 @@
+.next
+out
+node_modules
+.DS_Store
+coverage
+*.log
+*.tsbuildinfo
