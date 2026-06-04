@@ -5,9 +5,6 @@ import { AlertTriangle, Check, Copy, Download, FileCode2, Loader2 } from "lucide
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   LARGE_CAPTURE_LIMIT_BYTES,
-  buildResultsBackHref,
-  captureToViewerParams,
-  appendResultsBackContext,
   warcRecordUrl,
   type CommonCrawlCapture,
   type MatchType
@@ -18,7 +15,19 @@ import { Button } from "@/components/ui/button";
 import { createMockWarcRecord, isMockCaptureFilename } from "@/lib/mock-data";
 import { buildTabTitle, extractHtmlTitle } from "@/lib/app-meta";
 import { CaptureNavBar } from "@/components/capture-navbar";
-import { getSearch, scanSearchKey, searchKey, subscribeToSearch } from "@/lib/capture-store";
+import {
+  coverageCaptures,
+  findOrCreateLegacySession,
+  getCoverage,
+  getScanSession,
+  getSearch,
+  legacyScanSearchKeys,
+  scanSearchKey,
+  searchKey,
+  subscribeToSearch,
+  subscribeToSearchChanges
+} from "@/lib/capture-store";
+import { createViewerHref, parseViewerRoute, viewerBackHref } from "@/lib/navigation-state";
 
 type ViewerState =
   | { kind: "loading" }
@@ -35,6 +44,8 @@ export function CaptureViewerApp() {
   const timestamp = params.get("timestamp") ?? "";
   const url = params.get("url") ?? "";
   const collection = params.get("collection") ?? "";
+  const routeState = useMemo(() => parseViewerRoute(params), [params]);
+  const scanId = routeState.scanId;
 
   const backUrl = params.get("back_url");
   const backMatch = params.get("back_match");
@@ -50,7 +61,7 @@ export function CaptureViewerApp() {
   const backView = params.get("back_view");
   const backPage = params.get("back_page");
 
-  const backHref = buildResultsBackHref({
+  const legacyBackContext = routeState.legacyBackContext ?? {
     url: backUrl,
     match: backMatch,
     mock: backMock,
@@ -64,24 +75,11 @@ export function CaptureViewerApp() {
     sort: backSort,
     view: backView,
     page: backPage
-  }) ?? "/";
+  };
+  const backHref = viewerBackHref({ scanId, legacyBackContext }) ?? "/";
   const backContext = useMemo(
-    () => ({
-      url: backUrl,
-      match: backMatch,
-      mock: backMock,
-      scope: backScope,
-      history: backHistory,
-      year: backYear,
-      collection: backCollection,
-      mime: backMime,
-      status: backStatus,
-      filter: backFilter,
-      sort: backSort,
-      view: backView,
-      page: backPage
-    }),
-    [backCollection, backFilter, backHistory, backMatch, backMime, backMock, backPage, backScope, backSort, backStatus, backUrl, backView, backYear]
+    () => legacyBackContext,
+    [legacyBackContext]
   );
 
   const [state, setState] = useState<ViewerState>({ kind: "loading" });
@@ -133,16 +131,38 @@ export function CaptureViewerApp() {
   }, [collection, filename, length, numericLength, offset, timestamp, url]);
 
   useEffect(() => {
+    if (scanId) {
+      let cancelled = false;
+      const load = () => {
+        getScanSession(scanId)
+          .then((session) => session ? getCoverage(session.targetId) : undefined)
+          .then((coverage) => {
+            if (!cancelled) setCaptures(coverageCaptures(coverage));
+          });
+      };
+      load();
+      const unsubscribe = subscribeToSearchChanges(load);
+      return () => {
+        cancelled = true;
+        unsubscribe();
+      };
+    }
     if (!backUrl) return;
     const activeMatch = (backMatch as MatchType) || "exact";
     const mock = backMock === "1";
-    const keys = backScope === "all"
-      ? [scanSearchKey(backUrl, activeMatch, mock, "all"), searchKey(backUrl, activeMatch, mock)]
-      : [searchKey(backUrl, activeMatch, mock)];
+    const activeScope = backScope === "all" ? "all" : "recent";
+    void findOrCreateLegacySession(backUrl, activeMatch, mock, activeScope);
+    const keys = Array.from(new Set([
+      scanSearchKey(backUrl, activeMatch, mock, activeScope),
+      searchKey(backUrl, activeMatch, mock),
+      ...legacyScanSearchKeys(backUrl, activeMatch, mock)
+    ]));
     let cancelled = false;
     const load = () => {
       Promise.all(keys.map((key) => getSearch(key))).then((records) => {
-        const stored = records.find((record) => record?.captures?.length);
+        const stored = records
+          .filter((record) => record?.captures?.length)
+          .sort((left, right) => (right?.updatedAt ?? 0) - (left?.updatedAt ?? 0))[0];
         if (!cancelled && stored) setCaptures(stored.captures);
       });
     };
@@ -152,15 +172,13 @@ export function CaptureViewerApp() {
       cancelled = true;
       for (const unsubscribe of unsubscribers) unsubscribe();
     };
-  }, [backUrl, backMatch, backMock, backScope]);
+  }, [scanId, backUrl, backMatch, backMock, backScope]);
 
   const navigateToCapture = useCallback(
     (capture: CommonCrawlCapture) => {
-      const next = captureToViewerParams(capture);
-      appendResultsBackContext(next, backContext);
-      router.replace(`/view?${next.toString()}`);
+      router.replace(createViewerHref(capture, { scanId, legacyBackContext: backContext }));
     },
-    [router, backContext]
+    [router, scanId, backContext]
   );
 
   const handleJumpTo = useCallback(
@@ -214,7 +232,7 @@ export function CaptureViewerApp() {
         timestamp={timestamp}
         captures={captures}
         currentIndex={currentIndex}
-        backHref={backUrl ? backHref : null}
+        backHref={scanId || backUrl ? backHref : null}
         onJumpTo={handleJumpTo}
       />
 

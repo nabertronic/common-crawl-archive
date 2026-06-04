@@ -17,7 +17,7 @@ export const LARGE_CAPTURE_LIMIT_BYTES = 15 * 1024 * 1024;
 
 const COLLECTION_CACHE_KEY = "snapshot-search:common-crawl-collections:v2";
 const LEGACY_COLLECTION_CACHE_KEY = "snapshot-search:common-crawl-collections";
-const CDX_RESULT_CACHE_PREFIX = "snapshot-search:common-crawl-cdx:v1:";
+const CDX_RESULT_CACHE_PREFIX = "snapshot-search:common-crawl-cdx:v2:";
 const CACHE_VERSION = 1;
 const HOST_MIN_INTERVAL_MS: Record<string, number> = {
   "index.commoncrawl.org": DEFAULT_REQUEST_SPACING_MS,
@@ -58,6 +58,7 @@ export type CollectionCheckResult = {
   collection: CommonCrawlCollection;
   status: "checked" | "not-checked";
   captures: CommonCrawlCapture[];
+  checkedAt?: number;
   httpStatus?: number;
   error?: string;
   errorKind?: CollectionErrorKind;
@@ -317,8 +318,6 @@ export function buildCdxjUrl(
     fl: "timestamp,url,status,mime,digest,filename,offset,length,redirect",
     limit: String(DEFAULT_CDX_LIMIT)
   });
-  params.append("filter", "status:200");
-  params.append("filter", "mime:html");
   if (matchType !== "exact") {
     params.set("matchType", matchType);
   }
@@ -588,6 +587,7 @@ export async function queryCollection(
           collection,
           status: "checked",
           captures: [],
+          checkedAt: Date.now(),
           httpStatus: response.status,
           attempts,
           runs: 1
@@ -602,6 +602,7 @@ export async function queryCollection(
           collection,
           status: "checked",
           captures,
+          checkedAt: Date.now(),
           httpStatus: response.status,
           attempts,
           runs: 1,
@@ -622,6 +623,7 @@ export async function queryCollection(
           collection,
           status: "not-checked",
           captures: [],
+          checkedAt: Date.now(),
           httpStatus: response.status,
           error: lastError,
           errorKind: lastErrorKind,
@@ -648,6 +650,7 @@ export async function queryCollection(
     collection,
     status: "not-checked",
     captures: [],
+    checkedAt: Date.now(),
     httpStatus: lastHttpStatus,
     error: lastError,
     errorKind: lastErrorKind,
@@ -662,7 +665,7 @@ function cdxCacheKey(targetUrl: string, collection: CommonCrawlCollection, match
       collectionId: collection.id,
       targetUrl,
       matchType,
-      filters: ["status:200", "mime:html"],
+      retainedCaptures: "html-200-and-redirects",
       limit: DEFAULT_CDX_LIMIT
     })
   )}`;
@@ -684,6 +687,7 @@ function readCachedCdxResult(
     attempts: 0,
     runs: 1,
     fromCache: true,
+    checkedAt: record.result.checkedAt ?? record.fetchedAt,
     blockedCaptures: blockedCapturesFor(record.result.captures ?? [])
   };
 }

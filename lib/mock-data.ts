@@ -167,6 +167,7 @@ function makeCapture(seed: MockCaptureSeed, index: number, baseUrl: string): Com
 }
 
 export function createMockSearchDataset(targetUrl: string, matchType: MatchType) {
+  const now = Date.now();
   const baseUrl = normalizedBaseUrl(targetUrl, matchType);
   const captures = MOCK_CAPTURE_SEEDS.map((seed, index) => makeCapture(seed, index, baseUrl));
   const capturesByCollection = new Map<string, CommonCrawlCapture[]>();
@@ -181,6 +182,7 @@ export function createMockSearchDataset(targetUrl: string, matchType: MatchType)
       collection: MOCK_COLLECTIONS[1],
       status: "not-checked",
       captures: [],
+      checkedAt: now - 118000,
       httpStatus: 500,
       error: "SlowDown response from Common Crawl",
       errorKind: "http_500_slowdown",
@@ -191,6 +193,7 @@ export function createMockSearchDataset(targetUrl: string, matchType: MatchType)
       collection: MOCK_COLLECTIONS[3],
       status: "not-checked",
       captures: [],
+      checkedAt: now - 87000,
       httpStatus: 504,
       error: "Gateway timeout response from Common Crawl",
       errorKind: "http_504_gateway_timeout",
@@ -201,6 +204,7 @@ export function createMockSearchDataset(targetUrl: string, matchType: MatchType)
       collection: MOCK_COLLECTIONS[5],
       status: "not-checked",
       captures: [],
+      checkedAt: now - 51000,
       httpStatus: 503,
       error: "Service unavailable response from Common Crawl",
       errorKind: "http_503_unavailable",
@@ -211,6 +215,7 @@ export function createMockSearchDataset(targetUrl: string, matchType: MatchType)
       collection: MOCK_COLLECTIONS[7],
       status: "not-checked",
       captures: [],
+      checkedAt: now - 21000,
       httpStatus: 429,
       error: "Rate limit response from Common Crawl",
       errorKind: "http_429_rate_limit",
@@ -223,6 +228,7 @@ export function createMockSearchDataset(targetUrl: string, matchType: MatchType)
     collection,
     status: "checked",
     captures: capturesByCollection.get(collection.id) ?? [],
+    checkedAt: now - Math.max(0, 120000 - MOCK_COLLECTIONS.indexOf(collection) * 8000),
     httpStatus: 200,
     attempts: 1,
     runs: 1

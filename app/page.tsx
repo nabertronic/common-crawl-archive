@@ -1,5 +1,10 @@
+import { Suspense } from "react";
 import { ArchiveSearchApp } from "@/components/archive-search-app";
 
 export default function Home() {
-  return <ArchiveSearchApp />;
+  return (
+    <Suspense>
+      <ArchiveSearchApp />
+    </Suspense>
+  );
 }

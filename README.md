@@ -1,10 +1,11 @@
 # Snapshot Search
 
-A static, client-side Next.js webapp for searching individual URLs across every public Common Crawl index and opening matching WARC captures in a local browser viewer.
+A Next.js webapp for searching individual URLs across every public Common Crawl index and opening matching WARC captures in a local browser viewer.
 
 ## Goals
 
-- Query Common Crawl from the user's browser, not from an application server.
+- Query Common Crawl from the user's browser.
+- Check the current target site's `robots.txt` for Common Crawl's `CCBot` through the app server, avoiding browser CORS limits.
 - Search all collections returned by `https://index.commoncrawl.org/collinfo.json`.
 - Keep routes stable for future PastPage provider integration:
   - `/search?url=https://example.com/page`
@@ -28,7 +29,7 @@ pnpm test
 pnpm build
 ```
 
-`pnpm build` uses `output: "export"` and creates a static export in `out/`.
+`pnpm build` creates a server-capable Next.js build. Deploy it on a runtime that supports Next.js route handlers.
 
 ## MVP Limits
 

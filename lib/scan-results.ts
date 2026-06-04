@@ -30,6 +30,7 @@ export function mergeCollectionResult(
       blockedCaptures: mergeBlockedCaptures(existing.blockedCaptures, next.blockedCaptures),
       attempts,
       runs,
+      checkedAt: next.checkedAt ?? existing.checkedAt,
       fromCache: existing.fromCache && next.fromCache
     };
   }
@@ -38,7 +39,8 @@ export function mergeCollectionResult(
     return {
       ...existing,
       attempts,
-      runs
+      runs,
+      checkedAt: existing.checkedAt ?? next.checkedAt
     };
   }
 
@@ -46,14 +48,16 @@ export function mergeCollectionResult(
     return {
       ...next,
       attempts,
-      runs
+      runs,
+      checkedAt: next.checkedAt ?? existing.checkedAt
     };
   }
 
   return {
     ...next,
     attempts,
-    runs
+    runs,
+    checkedAt: next.checkedAt ?? existing.checkedAt
   };
 }
 

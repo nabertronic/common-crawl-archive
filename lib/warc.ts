@@ -41,12 +41,29 @@ export function parseWarcRecord(text: string): ParsedWarcRecord {
   };
 }
 
+// Best-effort scrub of obviously dangerous markup. This is defence-in-depth
+// only: the preview always renders inside an iframe with `sandbox=""`, which is
+// what actually neutralises scripts, navigation and same-origin access. Regex
+// HTML sanitisation cannot be made fully robust, so it must never be the sole
+// control.
 export function sanitizeHtmlForPreview(html: string): string {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, "")
     .replace(/<noscript[\s\S]*?<\/noscript>/gi, "")
+    .replace(/<iframe[\s\S]*?<\/iframe>/gi, "")
+    .replace(/<object[\s\S]*?<\/object>/gi, "")
+    .replace(/<embed\b[^>]*>/gi, "")
     .replace(/<base\b[^>]*>/gi, "")
-    .replace(/\s(?:src|srcset|href|action|poster)=["'][^"']*["']/gi, "")
+    // Strip src/href/etc. whether quoted or unquoted, and regardless of the
+    // whitespace/slash that separates the attribute from the tag name.
+    .replace(/[\s/](?:src|srcset|href|xlink:href|action|formaction|poster)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, " ")
+    // Strip inline event handlers (onclick, onerror, …) in the same way.
+    .replace(/[\s/]on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, " ")
+    // Neutralise javascript:/vbscript: URIs in attribute-value positions
+    // (after a quote or paren). src/href/action are already removed above, so
+    // this targets the residual cases without touching prose that merely
+    // mentions the scheme in page text.
+    .replace(/(["'(])(?:javascript|vbscript):[^"'\s>]*/gi, "$1#")
     .replace(/\sstyle=["'][^"']*url\([^"']*["']/gi, "");
 }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
   ChevronDown,
@@ -24,6 +24,7 @@ import {
   deleteSearches,
   listSearches,
   scanSearchKey,
+  subscribeToSearchChanges,
   type StoredSearch
 } from "@/lib/capture-store";
 import {
@@ -60,6 +61,12 @@ const DEFAULT_SORT_DIR: Record<SortKey, SortDir> = {
   failed: "desc"
 };
 
+function isBackForwardNavigation() {
+  if (typeof performance === "undefined") return false;
+  const [navigation] = performance.getEntriesByType("navigation") as PerformanceNavigationTiming[];
+  return navigation?.type === "back_forward";
+}
+
 export function HistoryApp() {
   const [records, setRecords] = useState<HistoryRecord[]>([]);
   const [currentCollections, setCurrentCollections] = useState<CommonCrawlCollection[]>([]);
@@ -75,10 +82,81 @@ export function HistoryApp() {
   const [showCoveredScans, setShowCoveredScans] = useState(false);
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [page, setPage] = useState(1);
+  const queryInputRef = useRef<HTMLInputElement | null>(null);
+  const scopeFilterRef = useRef<HTMLSelectElement | null>(null);
+  const outcomeFilterRef = useRef<HTMLSelectElement | null>(null);
+  const dateFromRef = useRef<HTMLInputElement | null>(null);
+  const dateToRef = useRef<HTMLInputElement | null>(null);
+  const showCoveredRef = useRef<HTMLInputElement | null>(null);
+
+  const syncRestoredControls = useCallback(() => {
+    const restoredQuery = queryInputRef.current?.value ?? "";
+    const restoredScope = scopeFilterRef.current?.value;
+    const restoredOutcome = outcomeFilterRef.current?.value;
+    const restoredDateFrom = dateFromRef.current?.value ?? "";
+    const restoredDateTo = dateToRef.current?.value ?? "";
+    const restoredShowCovered = showCoveredRef.current?.checked;
+
+    setQuery((current) => (current === restoredQuery ? current : restoredQuery));
+    if (restoredScope === "any" || restoredScope === "recent" || restoredScope === "all") {
+      setScopeFilter((current) => (current === restoredScope ? current : restoredScope));
+    }
+    if (restoredOutcome === "all" || restoredOutcome === "complete" || restoredOutcome === "partial" || restoredOutcome === "empty") {
+      setOutcomeFilter((current) => (current === restoredOutcome ? current : restoredOutcome));
+    }
+    setDateFrom((current) => (current === restoredDateFrom ? current : restoredDateFrom));
+    setDateTo((current) => (current === restoredDateTo ? current : restoredDateTo));
+    if (typeof restoredShowCovered === "boolean") {
+      setShowCoveredScans((current) => (current === restoredShowCovered ? current : restoredShowCovered));
+    }
+  }, []);
+
+  const clearFreshControls = useCallback(() => {
+    setQuery("");
+    setScopeFilter("any");
+    setOutcomeFilter("all");
+    setDateFrom("");
+    setDateTo("");
+    setShowCoveredScans(false);
+    if (queryInputRef.current) queryInputRef.current.value = "";
+    if (scopeFilterRef.current) scopeFilterRef.current.value = "any";
+    if (outcomeFilterRef.current) outcomeFilterRef.current.value = "all";
+    if (dateFromRef.current) dateFromRef.current.value = "";
+    if (dateToRef.current) dateToRef.current.value = "";
+    if (showCoveredRef.current) showCoveredRef.current.checked = false;
+  }, []);
 
   useEffect(() => {
     void refreshRecords().finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    const refresh = () => {
+      void refreshRecords().finally(() => setLoading(false));
+    };
+    const syncOrClear = (restoreFromHistory: boolean) => {
+      if (restoreFromHistory) {
+        syncRestoredControls();
+        return;
+      }
+      clearFreshControls();
+    };
+    const animationFrameId = window.requestAnimationFrame(() => syncOrClear(isBackForwardNavigation()));
+    const timeoutId = window.setTimeout(() => syncOrClear(isBackForwardNavigation()), 100);
+    const unsubscribe = subscribeToSearchChanges(refresh);
+    const handlePageShow = (event: PageTransitionEvent) => {
+      syncOrClear(event.persisted || isBackForwardNavigation());
+      refresh();
+    };
+
+    window.addEventListener("pageshow", handlePageShow);
+    return () => {
+      window.cancelAnimationFrame(animationFrameId);
+      window.clearTimeout(timeoutId);
+      window.removeEventListener("pageshow", handlePageShow);
+      unsubscribe();
+    };
+  }, [clearFreshControls, syncRestoredControls]);
 
   async function refreshRecords() {
     const [searches, collections] = await Promise.all([
@@ -251,6 +329,7 @@ export function HistoryApp() {
                 size={16}
               />
               <Input
+                ref={queryInputRef}
                 type="search"
                 aria-label="Search history"
                 value={query}
@@ -280,6 +359,7 @@ export function HistoryApp() {
             <div className="mt-4 grid gap-3 border-t border-zinc-800 pt-4 sm:grid-cols-2 lg:grid-cols-5">
               <SelectControl
                 label="Scope"
+                selectRef={scopeFilterRef}
                 value={scopeFilter}
                 onChange={(value) => setScopeFilter(value as "any" | ScanScope)}
                 options={[
@@ -290,6 +370,7 @@ export function HistoryApp() {
               />
               <SelectControl
                 label="Outcome"
+                selectRef={outcomeFilterRef}
                 value={outcomeFilter}
                 onChange={(value) => setOutcomeFilter(value as "all" | ScanOutcome)}
                 options={[
@@ -299,10 +380,11 @@ export function HistoryApp() {
                   ["empty", "No snapshots"]
                 ]}
               />
-              <DateControl label="From" value={dateFrom} onChange={setDateFrom} />
-              <DateControl label="To" value={dateTo} onChange={setDateTo} />
+              <DateControl label="From" inputRef={dateFromRef} value={dateFrom} onChange={setDateFrom} />
+              <DateControl label="To" inputRef={dateToRef} value={dateTo} onChange={setDateTo} />
               <label className="flex h-10 items-center gap-2 self-end rounded-md border border-zinc-800 bg-zinc-950 px-3 text-sm font-semibold text-zinc-200">
                 <input
+                  ref={showCoveredRef}
                   type="checkbox"
                   checked={showCoveredScans}
                   onChange={(event) => setShowCoveredScans(event.target.checked)}
@@ -338,6 +420,7 @@ export function HistoryApp() {
                 variant="secondary"
                 disabled={selectedRecords.length === 0}
                 onClick={() => downloadCsv(selectedRecords, "selected")}
+                suppressHydrationWarning
               >
                 <Download size={14} />
                 Export selected
@@ -346,8 +429,9 @@ export function HistoryApp() {
                 type="button"
                 size="sm"
                 variant="danger"
-                disabled={selectedKeys.length === 0}
+                disabled={selectedRecords.length === 0}
                 onClick={() => void handleDeleteSelected()}
+                suppressHydrationWarning
               >
                 <Trash2 size={14} />
                 Delete selected
@@ -430,6 +514,7 @@ export function HistoryApp() {
             size="sm"
             disabled={records.length === 0}
             onClick={() => downloadCsv(records, "all")}
+            suppressHydrationWarning
           >
             <Download size={14} />
             Export all
@@ -441,6 +526,7 @@ export function HistoryApp() {
               size="sm"
               disabled={sortedRecords.length === 0}
               onClick={() => downloadCsv(sortedRecords, "filtered")}
+              suppressHydrationWarning
             >
               <Download size={14} />
               Export view
@@ -452,6 +538,7 @@ export function HistoryApp() {
             size="sm"
             disabled={records.length === 0}
             onClick={() => void handleClearHistory()}
+            suppressHydrationWarning
           >
             <Trash2 size={14} />
             Clear history
@@ -628,18 +715,21 @@ function SelectControl({
   onChange,
   options,
   fullValueOptions,
+  selectRef
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   options: [string, string][];
   fullValueOptions?: { value: string; label: string }[];
+  selectRef?: RefObject<HTMLSelectElement | null>;
 }) {
   const renderedOptions = fullValueOptions ?? options.map(([optionValue, optionLabel]) => ({ value: optionValue, label: optionLabel }));
   return (
     <label className="block">
       <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">{label}</span>
       <select
+        ref={selectRef}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         className="h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100 outline-none focus:border-amber-300"
@@ -654,11 +744,22 @@ function SelectControl({
   );
 }
 
-function DateControl({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+function DateControl({
+  label,
+  value,
+  onChange,
+  inputRef
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  inputRef?: RefObject<HTMLInputElement | null>;
+}) {
   return (
     <label className="block">
       <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">{label}</span>
       <input
+        ref={inputRef}
         type="date"
         value={value}
         onChange={(event) => onChange(event.target.value)}

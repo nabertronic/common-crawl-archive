@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
   Ban,
@@ -8,17 +8,20 @@ import {
   ChevronDown,
   Download,
   Clock,
+  FileArchive,
+  FileText,
   History as HistoryIcon,
   Info,
   List,
   Play,
   RotateCcw,
+  SlidersHorizontal,
   Square,
   Terminal,
   X
 } from "lucide-react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
   DEFAULT_MATCH_TYPE,
@@ -26,8 +29,8 @@ import {
   filterCollectionsByRecentMonths,
   isLikelyCommonCrawlAvailabilityIssue,
   isLikelyRateLimitError,
+  queryCollection,
   searchUrlCoversTarget,
-  searchCollections,
   type CollectionCheckResult,
   type CommonCrawlCapture,
   type CommonCrawlCollection,
@@ -46,10 +49,35 @@ import { CaptureRow, CaptureRowHeader, type SortOption } from "@/components/capt
 import { CalendarView } from "@/components/calendar-view";
 import { createMockSearchDataset, createMockWarcRecord, isMockCaptureFilename } from "@/lib/mock-data";
 import { APP_NAME, buildTabTitle, stripUrlForTitle } from "@/lib/app-meta";
-import { deleteSearches, getSearch, legacyScanSearchKey, legacyScanSearchKeys, listSearches, putSearch, scanSearchKey, searchKey, type StoredSearch } from "@/lib/capture-store";
+import {
+  coverageCaptures,
+  coverageResults,
+  addCoverageDuration,
+  deleteSearches,
+  ensureScanSession,
+  ensureTarget,
+  findOrCreateLegacySession,
+  getCoverage,
+  getScanSession,
+  getSearch,
+  legacyScanSearchKey,
+  legacyScanSearchKeys,
+  listSearches,
+  putSearch,
+  scanSearchKey,
+  searchKey,
+  subscribeToSearchChanges,
+  upsertCoverageResult,
+  type ScanSession,
+  type StoredSearch
+} from "@/lib/capture-store";
 import { dedupeCaptures, mergeCollectionResults, upsertCollectionResult } from "@/lib/scan-results";
 import { fetchAndParseWarcRecord } from "@/lib/warc";
 import { createZipBlob } from "@/lib/zip";
+import { robotsUrlForTarget, type RobotsCheckResult } from "@/lib/robots";
+import { readCachedRobotsStatus, writeCachedRobotsStatus } from "@/lib/robots-cache";
+import { findOptOutMatch, type OptOutMatch } from "@/lib/opt-out-registry";
+import { createLegacySearchHref, createSearchHref } from "@/lib/navigation-state";
 
 type ViewMode = "list" | "calendar";
 type ScanScope = "recent" | "all";
@@ -71,6 +99,10 @@ type SearchState =
   | "done"
   | "error";
 
+type RobotsUiState =
+  | { status: "checking"; robotsUrl?: string; checkedAt?: number }
+  | RobotsCheckResult;
+
 export type ArchiveSearchInitialParams = {
   url?: string;
   match?: string;
@@ -86,15 +118,7 @@ export type ArchiveSearchInitialParams = {
   sort?: string;
   view?: string;
   page?: string;
-};
-
-type ScanLockRecord = {
-  ownerId: string;
-  url: string;
-  matchType: MatchType;
-  scope: ScanScope;
-  startedAt: number;
-  expiresAt: number;
+  scan?: string;
 };
 
 const SORT_OPTIONS: { value: SortOption; label: string }[] = [
@@ -110,11 +134,12 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
   { value: "collection-asc", label: "Collection (oldest first)" }
 ];
 
-const SCAN_LOCK_NAME = "wayback-fallback:scan";
-const SCAN_LOCK_KEY = "wayback-fallback:active-scan-lock";
-const SCAN_LOCK_TTL_MS = 8000;
-const SCAN_LOCK_HEARTBEAT_MS = 2000;
 const AUTO_RETRY_INTERVAL_MS = 15 * 60 * 1000;
+
+function captureSize(capture: CommonCrawlCapture) {
+  const size = Number(capture.length);
+  return Number.isFinite(size) ? size : 0;
+}
 
 function compareCaptures(a: CommonCrawlCapture, b: CommonCrawlCapture, sort: SortOption) {
   switch (sort) {
@@ -123,9 +148,9 @@ function compareCaptures(a: CommonCrawlCapture, b: CommonCrawlCapture, sort: Sor
     case "timestamp-asc":
       return a.timestamp.localeCompare(b.timestamp);
     case "size-desc":
-      return Number(b.length) - Number(a.length);
+      return captureSize(b) - captureSize(a) || b.timestamp.localeCompare(a.timestamp);
     case "size-asc":
-      return Number(a.length) - Number(b.length);
+      return captureSize(a) - captureSize(b) || b.timestamp.localeCompare(a.timestamp);
     case "url-asc":
       return a.url.localeCompare(b.url);
     case "url-desc":
@@ -151,29 +176,38 @@ function normalizeInitialUrl(value: string | null) {
   return value?.trim() ?? "";
 }
 
-function browserInitialParams(): ArchiveSearchInitialParams {
-  if (typeof window === "undefined") return {};
-  const params = new URLSearchParams(window.location.search);
+type SearchParamReader = {
+  get(name: string): string | null;
+};
+
+function searchParamsToInitialParams(params?: SearchParamReader | null): ArchiveSearchInitialParams {
   return {
-    url: params.get("url") ?? undefined,
-    match: params.get("match") ?? undefined,
-    scope: params.get("scope") ?? undefined,
-    history: params.get("history") ?? undefined,
-    action: params.get("action") ?? undefined,
-    mock: params.get("mock") ?? undefined,
-    year: params.get("year") ?? undefined,
-    collection: params.get("collection") ?? undefined,
-    mime: params.get("mime") ?? undefined,
-    status: params.get("status") ?? undefined,
-    filter: params.get("filter") ?? undefined,
-    sort: params.get("sort") ?? undefined,
-    view: params.get("view") ?? undefined,
-    page: params.get("page") ?? undefined
+    url: params?.get("url") ?? undefined,
+    match: params?.get("match") ?? undefined,
+    scope: params?.get("scope") ?? undefined,
+    history: params?.get("history") ?? undefined,
+    action: params?.get("action") ?? undefined,
+    mock: params?.get("mock") ?? undefined,
+    year: params?.get("year") ?? undefined,
+    collection: params?.get("collection") ?? undefined,
+    mime: params?.get("mime") ?? undefined,
+    status: params?.get("status") ?? undefined,
+    filter: params?.get("filter") ?? undefined,
+    sort: params?.get("sort") ?? undefined,
+    view: params?.get("view") ?? undefined,
+    page: params?.get("page") ?? undefined,
+    scan: params?.get("scan") ?? undefined
   };
 }
 
-function resolveInitialParams(initialParams: ArchiveSearchInitialParams) {
-  return Object.keys(initialParams).length > 0 ? initialParams : browserInitialParams();
+function resolveInitialParams(initialParams: ArchiveSearchInitialParams, searchParams?: SearchParamReader | null) {
+  return Object.keys(initialParams).length > 0 ? initialParams : searchParamsToInitialParams(searchParams);
+}
+
+function isBackForwardNavigation() {
+  if (typeof performance === "undefined") return false;
+  const [navigation] = performance.getEntriesByType("navigation") as PerformanceNavigationTiming[];
+  return navigation?.type === "back_forward";
 }
 
 function normalizeInitialMatchType(value: string | null): MatchType | undefined {
@@ -212,20 +246,8 @@ function normalizeInitialPage(value: string | null) {
   return Number.isInteger(page) && page > 1 ? page : 1;
 }
 
-function buildSearchHref(url: string, matchType: MatchType, scope: ScanScope) {
-  const params = new URLSearchParams();
-  params.set("match", matchType);
-  if (scope === "all") params.set("scope", "all");
-  params.set("url", url);
-  return `/search?${params.toString()}`;
-}
-
 function buildMockSearchHref(url: string, matchType: MatchType) {
-  const params = new URLSearchParams();
-  params.set("mock", "1");
-  params.set("match", matchType);
-  params.set("url", url);
-  return `/search?${params.toString()}`;
+  return createLegacySearchHref({ url, matchType, mock: true, scope: "recent" });
 }
 
 function removeResult(results: CollectionCheckResult[], collectionId: string) {
@@ -240,6 +262,48 @@ function capturesFromResults(results: CollectionCheckResult[]) {
   return dedupeCaptures(results.flatMap((result) => result.captures));
 }
 
+// Rebuild per-collection scan-log entries from cached captures for records that
+// stored captures but no `results` (legacy/captures-only). Collections that
+// already have a real stored result are skipped so we never overwrite richer data.
+function synthesizeResultsFromCaptures(
+  captures: CommonCrawlCapture[],
+  existingResults: CollectionCheckResult[],
+  activeCollections: CommonCrawlCollection[],
+  checkedAt: number | undefined
+): CollectionCheckResult[] {
+  const existingIds = new Set(existingResults.map((result) => result.collection.id));
+  const collectionById = new Map(activeCollections.map((collection) => [collection.id, collection]));
+  const byCollection = new Map<string, CommonCrawlCapture[]>();
+  for (const capture of captures) {
+    if (existingIds.has(capture.collectionId)) continue;
+    const list = byCollection.get(capture.collectionId);
+    if (list) list.push(capture);
+    else byCollection.set(capture.collectionId, [capture]);
+  }
+  const synthesized: CollectionCheckResult[] = [];
+  for (const [collectionId, collectionCaptures] of byCollection) {
+    const collection =
+      collectionById.get(collectionId) ?? {
+        id: collectionId,
+        name: collectionCaptures[0]?.collectionName ?? collectionId,
+        cdxApi: "",
+        from: collectionCaptures[0]?.collectionFrom ?? "",
+        to: collectionCaptures[0]?.collectionTo ?? ""
+      };
+    synthesized.push({
+      collection,
+      status: "checked",
+      captures: collectionCaptures,
+      checkedAt,
+      httpStatus: 200,
+      attempts: 1,
+      runs: 1,
+      fromCache: true
+    });
+  }
+  return synthesized;
+}
+
 function capturesFromStoredRecords(records: StoredSearch[], activeCollections: CommonCrawlCollection[]) {
   const activeIds = new Set(activeCollections.map((collection) => collection.id));
   return dedupeCaptures(
@@ -247,6 +311,10 @@ function capturesFromStoredRecords(records: StoredSearch[], activeCollections: C
       .flatMap((record) => record.captures ?? [])
       .filter((capture) => activeIds.has(capture.collectionId))
   );
+}
+
+function capturesFromAnyStoredRecords(records: StoredSearch[]) {
+  return dedupeCaptures(records.flatMap((record) => record.captures ?? []));
 }
 
 function validStoredResults(results: CollectionCheckResult[] | undefined, collections: CommonCrawlCollection[]) {
@@ -267,24 +335,69 @@ function escapeCsvCell(value: string) {
   return `"${value.replaceAll('"', '""')}"`;
 }
 
-function downloadCaptureCsv(captures: CommonCrawlCapture[]) {
+type ExportScope = "filtered" | "all";
+type CaptureColumnKey =
+  | "url"
+  | "timestamp"
+  | "collection"
+  | "status"
+  | "mime"
+  | "digest"
+  | "warcUrl"
+  | "warcPosition";
+
+const CAPTURE_COLUMNS: {
+  key: CaptureColumnKey;
+  label: string;
+  value: (capture: CommonCrawlCapture) => string;
+}[] = [
+  { key: "url", label: "URL", value: (capture) => capture.url },
+  { key: "timestamp", label: "Timestamp", value: (capture) => capture.timestamp },
+  { key: "collection", label: "Collection", value: (capture) => capture.collectionId },
+  { key: "status", label: "Status", value: (capture) => capture.status },
+  { key: "mime", label: "MIME", value: (capture) => capture.mime },
+  { key: "digest", label: "Digest", value: (capture) => capture.digest ?? "" },
+  { key: "warcUrl", label: "WARC URL", value: (capture) => warcRecordUrl(capture.filename) },
+  {
+    key: "warcPosition",
+    label: "WARC Position",
+    value: (capture) => `offset=${capture.offset};length=${capture.length}`
+  }
+];
+
+const DEFAULT_EXPORT_COLUMNS: CaptureColumnKey[] = [
+  "url",
+  "collection",
+  "warcUrl",
+  "warcPosition"
+];
+
+function selectedExportColumns(columnKeys: CaptureColumnKey[]) {
+  // Preserve the canonical column order regardless of selection order.
+  return CAPTURE_COLUMNS.filter((column) => columnKeys.includes(column.key));
+}
+
+function buildCaptureExport(
+  captures: CommonCrawlCapture[],
+  columnKeys: CaptureColumnKey[]
+): { blob: Blob; filename: string } {
+  const columns = selectedExportColumns(columnKeys);
+  const date = new Date().toISOString().slice(0, 10);
+
   const rows = [
-    ["URL", "Collection", "WARC URL", "WARC Position"],
-    ...captures.map((capture) => [
-      capture.url,
-      capture.collectionId,
-      warcRecordUrl(capture.filename),
-      `offset=${capture.offset};length=${capture.length}`
-    ])
+    columns.map((column) => column.label),
+    ...captures.map((capture) => columns.map((column) => column.value(capture)))
   ];
   const csv = rows.map((row) => row.map(escapeCsvCell).join(",")).join("\n");
-  const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
-  const objectUrl = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = objectUrl;
-  link.download = `common-crawl-results-${new Date().toISOString().slice(0, 10)}.csv`;
-  link.click();
-  URL.revokeObjectURL(objectUrl);
+  return {
+    blob: new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" }),
+    filename: `common-crawl-results-${date}.csv`
+  };
+}
+
+function downloadCaptureExport(captures: CommonCrawlCapture[], columnKeys: CaptureColumnKey[]) {
+  const { blob, filename } = buildCaptureExport(captures, columnKeys);
+  downloadBlob(blob, filename);
 }
 
 function sanitizeArchiveFilename(value: string) {
@@ -466,117 +579,33 @@ function formatDuration(ms: number) {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
-function newOwnerId() {
-  return typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `${Date.now()}:${Math.random().toString(36).slice(2)}`;
+function formatLogTimestamp(value: number | undefined, withDate = false) {
+  if (!value) return "--:--:--";
+  const date = new Date(value);
+  const time = date.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+  if (!withDate) return time;
+  return `${date.toLocaleDateString()} ${time}`;
 }
 
-function getTabOwnerId() {
-  return newOwnerId();
+// Show the date alongside the time when any scan-log entry is from a day other
+// than today — i.e. a scan reopened from history, or one that ran across days.
+function scanLogNeedsDate(timestamps: (number | undefined)[]) {
+  const todayKey = new Date().toDateString();
+  return timestamps.some(
+    (value) => typeof value === "number" && new Date(value).toDateString() !== todayKey
+  );
 }
 
-function readScanLock(now = Date.now()): ScanLockRecord | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const value = window.localStorage.getItem(SCAN_LOCK_KEY);
-    if (!value) return null;
-    const record = JSON.parse(value) as Partial<ScanLockRecord>;
-    if (
-      typeof record.ownerId !== "string" ||
-      typeof record.url !== "string" ||
-      (record.matchType !== "exact" && record.matchType !== "host" && record.matchType !== "domain") ||
-      (record.scope !== "recent" && record.scope !== "all") ||
-      typeof record.startedAt !== "number" ||
-      typeof record.expiresAt !== "number"
-    ) {
-      window.localStorage.removeItem(SCAN_LOCK_KEY);
-      return null;
-    }
-    if (record.expiresAt <= now) {
-      window.localStorage.removeItem(SCAN_LOCK_KEY);
-      return null;
-    }
-    return record as ScanLockRecord;
-  } catch {
-    window.localStorage.removeItem(SCAN_LOCK_KEY);
-    return null;
-  }
-}
-
-function writeScanLock(ownerId: string, context: { url: string; matchType: MatchType; scope: ScanScope }) {
-  const now = Date.now();
-  const record: ScanLockRecord = {
-    ownerId,
-    url: context.url,
-    matchType: context.matchType,
-    scope: context.scope,
-    startedAt: now,
-    expiresAt: now + SCAN_LOCK_TTL_MS
-  };
-  window.localStorage.setItem(SCAN_LOCK_KEY, JSON.stringify(record));
-  return record;
-}
-
-function acquireLocalScanLock(ownerId: string, context: { url: string; matchType: MatchType; scope: ScanScope }) {
-  const existing = readScanLock();
-  if (existing && existing.ownerId !== ownerId) return false;
-  writeScanLock(ownerId, context);
-  return readScanLock()?.ownerId === ownerId;
-}
-
-function refreshLocalScanLock(ownerId: string, context: { url: string; matchType: MatchType; scope: ScanScope }, force = false) {
-  const existing = readScanLock();
-  if (!force && existing && existing.ownerId !== ownerId) return;
-  writeScanLock(ownerId, context);
-}
-
-function releaseLocalScanLock(ownerId: string) {
-  try {
-    if (typeof window === "undefined") return;
-    const value = window.localStorage.getItem(SCAN_LOCK_KEY);
-    if (!value) return;
-    const record = JSON.parse(value) as Partial<ScanLockRecord>;
-    if (record.ownerId === ownerId) {
-      window.localStorage.removeItem(SCAN_LOCK_KEY);
-    }
-  } catch {
-    window.localStorage.removeItem(SCAN_LOCK_KEY);
-  }
-}
-
-async function withSingleTabScanLock(
-  ownerId: string,
-  context: { url: string; matchType: MatchType; scope: ScanScope },
-  task: () => Promise<void>
-) {
-  const runWithVisibleLease = async (forceInitialLease = false) => {
-    refreshLocalScanLock(ownerId, context, forceInitialLease);
-    const heartbeat = window.setInterval(
-      () => refreshLocalScanLock(ownerId, context),
-      SCAN_LOCK_HEARTBEAT_MS
-    );
-    try {
-      await task();
-    } finally {
-      window.clearInterval(heartbeat);
-      releaseLocalScanLock(ownerId);
-    }
-  };
-
-  if (typeof navigator !== "undefined" && navigator.locks) {
-    let acquired = false;
-    await navigator.locks.request(SCAN_LOCK_NAME, { ifAvailable: true }, async (lock) => {
-      if (!lock) return;
-      acquired = true;
-      await runWithVisibleLease(true);
-    });
-    return acquired;
-  }
-
-  if (!acquireLocalScanLock(ownerId, context)) return false;
-  await runWithVisibleLease();
-  return true;
+// Widen the timestamp column when a date is shown so it stays on one line
+// instead of wrapping and making every row twice as tall.
+function scanLogRowClass(withDate: boolean) {
+  return `grid gap-2 px-3 py-2 text-xs text-zinc-400 ${
+    withDate ? "sm:grid-cols-[150px_130px_1fr]" : "sm:grid-cols-[74px_130px_1fr]"
+  }`;
 }
 
 export function ArchiveSearchApp({
@@ -587,7 +616,11 @@ export function ArchiveSearchApp({
   initialParams?: ArchiveSearchInitialParams;
 }) {
   const router = useRouter();
-  const routeParams = resolveInitialParams(initialParams);
+  const searchParams = useSearchParams();
+  const routeParams = useMemo(
+    () => resolveInitialParams(initialParams, searchParams),
+    [initialParams, searchParams]
+  );
   const initialUrl = normalizeInitialUrl(routeParams.url ?? null);
   const initialMatchType = normalizeInitialMatchType(routeParams.match ?? null);
   const initialScanScope = normalizeInitialScanScope(routeParams.scope ?? null);
@@ -597,6 +630,7 @@ export function ArchiveSearchApp({
   const initialViewMode = normalizeInitialViewMode(routeParams.view ?? null);
   const initialSortBy = normalizeInitialSort(routeParams.sort ?? null);
   const initialPage = normalizeInitialPage(routeParams.page ?? null);
+  const initialScanId = routeParams.scan;
   const startsFromSearchRoute = autoStart;
   const [targetUrl, setTargetUrl] = useState(initialUrl);
   const [matchType, setMatchType] = useState<MatchType>(initialMatchType ?? DEFAULT_MATCH_TYPE);
@@ -626,22 +660,122 @@ export function ArchiveSearchApp({
   const [scanLogOpen, setScanLogOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [scanStartedAt, setScanStartedAt] = useState<number | undefined>();
+  const [activeScanId, setActiveScanId] = useState(initialScanId ?? "");
   const [persistedScanScope, setPersistedScanScope] = useState<ScanScope>(initialScanScope);
   const [elapsedMs, setElapsedMs] = useState(0);
-  const [tabOwnerId, setTabOwnerId] = useState("");
-  const [activeScanLock, setActiveScanLock] = useState<ScanLockRecord | null>(null);
   const [autoRetryEnabled, setAutoRetryEnabled] = useState(true);
   const [nextAutoRetryAt, setNextAutoRetryAt] = useState<number | undefined>();
+  // True when the displayed results were loaded from storage (history) rather
+  // than scanned live this session. A stored view is static: no auto-retry
+  // countdown, no "paused/slow" notice, and no automatic API requests.
+  const [isStoredView, setIsStoredView] = useState(false);
+  const [robotsStatus, setRobotsStatus] = useState<RobotsUiState | null>(null);
+  const [optOutMatch, setOptOutMatch] = useState<OptOutMatch | null>(null);
+  // When an opt-out URL is opened from history, this holds the original scan's
+  // timestamp so the log/banner reflect the past scan rather than "now".
+  const [optOutCachedScanAt, setOptOutCachedScanAt] = useState<number | undefined>();
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [htmlZipDownload, setHtmlZipDownload] = useState<HtmlZipDownloadState>({
     active: false,
     completed: 0,
     total: 0
   });
+  const [exportScope, setExportScope] = useState<ExportScope>("filtered");
+  const [exportColumns, setExportColumns] = useState<CaptureColumnKey[]>(DEFAULT_EXPORT_COLUMNS);
+  const [exportOptionsOpen, setExportOptionsOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const robotsAbortRef = useRef<AbortController | null>(null);
   const htmlZipAbortRef = useRef<AbortController | null>(null);
-  const autoStartedRef = useRef(false);
+  const autoStartedSignatureRef = useRef<string | null>(null);
   const filterResetMountedRef = useRef(false);
+  const targetUrlInputRef = useRef<HTMLInputElement | null>(null);
+  const autoStartSignature = [
+    initialMockMode ? "mock" : "live",
+    initialUrl,
+    initialMatchType ?? DEFAULT_MATCH_TYPE,
+    initialScanScope,
+    initialHistoryMode ? "history" : "run",
+    initialAction ?? "fresh",
+    routeParams.year ?? "all",
+    routeParams.collection ?? "all",
+    routeParams.mime ?? "all",
+    routeParams.status ?? "all",
+    routeParams.filter ?? "",
+    routeParams.sort ?? "timestamp-desc",
+    routeParams.view ?? "list",
+    routeParams.page ?? "1",
+    routeParams.scan ?? ""
+  ].join("\u001f");
+
+  const syncRestoredTargetUrl = useCallback(() => {
+    const restoredUrl = targetUrlInputRef.current?.value.trim() ?? "";
+    if (!restoredUrl) return;
+    setTargetUrl((currentUrl) => (currentUrl.trim() ? currentUrl : restoredUrl));
+  }, []);
+
+  const applyRouteResultParams = useCallback(() => {
+    setYearFilter(routeParams.year ?? "all");
+    setCollectionFilter(routeParams.collection ?? "all");
+    setMimeFilter(routeParams.mime ?? "all");
+    setStatusFilter(routeParams.status ?? "all");
+    setUrlFilter(routeParams.filter ?? "");
+    setSortBy(normalizeInitialSort(routeParams.sort ?? null));
+    setViewMode(normalizeInitialViewMode(routeParams.view ?? null));
+    setPage(normalizeInitialPage(routeParams.page ?? null));
+  }, [
+    routeParams.collection,
+    routeParams.filter,
+    routeParams.mime,
+    routeParams.page,
+    routeParams.sort,
+    routeParams.status,
+    routeParams.view,
+    routeParams.year
+  ]);
+
+  const clearFreshHomeSearchState = useCallback(() => {
+    if (autoStart || initialUrl) return;
+    const input = targetUrlInputRef.current;
+    if (input && document.activeElement === input && input.value.trim()) return;
+    abortRef.current?.abort();
+    setTargetUrl("");
+    setMatchType(DEFAULT_MATCH_TYPE);
+    setCaptures([]);
+    setFailedResults([]);
+    setProgress({
+      checked: 0,
+      total: 0,
+      hits: 0,
+      failed: 0,
+      activeCollections: []
+    });
+    setState("idle");
+    setError("");
+    setYearFilter("all");
+    setCollectionFilter("all");
+    setMimeFilter("all");
+    setStatusFilter("all");
+    setUrlFilter("");
+    setSortBy("timestamp-desc");
+    setViewMode("list");
+    setScanScope("recent");
+    setPage(1);
+    setCheckedCollectionIds(new Set());
+    setScanLog([]);
+    setScanLogOpen(false);
+    setAdvancedOpen(false);
+    setScanStartedAt(undefined);
+    setActiveScanId("");
+    setPersistedScanScope("recent");
+    setElapsedMs(0);
+    setAutoRetryEnabled(true);
+    setNextAutoRetryAt(undefined);
+    setIsStoredView(false);
+    setRobotsStatus(null);
+    setOptOutMatch(null);
+    setOptOutCachedScanAt(undefined);
+    if (targetUrlInputRef.current) targetUrlInputRef.current.value = "";
+  }, [autoStart, initialUrl]);
 
   const filteredCaptures = useMemo(() => {
     const query = urlFilter.trim().toLowerCase();
@@ -655,6 +789,15 @@ export function ArchiveSearchApp({
     });
     return filtered.sort((a, b) => compareCaptures(a, b, sortBy));
   }, [captures, collectionFilter, mimeFilter, sortBy, statusFilter, urlFilter, yearFilter]);
+
+  const exportCaptures = exportScope === "all" ? captures : filteredCaptures;
+  const canExport = exportCaptures.length > 0;
+
+  const toggleExportColumn = useCallback((key: CaptureColumnKey) => {
+    setExportColumns((current) =>
+      current.includes(key) ? current.filter((column) => column !== key) : [...current, key]
+    );
+  }, []);
 
   const pageSize = 100;
   const totalPages = Math.max(1, Math.ceil(filteredCaptures.length / pageSize));
@@ -675,6 +818,27 @@ export function ArchiveSearchApp({
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
   }, [page, totalPages]);
+
+  useEffect(() => {
+    const syncOrClear = (restoreFromHistory: boolean) => {
+      if (restoreFromHistory) {
+        syncRestoredTargetUrl();
+        return;
+      }
+      clearFreshHomeSearchState();
+    };
+    syncOrClear(isBackForwardNavigation());
+    const animationFrameId = window.requestAnimationFrame(() => syncOrClear(isBackForwardNavigation()));
+    const timeoutId = window.setTimeout(() => syncOrClear(isBackForwardNavigation()), 100);
+    const handlePageShow = (event: PageTransitionEvent) => syncOrClear(event.persisted || isBackForwardNavigation());
+
+    window.addEventListener("pageshow", handlePageShow);
+    return () => {
+      window.cancelAnimationFrame(animationFrameId);
+      window.clearTimeout(timeoutId);
+      window.removeEventListener("pageshow", handlePageShow);
+    };
+  }, [clearFreshHomeSearchState, syncRestoredTargetUrl]);
 
   const filterOptions = useMemo(
     () => ({
@@ -710,42 +874,50 @@ export function ArchiveSearchApp({
     return loaded;
   }
 
-  async function loadStoredScan(url: string, activeMatchType: MatchType, activeScope: ScanScope) {
-    const loadedCollections = collections.length > 0 ? collections : await fetchCollections();
-    const activeCollections = collectionsForScope(loadedCollections, activeScope);
-    const storedRecords = await getStoredScanVariants(url, activeMatchType, false, activeScope);
-    const stored = storedRecords.reduce<StoredSearch | undefined>((latest, record) => {
-      if (!latest || record.updatedAt > latest.updatedAt) return record;
-      return latest;
-    }, undefined);
-    if (!stored) return false;
+  function applySessionFilters(session: ScanSession) {
+    setYearFilter(session.year ?? "all");
+    setCollectionFilter(session.collection ?? "all");
+    setMimeFilter(session.mime ?? "all");
+    setStatusFilter(session.status ?? "all");
+    setUrlFilter(session.filter ?? "");
+    setSortBy(normalizeInitialSort(session.sort ?? null));
+    setViewMode(normalizeInitialViewMode(session.view ?? null));
+    setPage(session.page && session.page > 1 ? session.page : 1);
+  }
 
-    const compatibleCaptureRecords = await getCompatibleStoredCaptureRecords(url, activeMatchType, false);
-    const storedResults = mergeStoredScanRecords(storedRecords, activeCollections);
-    const storedCaptures = dedupeCaptures([
-      ...capturesFromStoredRecords(compatibleCaptureRecords, activeCollections),
-      ...capturesFromResults(storedResults.filter((result) => result.status === "checked"))
-    ]);
-    const checkedIds = resultCollectionIds(storedResults);
-    const failed = storedResults.filter((result) => result.status === "not-checked");
-    const persistedAutoRetry = readAutoRetryState(url, activeMatchType, false, activeScope);
+  function applySessionIdentity(session: ScanSession) {
+    setActiveScanId(session.scanId);
+    setTargetUrl(session.url);
+    setMatchType(session.matchType);
+    setScanScope(session.scope);
+    setPersistedScanScope(session.scope);
+    applySessionFilters(session);
+  }
 
-    setTargetUrl(url);
-    setMatchType(activeMatchType);
-    setScanScope(activeScope);
-    setPersistedScanScope(activeScope);
+  async function applyCoverageToState(session: ScanSession, loadedCollections = collections) {
+    const activeCollections = collectionsForScope(loadedCollections, session.scope);
+    const activeIds = new Set(activeCollections.map((collection) => collection.id));
+    const coverage = await getCoverage(session.targetId);
+    const results = coverageResults(coverage).filter((result) => activeIds.has(result.collection.id));
+    const checkedIds = resultCollectionIds(results);
+    const failed = results.filter((result) => result.status === "not-checked");
+    const storedCaptures = dedupeCaptures(
+      coverageCaptures(coverage).filter((capture) => activeIds.has(capture.collectionId))
+    );
+
     setCollections(loadedCollections);
     setCaptures(storedCaptures);
     setFailedResults(failed);
     setCheckedCollectionIds(checkedIds);
-    setScanLog(storedResults);
-    setScanLogOpen(true);
+    setScanLog(results);
+    // The scan log always starts collapsed when restoring a stored scan; its
+    // open/closed state is intentionally not remembered across visits.
+    setScanLogOpen(false);
     setError("");
-    setState("done");
-    setScanStartedAt(stored?.updatedAt);
-    setElapsedMs(0);
-    setAutoRetryEnabled(persistedAutoRetry?.enabled ?? true);
-    setNextAutoRetryAt(persistedAutoRetry?.nextRetryAt);
+    setState(results.length > 0 ? "done" : startsFromSearchRoute ? "done" : "idle");
+    setIsStoredView(results.length > 0);
+    setScanStartedAt(coverage?.updatedAt);
+    setElapsedMs(coverage?.durationMs ?? 0);
     setProgress({
       checked: checkedIds.size,
       total: activeCollections.length,
@@ -753,11 +925,30 @@ export function ArchiveSearchApp({
       failed: failed.length,
       activeCollections: []
     });
+  }
+
+  async function loadSessionById(scanId: string) {
+    const session = await getScanSession(scanId);
+    if (!session) return false;
+    void checkRobotsForUrl(session.url);
+    const loadedCollections = collections.length > 0 ? collections : await fetchCollections();
+    applySessionIdentity(session);
+    await applyCoverageToState(session, loadedCollections);
+    return true;
+  }
+
+  async function loadStoredScan(url: string, activeMatchType: MatchType, activeScope: ScanScope) {
+    void checkRobotsForUrl(url);
+    const loadedCollections = collections.length > 0 ? collections : await fetchCollections();
+    const legacySession = await findOrCreateLegacySession(url, activeMatchType, false, activeScope);
+    applySessionIdentity(legacySession);
+    await applyCoverageToState(legacySession, loadedCollections);
     return true;
   }
 
   function loadMockResults(options: { url?: string; matchType?: MatchType; syncRoute?: boolean } = {}) {
     abortRef.current?.abort();
+    robotsAbortRef.current?.abort();
     const url = (options.url ?? targetUrl).trim() || "https://example.org/";
     const activeMatchType = options.matchType ?? matchType;
     const mock = createMockSearchDataset(url, activeMatchType);
@@ -774,13 +965,18 @@ export function ArchiveSearchApp({
     setFailedResults(mock.failedResults);
     setCheckedCollectionIds(checkedIds);
     setScanLog(mock.scanLog);
-    setScanLogOpen(true);
+    // The scan log only opens when the user expands it.
+    setScanLogOpen(false);
     setError("");
     setState("done");
+    setIsStoredView(true);
     setScanStartedAt(Date.now() - 129000);
     setElapsedMs(129000);
     setAutoRetryEnabled(persistedAutoRetry?.enabled ?? true);
     setNextAutoRetryAt(persistedAutoRetry?.nextRetryAt);
+    setRobotsStatus(null);
+    setOptOutMatch(null);
+    setOptOutCachedScanAt(undefined);
     setProgress({
       checked: mock.collections.length,
       total: mock.collections.length,
@@ -800,13 +996,34 @@ export function ArchiveSearchApp({
     mode: RunSearchMode = "fresh",
     options: { url?: string; matchType?: MatchType; scope?: ScanScope } = {}
   ) {
-    const url = (options.url ?? targetUrl).trim();
+    const fallbackUrl = targetUrl || targetUrlInputRef.current?.value || "";
+    const url = (options.url ?? fallbackUrl).trim();
     const activeMatchType = options.matchType ?? matchType;
     const activeScope = options.scope ?? scanScope;
     if (!url) return;
 
+    const session = await ensureScanSession({
+      scanId: mode === "fresh" ? undefined : activeScanId || undefined,
+      url,
+      matchType: activeMatchType,
+      mock: initialMockMode,
+      scope: activeScope,
+      year: yearFilter,
+      collection: collectionFilter,
+      mime: mimeFilter,
+      status: statusFilter,
+      filter: urlFilter,
+      sort: sortBy,
+      view: viewMode,
+      page: page > 1 ? page : undefined
+    });
+    applySessionIdentity(session);
+
     if (mode === "fresh") {
-      const nextHref = buildSearchHref(url, activeMatchType, activeScope);
+      const nextHref = createSearchHref({
+        session,
+        action: window.location.pathname === "/search" ? undefined : "fresh"
+      });
       const currentHref = `${window.location.pathname}${window.location.search}`;
       if (nextHref !== currentHref) {
         router.replace(nextHref);
@@ -814,31 +1031,26 @@ export function ArchiveSearchApp({
       }
     }
 
-    const ownerId = tabOwnerId || getTabOwnerId();
-    if (!tabOwnerId) setTabOwnerId(ownerId);
-    const ran = await withSingleTabScanLock(ownerId, { url, matchType: activeMatchType, scope: activeScope }, async () => {
-      setActiveScanLock(null);
-      await executeRunSearch(mode, { url, matchType: activeMatchType, scope: activeScope });
-    });
-    if (!ran) {
-      const currentLock = readScanLock();
-      setActiveScanLock(currentLock);
-      setError(formatScanLockError(currentLock));
-    }
+    setError("");
+    await executeRunSearch(mode, { session });
   }
 
   async function executeRunSearch(
     mode: RunSearchMode,
-    options: { url: string; matchType: MatchType; scope: ScanScope }
+    options: { session: ScanSession }
   ) {
-    const url = options.url;
-    const activeMatchType = options.matchType;
-    const activeScope = options.scope;
+    const session = options.session;
+    const url = session.url;
+    const activeMatchType = session.matchType;
+    const activeScope = session.scope;
 
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
+    void checkRobotsForUrl(url, controller.signal);
     setError("");
+    setOptOutMatch(null);
+    setIsStoredView(false);
     setScanScope(activeScope);
     setPersistedScanScope(activeScope);
     const startedAt = mode === "fresh" || !scanStartedAt ? Date.now() : scanStartedAt;
@@ -863,74 +1075,97 @@ export function ArchiveSearchApp({
     }
 
     try {
+      const activeOptOutMatch = await findOptOutMatch(url, activeMatchType, controller.signal);
+      if (activeOptOutMatch) {
+        const activeCollections = collectionsForScope(collections, activeScope);
+        const storedRecords = loadStoredForMode ? await getStoredScanVariants(url, activeMatchType, false, activeScope) : [];
+        const compatibleCaptureRecords = loadStoredForMode
+          ? await getCompatibleStoredCaptureRecords(url, activeMatchType, false)
+          : [];
+        const storedResults = activeCollections.length > 0
+          ? mergeStoredScanRecords(storedRecords, activeCollections)
+          : [];
+        const storedCaptures = loadStoredForMode
+          ? dedupeCaptures([
+              ...capturesFromAnyStoredRecords(compatibleCaptureRecords),
+              ...capturesFromResults(storedResults.filter((result) => result.status === "checked"))
+            ])
+          : captures;
+
+        // The opt-out check only blocks a *live re-scan*. The historical scan
+        // still happened, so rebuild its full per-collection log: stored
+        // `results` where present, plus entries synthesized from cached captures
+        // for collections that only stored captures (legacy/captures-only records).
+        const recordTimestamps = [...storedRecords, ...compatibleCaptureRecords]
+          .map((record) => record.updatedAt)
+          .filter((value): value is number => typeof value === "number");
+        const scannedAt = recordTimestamps.length > 0 ? Math.max(...recordTimestamps) : startedAt;
+        const reconstructedResults = [
+          ...storedResults,
+          ...synthesizeResultsFromCaptures(storedCaptures, storedResults, activeCollections, scannedAt)
+        ];
+        const storedCheckedIds = resultCollectionIds(reconstructedResults);
+        const storedFailedResults = reconstructedResults.filter((result) => result.status === "not-checked");
+        const optOutCoverage = await getCoverage(session.targetId);
+
+        setOptOutMatch(activeOptOutMatch);
+        setIsStoredView(true);
+        setOptOutCachedScanAt(storedCaptures.length > 0 ? scannedAt : undefined);
+        setElapsedMs(optOutCoverage?.durationMs ?? 0);
+        setCaptures(storedCaptures);
+        setFailedResults(storedFailedResults);
+        setCheckedCollectionIds(storedCheckedIds);
+        setScanLog(reconstructedResults);
+        // Restored historical scan (live re-scan blocked) stays collapsed.
+        setScanLogOpen(false);
+        setProgress({
+          checked: storedCheckedIds.size,
+          total: activeCollections.length,
+          hits: storedCaptures.length,
+          failed: storedFailedResults.length,
+          activeCollections: []
+        });
+        setState("done");
+        return;
+      }
+
       const loadedCollections = await loadCollectionsIfNeeded(controller);
       const activeCollections = collectionsForScope(loadedCollections, activeScope);
-      const storedRecords = loadStoredForMode ? await getStoredScanVariants(url, activeMatchType, false, activeScope) : [];
-      const compatibleCaptureRecords = loadStoredForMode
-        ? await getCompatibleStoredCaptureRecords(url, activeMatchType, false)
-        : [];
-      const storedResults = loadStoredForMode ? mergeStoredScanRecords(storedRecords, activeCollections) : [];
-      const storedCheckedResults = storedResults.filter((result) => result.status === "checked");
-      const storedFailedResults = storedResults.filter((result) => result.status === "not-checked");
-      const storedCheckedIds = resultCollectionIds(storedCheckedResults);
-      const storedResultIds = resultCollectionIds(storedResults);
-      let searchSet = activeCollections.filter((collection) => !storedCheckedIds.has(collection.id));
+      const target = await ensureTarget(url, activeMatchType, initialMockMode);
+      let coverage = await getCoverage(session.targetId);
+      let currentResults = coverageResults(coverage).filter((result) =>
+        activeCollections.some((collection) => collection.id === result.collection.id)
+      );
+      let currentCaptures = coverageCaptures(coverage).filter((capture) =>
+        activeCollections.some((collection) => collection.id === capture.collectionId)
+      );
+      let currentCheckedIds = resultCollectionIds(currentResults);
+      let currentFailedResults = currentResults.filter((result) => result.status === "not-checked");
+      const failedIds = new Set(currentFailedResults.map((result) => result.collection.id));
+      const attemptedIds = resultCollectionIds(currentResults);
+      let searchSet = activeCollections.filter((collection) => !currentCheckedIds.has(collection.id));
 
-      if (mode === "resume") {
-        searchSet = activeCollections.filter((collection) => !checkedCollectionIds.has(collection.id));
-      } else if (mode === "missing") {
-        searchSet = activeCollections.filter((collection) => !storedResultIds.has(collection.id));
+      if (mode === "missing") {
+        searchSet = activeCollections.filter((collection) => !attemptedIds.has(collection.id));
       } else if (mode === "retry-failed") {
-        const failedSource = loadStoredForMode
-          ? storedFailedResults
-          : failedResults.length > 0
-            ? failedResults
-            : scanLog.filter((result) => result.status === "not-checked");
-        const failedIds = new Set(failedSource.map((result) => result.collection.id));
         searchSet = activeCollections.filter((collection) => failedIds.has(collection.id));
-        setFailedResults((current) => current.filter((result) => !failedIds.has(result.collection.id)));
       } else if (mode === "auto-retry") {
-        const failedSource = loadStoredForMode
-          ? storedFailedResults
-          : failedResults.length > 0
-            ? failedResults
-            : scanLog.filter((result) => result.status === "not-checked");
-        const failedIds = new Set(failedSource.map((result) => result.collection.id));
-        const attemptedIds = loadStoredForMode ? storedResultIds : checkedCollectionIds;
-        searchSet = activeCollections.filter(
-          (collection) => failedIds.has(collection.id) || !attemptedIds.has(collection.id)
-        );
-        setFailedResults((current) => current.filter((result) => !failedIds.has(result.collection.id)));
+        searchSet = activeCollections.filter((collection) => failedIds.has(collection.id) || !attemptedIds.has(collection.id));
       }
 
-      const initialResults = loadStoredForMode ? storedResults : [];
-      const initialCaptures = loadStoredForMode
-        ? dedupeCaptures([
-            ...capturesFromStoredRecords(compatibleCaptureRecords, activeCollections),
-            ...capturesFromResults(storedCheckedResults)
-          ])
-        : captures;
-      const initialCheckedIds = loadStoredForMode ? storedResultIds : checkedCollectionIds;
-      const initialFailedResults = loadStoredForMode ? storedFailedResults : failedResults;
-      const rerunIds = new Set(searchSet.map((collection) => collection.id));
-      const retainedFailedCount =
-        mode === "retry-failed" || mode === "auto-retry"
-          ? 0
-          : initialFailedResults.filter((result) => !rerunIds.has(result.collection.id)).length;
-
-      if (loadStoredForMode && storedResults.length > 0) {
-        setCaptures(initialCaptures);
-        setFailedResults(storedFailedResults);
-        setCheckedCollectionIds(new Set(storedResultIds));
-        setScanLog(storedResults);
-        setScanLogOpen(true);
-      }
-
+      setCollections(loadedCollections);
+      setCaptures(currentCaptures);
+      setFailedResults(currentFailedResults);
+      setCheckedCollectionIds(currentCheckedIds);
+      setScanLog(currentResults);
+      // Stored coverage loaded before a (re)scan stays collapsed; the live scan
+      // loop below will expand it once new results start streaming in.
+      setScanLogOpen(false);
       setProgress({
-        checked: initialCheckedIds.size,
+        checked: currentCheckedIds.size,
         total: activeCollections.length,
-        hits: initialCaptures.length,
-        failed: retainedFailedCount,
+        hits: currentCaptures.length,
+        failed: currentFailedResults.length,
         activeCollections: []
       });
 
@@ -939,47 +1174,69 @@ export function ArchiveSearchApp({
         return;
       }
 
-      const baseCheckedIds = new Set(initialCheckedIds);
-      const baseHitCount = initialCaptures.length;
-      const runStatus: { stopReason: SearchStopReason } = { stopReason: "completed" };
-
       setState("running");
+      const runStartedAt = Date.now();
+      let consecutiveAvailabilitySignals = 0;
+      let stopReason: SearchStopReason = "completed";
 
-      await searchCollections({
-        targetUrl: url,
-        collections: searchSet,
-        signal: controller.signal,
-        matchType: activeMatchType,
-        onResult: (result) => {
-          baseCheckedIds.add(result.collection.id);
-          setCheckedCollectionIds(new Set(baseCheckedIds));
-          setScanLog((current) => upsertCollectionResult(current, result));
-          if (result.captures.length > 0) {
-            setCaptures((current) => dedupeCaptures([...current, ...result.captures]));
-          }
-          if (result.status === "not-checked") {
-            setFailedResults((current) => upsertCollectionResult(current, result));
-          } else {
-            setFailedResults((current) => removeResult(current, result.collection.id));
-          }
-        },
-        onProgress: (currentProgress) => {
-          setProgress({
-            ...currentProgress,
-            checked: baseCheckedIds.size,
-            total: activeCollections.length,
-            hits: baseHitCount + currentProgress.hits,
-            failed: retainedFailedCount + currentProgress.failed
-          });
-        },
-        onStop: (reason) => {
-          runStatus.stopReason = reason;
+      for (const collection of searchSet) {
+        if (controller.signal.aborted) break;
+
+        coverage = await getCoverage(session.targetId);
+        const existing = coverage?.collectionResults[collection.id];
+        if (existing?.status === "checked") {
+          currentResults = coverageResults(coverage).filter((result) =>
+            activeCollections.some((activeCollection) => activeCollection.id === result.collection.id)
+          );
+          currentCaptures = coverageCaptures(coverage).filter((capture) =>
+            activeCollections.some((activeCollection) => activeCollection.id === capture.collectionId)
+          );
+          currentCheckedIds = resultCollectionIds(currentResults);
+          setCaptures(currentCaptures);
+          setCheckedCollectionIds(currentCheckedIds);
+          setScanLog(currentResults);
+          continue;
         }
-      });
+
+        setProgress((current) => ({ ...current, activeCollections: [collection.id] }));
+        const result = await queryCollection(url, collection, controller.signal, undefined, undefined, undefined, undefined, activeMatchType);
+        coverage = await upsertCoverageResult(target, result);
+        currentResults = coverageResults(coverage).filter((storedResult) =>
+          activeCollections.some((activeCollection) => activeCollection.id === storedResult.collection.id)
+        );
+        currentCaptures = coverageCaptures(coverage).filter((capture) =>
+          activeCollections.some((activeCollection) => activeCollection.id === capture.collectionId)
+        );
+        currentCheckedIds = resultCollectionIds(currentResults);
+        currentFailedResults = currentResults.filter((storedResult) => storedResult.status === "not-checked");
+
+        setCaptures(currentCaptures);
+        setFailedResults(currentFailedResults);
+        setCheckedCollectionIds(currentCheckedIds);
+        setScanLog(currentResults);
+        setProgress({
+          checked: currentCheckedIds.size,
+          total: activeCollections.length,
+          hits: currentCaptures.length,
+          failed: currentFailedResults.length,
+          activeCollections: []
+        });
+
+        const availabilitySignal =
+          result.status === "not-checked" &&
+          isLikelyCommonCrawlAvailabilityIssue(result.error, result.httpStatus, result.errorKind);
+        consecutiveAvailabilitySignals = availabilitySignal ? consecutiveAvailabilitySignals + 1 : 0;
+        if (consecutiveAvailabilitySignals >= DEFAULT_CIRCUIT_BREAKER_THRESHOLD) {
+          stopReason = "circuit-breaker";
+          break;
+        }
+      }
+
+      void addCoverageDuration(target.targetId, Date.now() - runStartedAt);
 
       if (controller.signal.aborted) {
         setState("cancelled");
-      } else if (runStatus.stopReason === "circuit-breaker") {
+      } else if (stopReason === "circuit-breaker") {
         setState("paused");
       } else {
         setState("done");
@@ -992,6 +1249,68 @@ export function ArchiveSearchApp({
       setError(formatSearchError(err));
       setState("error");
     }
+  }
+
+  async function checkRobotsForUrl(url: string, parentSignal?: AbortSignal) {
+    const target = robotsUrlForTarget(url);
+    const cached = readCachedRobotsStatus(url);
+    if (cached) {
+      setRobotsStatus(cached);
+      return;
+    }
+
+    robotsAbortRef.current?.abort();
+    const controller = new AbortController();
+    robotsAbortRef.current = controller;
+    setRobotsStatus({ status: "checking", robotsUrl: target?.robotsUrl, checkedAt: Date.now() });
+
+    const abortFromParent = () => controller.abort(parentSignal?.reason);
+    if (parentSignal) {
+      if (parentSignal.aborted) {
+        controller.abort(parentSignal.reason);
+      } else {
+        parentSignal.addEventListener("abort", abortFromParent, { once: true });
+      }
+    }
+
+    try {
+      const result = await fetchRobotsStatusViaApi(url, controller.signal);
+      if (!controller.signal.aborted) {
+        writeCachedRobotsStatus(url, result);
+        setRobotsStatus(result);
+      }
+    } catch {
+      if (!controller.signal.aborted) {
+        const result: RobotsCheckResult = {
+          status: "unavailable",
+          robotsUrl: target?.robotsUrl,
+          userAgent: "CCBot",
+          error: "robots.txt could not be checked.",
+          checkedAt: Date.now()
+        };
+        writeCachedRobotsStatus(url, result);
+        setRobotsStatus(result);
+      }
+    } finally {
+      parentSignal?.removeEventListener("abort", abortFromParent);
+      if (robotsAbortRef.current === controller) robotsAbortRef.current = null;
+    }
+  }
+
+  async function fetchRobotsStatusViaApi(url: string, signal: AbortSignal): Promise<RobotsCheckResult> {
+    const response = await fetch(`/api/robots?${new URLSearchParams({ url }).toString()}`, {
+      headers: { Accept: "application/json" },
+      signal
+    });
+    const result = (await response.json()) as RobotsCheckResult;
+    if (response.ok) return result;
+    return {
+      status: "unavailable",
+      robotsUrl: "robotsUrl" in result ? result.robotsUrl : robotsUrlForTarget(url)?.robotsUrl,
+      userAgent: "CCBot",
+      error: "error" in result ? result.error : `Robots check endpoint returned HTTP ${response.status}.`,
+      checkedAt: Date.now()
+    };
   }
 
   async function downloadHtmlZip(capturesToDownload: CommonCrawlCapture[]) {
@@ -1068,39 +1387,39 @@ export function ArchiveSearchApp({
   }
 
   useEffect(() => {
-    const ownerId = getTabOwnerId();
-    setTabOwnerId(ownerId);
-    const refresh = () => {
-      const currentLock = readScanLock();
-      setActiveScanLock(currentLock?.ownerId === ownerId ? null : currentLock);
-    };
-    refresh();
-    const onStorage = (event: StorageEvent) => {
-      if (event.key === SCAN_LOCK_KEY) refresh();
-    };
-    const releaseCurrentLock = () => releaseLocalScanLock(ownerId);
-    window.addEventListener("storage", onStorage);
-    window.addEventListener("pagehide", releaseCurrentLock);
-    const intervalId = window.setInterval(refresh, SCAN_LOCK_HEARTBEAT_MS);
-    return () => {
-      window.removeEventListener("storage", onStorage);
-      window.removeEventListener("pagehide", releaseCurrentLock);
-      releaseCurrentLock();
-      window.clearInterval(intervalId);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (initialMockMode && !autoStartedRef.current) {
-      autoStartedRef.current = true;
+    if (initialScanId && autoStartedSignatureRef.current !== autoStartSignature) {
+      autoStartedSignatureRef.current = autoStartSignature;
+      void (async () => {
+        const loaded = await loadSessionById(initialScanId);
+        if (!loaded) {
+          setError("This scan session could not be found.");
+          setState("error");
+          return;
+        }
+        const session = await getScanSession(initialScanId);
+        if (!session || !initialAction) return;
+        if (initialAction === "fresh") {
+          await executeRunSearch("fresh", { session });
+        } else if (initialAction === "retry-failed") {
+          await runSearch("retry-failed", { url: session.url, matchType: session.matchType, scope: session.scope });
+        } else if (initialAction === "missing") {
+          await runSearch("missing", { url: session.url, matchType: session.matchType, scope: session.scope });
+        }
+      })();
+      return;
+    }
+    if (initialMockMode && autoStartedSignatureRef.current !== autoStartSignature) {
+      autoStartedSignatureRef.current = autoStartSignature;
+      applyRouteResultParams();
       loadMockResults({
         url: initialUrl || "https://example.org/",
         matchType: initialMatchType ?? DEFAULT_MATCH_TYPE
       });
       return;
     }
-    if (!autoStart || autoStartedRef.current || !initialUrl) return;
-    autoStartedRef.current = true;
+    if (!autoStart || !initialUrl || autoStartedSignatureRef.current === autoStartSignature) return;
+    autoStartedSignatureRef.current = autoStartSignature;
+    applyRouteResultParams();
     setTargetUrl(initialUrl);
     const nextMatchType = initialMatchType ?? DEFAULT_MATCH_TYPE;
     setMatchType(nextMatchType);
@@ -1121,7 +1440,7 @@ export function ArchiveSearchApp({
       await runSearch("fresh", { url: initialUrl, matchType: nextMatchType, scope: initialScanScope });
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoStart, initialUrl, initialMatchType, initialScanScope, initialHistoryMode, initialAction]);
+  }, [autoStart, autoStartSignature, initialScanId, initialUrl, initialMatchType, initialScanScope, initialHistoryMode, initialAction, initialMockMode, applyRouteResultParams]);
 
   const isRunning = state === "loading-collections" || state === "running";
   const currentFailedResults = scanLog.filter((result) => result.status === "not-checked");
@@ -1135,9 +1454,11 @@ export function ArchiveSearchApp({
   const hasGatewayTimeout = retryableFailedResults.some((result) => result.errorKind === "http_504_gateway_timeout");
   const hasSlowDown = retryableFailedResults.some((result) => result.errorKind === "http_500_slowdown");
   const failedCount = currentFailedResults.length;
+  // Only successfully checked sources count as "done" — a failed source still
+  // needs a (re)check, so it must not push completion to 100%.
+  const successfulCount = Math.max(0, checkedCollectionIds.size - failedCount);
   const uncheckedCount = Math.max(0, (scopedCollections.length || progress.total) - checkedCollectionIds.size);
-  const foreignScanLock = activeScanLock && activeScanLock.ownerId !== tabOwnerId ? activeScanLock : null;
-  const canResume = !isRunning && targetUrl.trim() && uncheckedCount > 0 && checkedCollectionIds.size > 0;
+  const canResume = !isRunning && !optOutMatch && targetUrl.trim() && uncheckedCount > 0 && checkedCollectionIds.size > 0;
   const canStartFresh = !isRunning && targetUrl.trim() && !canResume;
   const hasStartedSearch =
     state !== "idle" ||
@@ -1146,13 +1467,13 @@ export function ArchiveSearchApp({
     captures.length > 0 ||
     retryableFailedResults.length > 0;
   const hasCaptures = captures.length > 0;
-  const completion = progress.total > 0 ? Math.round((progress.checked / progress.total) * 100) : 0;
-  const canRetryFailed = !isRunning && retryableFailedResults.length > 0;
+  const completion = progress.total > 0 ? Math.round((successfulCount / progress.total) * 100) : 0;
+  const canRetryFailed = !isRunning && !optOutMatch && retryableFailedResults.length > 0;
   const hasAutoRetryWork = availabilityIssue && (retryableFailedResults.length > 0 || uncheckedCount > 0);
-  const canScheduleAutoRetry = !isRunning && Boolean(targetUrl.trim()) && hasAutoRetryWork;
+  const canScheduleAutoRetry = !isRunning && !isStoredView && Boolean(targetUrl.trim()) && hasAutoRetryWork;
   const canAutoRetryFailed = autoRetryEnabled && canScheduleAutoRetry;
   const autoRetryCountdown = nextAutoRetryAt ? formatDuration(nextAutoRetryAt - nowMs) : "";
-  const showAutoRetryAction = !isRunning && hasAutoRetryWork;
+  const showAutoRetryAction = !isRunning && !isStoredView && hasAutoRetryWork;
   const isWaitingForAutoRetry = canAutoRetryFailed && Boolean(nextAutoRetryAt);
   const scanNotice = isRunning || isWaitingForAutoRetry
     ? buildScanNotice({
@@ -1164,7 +1485,8 @@ export function ArchiveSearchApp({
         isWaitingForAutoRetry
       })
     : "";
-  const lockNotice = foreignScanLock ? formatScanLockError(foreignScanLock) : "";
+  const showOptOutNotice = Boolean(optOutMatch);
+  const scanLogCount = scanLog.length + (robotsStatus ? 1 : 0) + (optOutMatch ? 1 : 0);
   const resultsBackContext = useMemo<ResultsBackContext>(
     () => ({
       url: targetUrl.trim(),
@@ -1343,6 +1665,43 @@ export function ArchiveSearchApp({
     return () => window.clearTimeout(timer);
   }, [captures, collections, initialMockMode, matchType, persistedScanScope, scanLog, targetUrl]);
 
+  useEffect(() => {
+    const trimmedUrl = targetUrl.trim();
+    if (!activeScanId || !trimmedUrl) return;
+    const timer = window.setTimeout(() => {
+      void ensureScanSession({
+        scanId: activeScanId,
+        url: trimmedUrl,
+        matchType,
+        mock: initialMockMode,
+        scope: scanScope,
+        year: yearFilter,
+        collection: collectionFilter,
+        mime: mimeFilter,
+        status: statusFilter,
+        filter: urlFilter,
+        sort: sortBy,
+        view: viewMode,
+        page: page > 1 ? page : undefined
+      });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [
+    activeScanId,
+    collectionFilter,
+    initialMockMode,
+    matchType,
+    mimeFilter,
+    page,
+    scanScope,
+    sortBy,
+    statusFilter,
+    targetUrl,
+    urlFilter,
+    viewMode,
+    yearFilter
+  ]);
+
   return (
     <main
       className={
@@ -1383,21 +1742,33 @@ export function ArchiveSearchApp({
                 </div>
               </div>
               <div className="flex flex-col gap-2 sm:flex-row" suppressHydrationWarning>
-                <Input
-                  aria-label="URL to search"
-                  disabled={isRunning}
-                  value={targetUrl}
-                  placeholder="https://example.com/page"
-                  onChange={(event) => setTargetUrl(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") void runSearch("fresh", { scope: scanScope });
-                  }}
-                />
+                {hasStartedSearch ? (
+                  <div
+                    aria-label="Scanned URL"
+                    title={targetUrl}
+                    className="flex h-11 w-full items-center overflow-hidden rounded-md border border-zinc-800 bg-zinc-950 px-3 text-sm text-zinc-100"
+                  >
+                    <span className="truncate font-mono">{targetUrl}</span>
+                  </div>
+                ) : (
+                  <Input
+                    ref={targetUrlInputRef}
+                    aria-label="URL to search"
+                    disabled={isRunning}
+                    value={targetUrl}
+                    placeholder="https://example.com/page"
+                    autoComplete="off"
+                    onChange={(event) => setTargetUrl(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") void runSearch("fresh", { url: event.currentTarget.value, scope: scanScope });
+                    }}
+                  />
+                )}
                 {!hasStartedSearch ? (
                   <Button
                     className="h-11 shrink-0 whitespace-nowrap"
                     disabled={!canStartFresh}
-                    onClick={() => void runSearch("fresh", { scope: scanScope })}
+                    onClick={() => void runSearch("fresh", { url: targetUrlInputRef.current?.value, scope: scanScope })}
                   >
                     <Play size={16} />
                     Start scan
@@ -1430,7 +1801,7 @@ export function ArchiveSearchApp({
               <div className="flex h-11 divide-x divide-zinc-800 overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/60 lg:w-[360px]">
                 <Stat
                   label="Sources"
-                  value={`${progress.checked}/${progress.total || collections.length || "?"}`}
+                  value={`${successfulCount}/${progress.total || collections.length || "?"}`}
                 />
                 <Stat label="Snapshots" value={String(captures.length)} tone={captures.length === 0 ? "neutral" : "green"} />
                 <Stat label="Failed" value={String(failedCount)} tone={failedCount > 0 ? "red" : "neutral"} />
@@ -1458,7 +1829,7 @@ export function ArchiveSearchApp({
                   size={14}
                   className={scanLogOpen ? "rotate-180 transition-transform" : "transition-transform"}
                 />
-                Scan log ({scanLog.length})
+                Scan log ({scanLogCount})
               </button>
               <div className="flex flex-wrap items-center justify-end gap-3">
                 <p>
@@ -1475,12 +1846,42 @@ export function ArchiveSearchApp({
               {scanNotice}
             </p>
           ) : null}
-          {lockNotice ? (
-            <p className="mt-3 rounded-md border border-amber-300/30 bg-amber-300/10 p-2 text-xs leading-5 text-amber-100">
-              {lockNotice}
+          {showOptOutNotice ? (
+            <p className="mt-3 rounded-md border border-red-300/30 bg-red-300/10 p-2 text-xs leading-5 text-red-100">
+              This URL is not expected to be in the Common Crawl dataset because it is on the Common Crawl Foundation{" "}
+              <a
+                href="https://commoncrawl.org/blog/common-crawl-foundation-opt-out-registry"
+                target="_blank"
+                rel="noreferrer"
+                className="underline underline-offset-2 hover:text-red-50"
+              >
+                opt-out registry
+              </a>
+              .
             </p>
           ) : null}
-          {hasStartedSearch && scanLogOpen ? <ScanLog results={scanLog} /> : null}
+          {showOptOutNotice && optOutCachedScanAt && captures.length > 0 ? (
+            <p className="mt-3 rounded-md border border-amber-300/30 bg-amber-300/10 p-2 text-xs leading-5 text-amber-100">
+              Showing {captures.length} cached snapshot{captures.length === 1 ? "" : "s"} from a scan on{" "}
+              {new Date(optOutCachedScanAt).toLocaleString([], {
+                year: "numeric",
+                month: "short",
+                day: "numeric",
+                hour: "2-digit",
+                minute: "2-digit"
+              })}
+              .
+            </p>
+          ) : null}
+          {hasStartedSearch && scanLogOpen ? (
+            <ScanLog
+              results={scanLog}
+              robotsStatus={robotsStatus}
+              optOutMatch={optOutMatch}
+              optOutCheckedAt={optOutCachedScanAt ?? scanStartedAt}
+              optOutCachedCount={captures.length}
+            />
+          ) : null}
           {error ? (
             <div className="mt-3 flex items-start gap-2 text-sm text-red-200">
               <p className="flex-1">{error}</p>
@@ -1524,22 +1925,38 @@ export function ArchiveSearchApp({
                   <Download size={14} />
                   Exports
                 </div>
+
                 {htmlZipDownload.active ? (
-                  <p className="mt-1 text-xs text-amber-200">
-                    Downloading HTML {htmlZipDownload.completed}/{htmlZipDownload.total}
-                  </p>
+                  <div className="mt-2">
+                    <p className="text-xs text-amber-200">
+                      Downloading HTML {htmlZipDownload.completed}/{htmlZipDownload.total}
+                    </p>
+                    <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
+                      <div
+                        className="h-full rounded-full bg-amber-300 transition-all"
+                        style={{
+                          width: `${
+                            htmlZipDownload.total > 0
+                              ? Math.round((htmlZipDownload.completed / htmlZipDownload.total) * 100)
+                              : 0
+                          }%`
+                        }}
+                      />
+                    </div>
+                  </div>
                 ) : htmlZipDownload.error ? (
-                  <p className="mt-1 text-xs text-red-200">{htmlZipDownload.error}</p>
+                  <p className="mt-2 text-xs text-red-200">{htmlZipDownload.error}</p>
                 ) : null}
+
                 <div className="mt-3 grid gap-2">
                   <Button
                     size="sm"
                     variant="secondary"
-                    disabled={filteredCaptures.length === 0 || htmlZipDownload.active}
-                    onClick={() => downloadCaptureCsv(filteredCaptures)}
+                    disabled={!canExport || htmlZipDownload.active || exportColumns.length === 0}
+                    onClick={() => downloadCaptureExport(exportCaptures, exportColumns)}
                     className="justify-center"
                   >
-                    <Download size={14} />
+                    <FileText size={14} />
                     Export CSV
                   </Button>
                   {htmlZipDownload.active ? (
@@ -1556,15 +1973,83 @@ export function ArchiveSearchApp({
                     <Button
                       size="sm"
                       variant="secondary"
-                      disabled={filteredCaptures.length === 0}
-                      onClick={() => void downloadHtmlZip(filteredCaptures)}
+                      disabled={!canExport}
+                      onClick={() => void downloadHtmlZip(exportCaptures)}
                       className="justify-center"
                     >
-                      <Download size={14} />
-                      Download HTML ZIP
+                      <FileArchive size={14} />
+                      Download HTML ZIP{canExport ? ` (${exportCaptures.length})` : ""}
                     </Button>
                   )}
                 </div>
+
+                {!canExport ? (
+                  <p className="mt-2 text-[11px] text-zinc-500">
+                    {exportScope === "all"
+                      ? "No captures to export yet — run a search first."
+                      : "No captures in the current filter view — loosen the filters."}
+                  </p>
+                ) : null}
+
+                <button
+                  type="button"
+                  onClick={() => setExportOptionsOpen((open) => !open)}
+                  aria-expanded={exportOptionsOpen}
+                  className="mt-3 flex w-full items-center justify-between gap-2 text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-400 transition hover:text-zinc-200"
+                >
+                  <span className="inline-flex items-center gap-1.5">
+                    <SlidersHorizontal size={12} />
+                    Options
+                  </span>
+                  <ChevronDown
+                    size={14}
+                    className={exportOptionsOpen ? "rotate-180 transition" : "transition"}
+                  />
+                </button>
+
+                {exportOptionsOpen ? (
+                  <div className="mt-3 space-y-3 border-t border-zinc-800 pt-3">
+                    <div>
+                      <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">
+                        Scope
+                      </span>
+                      <SegmentedToggle
+                        ariaLabel="Export scope"
+                        value={exportScope}
+                        onChange={setExportScope}
+                        options={[
+                          { value: "filtered", label: `Filtered (${filteredCaptures.length})` },
+                          { value: "all", label: `All (${captures.length})` }
+                        ]}
+                      />
+                    </div>
+
+                    <div>
+                      <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">
+                        CSV columns
+                      </span>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {CAPTURE_COLUMNS.map((column) => (
+                          <label
+                            key={column.key}
+                            className="flex cursor-pointer items-center gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-300 transition hover:border-zinc-600"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={exportColumns.includes(column.key)}
+                              onChange={() => toggleExportColumn(column.key)}
+                              className="h-3.5 w-3.5 accent-amber-300"
+                            />
+                            {column.label}
+                          </label>
+                        ))}
+                      </div>
+                      {exportColumns.length === 0 ? (
+                        <p className="mt-1 text-[10px] text-amber-200">Select at least one column.</p>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
               </section>
             </aside>
 
@@ -1587,7 +2072,7 @@ export function ArchiveSearchApp({
                   </div>
                 </div>
               ) : viewMode === "calendar" ? (
-                <CalendarView captures={filteredCaptures} backContext={resultsBackContext} />
+                <CalendarView captures={filteredCaptures} backContext={resultsBackContext} scanId={activeScanId || undefined} />
               ) : (
                 <>
                   <CaptureRowHeader sort={sortBy} onSortChange={setSortBy} />
@@ -1597,6 +2082,7 @@ export function ArchiveSearchApp({
                         key={`${capture.collectionId}:${capture.timestamp}:${capture.filename}:${capture.offset}`}
                         capture={capture}
                         backContext={resultsBackContext}
+                        scanId={activeScanId || undefined}
                       />
                     ))}
                   </div>
@@ -1673,13 +2159,6 @@ function formatSearchError(error: unknown) {
   return message || "Search failed";
 }
 
-function formatScanLockError(lock: ScanLockRecord | null) {
-  if (!lock) return "A scan is already running in another tab. Wait until it finishes or cancel it there.";
-  const target = stripUrlForTitle(lock.url);
-  const scope = lock.scope === "all" ? "full scan" : "recent scan";
-  return `A ${scope} is already running in another tab${target ? ` for ${target}` : ""}. Wait until it finishes or cancel it there.`;
-}
-
 function buildScanNotice({
   failedCount,
   hasExplicitRateLimit,
@@ -1714,20 +2193,99 @@ function buildScanNotice({
     : `${issueText} The scan is still running. Retry failed items later if needed.`;
 }
 
-function ScanLog({ results }: { results: CollectionCheckResult[] }) {
+function robotsStatusHeadline(status: RobotsUiState) {
+  if (status.status === "checking") return "Checking current CCBot policy...";
+  if (status.status === "blocked") return "Common Crawl is currently blocked for this URL, but earlier crawls may have been allowed.";
+  if (status.status === "allowed") return "Common Crawl is currently allowed for this URL, but this may have differed in the past.";
+  if (status.status === "no-robots") return "No robots.txt found, so Common Crawl is currently allowed by default.";
+  return "Current CCBot policy could not be checked.";
+}
+
+function robotsStatusDetail(status: RobotsUiState) {
+  if (status.status === "checking") return "";
+  if (status.status === "unavailable") {
+    return status.error;
+  }
+  if (status.status === "no-robots") return "";
+  if (status.matchedRule) return `${status.matchedRule.directive}: ${status.matchedRule.path}`;
+  return "";
+}
+
+function robotsStatusTone(status: RobotsUiState) {
+  if (status.status === "blocked" || status.status === "unavailable") return "text-red-200";
+  if (status.status === "allowed" || status.status === "no-robots") return "text-emerald-200";
+  return "text-amber-200";
+}
+
+function RobotsScanLogEntry({ status, withDate = false }: { status: RobotsUiState; withDate?: boolean }) {
+  const detail = robotsStatusDetail(status);
+  return (
+    <div className={scanLogRowClass(withDate)}>
+      <p className="whitespace-nowrap font-mono text-[11px] text-zinc-500">{formatLogTimestamp(status.checkedAt, withDate)}</p>
+      <p className="whitespace-nowrap font-semibold text-zinc-200">CCBot robots.txt</p>
+      <p className={robotsStatusTone(status)}>
+        {robotsStatusHeadline(status)}
+        {detail ? <span className="ml-1 text-zinc-500">({detail})</span> : null}
+      </p>
+    </div>
+  );
+}
+
+function OptOutScanLogEntry({
+  checkedAt,
+  cachedCount,
+  withDate = false
+}: {
+  checkedAt: number | undefined;
+  cachedCount: number;
+  withDate?: boolean;
+}) {
+  return (
+    <div className={scanLogRowClass(withDate)}>
+      <p className="whitespace-nowrap font-mono text-[11px] text-zinc-500">{formatLogTimestamp(checkedAt, withDate)}</p>
+      <p className="whitespace-nowrap font-semibold text-zinc-200">Opt-out registry</p>
+      <p className="text-red-200">
+        {cachedCount > 0
+          ? `URL is on the Common Crawl opt-out registry, so it can't be crawled. The ${cachedCount} snapshot${cachedCount === 1 ? "" : "s"} below are from a previous scan.`
+          : "Scan aborted — URL is on the Common Crawl opt-out registry."}
+      </p>
+    </div>
+  );
+}
+
+function ScanLog({
+  results,
+  robotsStatus,
+  optOutMatch,
+  optOutCheckedAt,
+  optOutCachedCount = 0
+}: {
+  results: CollectionCheckResult[];
+  robotsStatus?: RobotsUiState | null;
+  optOutMatch?: OptOutMatch | null;
+  optOutCheckedAt?: number;
+  optOutCachedCount?: number;
+}) {
+  const showDate = scanLogNeedsDate([
+    ...results.map((result) => result.checkedAt),
+    robotsStatus?.checkedAt,
+    optOutMatch ? optOutCheckedAt : undefined
+  ]);
   return (
     <section className="mt-3 rounded-md border border-zinc-800 bg-zinc-950/70">
       <div className="max-h-64 overflow-auto thin-scrollbar">
-        {results.length === 0 ? (
+        {results.length === 0 && !robotsStatus && !optOutMatch ? (
           <p className="p-3 text-xs text-zinc-500">No collections checked yet.</p>
         ) : (
           <div className="divide-y divide-zinc-900">
+            {robotsStatus ? <RobotsScanLogEntry status={robotsStatus} withDate={showDate} /> : null}
+            {optOutMatch ? (
+              <OptOutScanLogEntry checkedAt={optOutCheckedAt} cachedCount={optOutCachedCount} withDate={showDate} />
+            ) : null}
             {results.map((result, index) => (
-              <div
-                key={`${result.collection.id}:${index}`}
-                className="grid gap-2 px-3 py-2 text-xs text-zinc-400 sm:grid-cols-[170px_1fr]"
-              >
-                <p className="font-semibold text-zinc-200">{result.collection.id}</p>
+              <div key={`${result.collection.id}:${index}`} className={scanLogRowClass(showDate)}>
+                <p className="whitespace-nowrap font-mono text-[11px] text-zinc-500">{formatLogTimestamp(result.checkedAt, showDate)}</p>
+                <p className="whitespace-nowrap font-semibold text-zinc-200">{result.collection.id}</p>
                 <p
                   className={
                     result.status === "not-checked"
@@ -1845,6 +2403,45 @@ function SortSelect({ value, onChange }: { value: SortOption; onChange: (value: 
         ))}
       </select>
     </label>
+  );
+}
+
+function SegmentedToggle<T extends string>({
+  options,
+  value,
+  onChange,
+  ariaLabel
+}: {
+  options: { value: T; label: string }[];
+  value: T;
+  onChange: (value: T) => void;
+  ariaLabel?: string;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label={ariaLabel}
+      className="inline-flex w-full items-center overflow-hidden rounded-md border border-zinc-700 bg-zinc-950"
+    >
+      {options.map((option) => {
+        const active = option.value === value;
+        return (
+          <button
+            key={option.value}
+            type="button"
+            aria-pressed={active}
+            onClick={() => onChange(option.value)}
+            className={
+              active
+                ? "flex h-8 flex-1 items-center justify-center px-2 text-xs font-bold uppercase tracking-[0.1em] text-zinc-950 bg-amber-300"
+                : "flex h-8 flex-1 items-center justify-center px-2 text-xs font-semibold uppercase tracking-[0.1em] text-zinc-300 transition hover:text-amber-100"
+            }
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

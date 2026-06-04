@@ -3,10 +3,23 @@ import {
   legacyScanSearchKey,
   legacyScanSearchKeys,
   legacyUnscopedScanSearchKey,
-  scanSearchKey
+  scanSearchKey,
+  targetIdFor
 } from "@/lib/capture-store";
 
 describe("capture store keys", () => {
+  it("builds stable target ids from url, match type, and mock mode", () => {
+    expect(targetIdFor("https://example.com/", "exact", false)).toBe(
+      targetIdFor("https://example.com/", "exact", false)
+    );
+    expect(targetIdFor("https://example.com/", "exact", false)).not.toBe(
+      targetIdFor("https://example.com/", "host", false)
+    );
+    expect(targetIdFor("https://example.com/", "exact", false)).not.toBe(
+      targetIdFor("https://example.com/", "exact", true)
+    );
+  });
+
   it("keeps recent and full scan records in separate canonical keys", () => {
     const recent = scanSearchKey("https://example.com/", "domain", false, "recent");
     const full = scanSearchKey("https://example.com/", "domain", false, "all");

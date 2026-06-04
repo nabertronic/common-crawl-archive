@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
-import { appendResultsBackContext, captureToViewerParams, type CommonCrawlCapture, type ResultsBackContext } from "@/lib/common-crawl";
+import { type CommonCrawlCapture, type ResultsBackContext } from "@/lib/common-crawl";
+import { createViewerHref } from "@/lib/navigation-state";
 
 type DateParts = {
   year: number;
@@ -77,7 +78,15 @@ function parseDayKey(key: string): DateParts | null {
   return { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) };
 }
 
-export function CalendarView({ captures, backContext }: { captures: CommonCrawlCapture[]; backContext: ResultsBackContext }) {
+export function CalendarView({
+  captures,
+  backContext,
+  scanId
+}: {
+  captures: CommonCrawlCapture[];
+  backContext: ResultsBackContext;
+  scanId?: string;
+}) {
   const { byDay, byYear, byMonth, years, firstDate, lastDate } = useMemo(() => {
     const byDayMap = new Map<string, CommonCrawlCapture[]>();
     const byYearMap = new Map<number, number>();
@@ -137,9 +146,7 @@ export function CalendarView({ captures, backContext }: { captures: CommonCrawlC
     if (!dayCaptures || dayCaptures.length === 0) return null;
     const sorted = [...dayCaptures].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     const target = sorted.find((c) => !/^3\d\d$/.test(c.status)) ?? sorted[0];
-    const params = captureToViewerParams(target);
-    appendResultsBackContext(params, backContext);
-    return `/view?${params.toString()}`;
+    return createViewerHref(target, { scanId, legacyBackContext: backContext });
   };
 
   const yearStripRange = useMemo(() => {
@@ -200,6 +207,7 @@ export function CalendarView({ captures, backContext }: { captures: CommonCrawlC
             byDay={byDay}
             selectedDay={selectedDay}
             backContext={backContext}
+            scanId={scanId}
             onSelectDay={(key) => setSelectedDay((current) => (current === key ? null : key))}
             onClose={() => setSelectedDay(null)}
           />
@@ -253,12 +261,13 @@ function YearStrip({
   const barAreaHeight = 64;
 
   return (
-    <div className="mt-4 flex items-end justify-center gap-2">
+    <div className="mt-4 flex items-start justify-center gap-2">
       <button
         type="button"
         disabled={!canPrev}
         onClick={() => canPrev && onSelect(years[selectedIndex - 1])}
         aria-label="Previous year"
+        style={{ marginTop: `${(barAreaHeight - 32) / 2}px` }}
         className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-zinc-800 bg-zinc-950 text-zinc-300 transition hover:border-amber-300 hover:text-amber-100 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:border-zinc-800 disabled:hover:text-zinc-300"
       >
         <ChevronLeft size={14} />
@@ -324,6 +333,7 @@ function YearStrip({
         disabled={!canNext}
         onClick={() => canNext && onSelect(years[selectedIndex + 1])}
         aria-label="Next year"
+        style={{ marginTop: `${(barAreaHeight - 32) / 2}px` }}
         className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-zinc-800 bg-zinc-950 text-zinc-300 transition hover:border-amber-300 hover:text-amber-100 disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:border-zinc-800 disabled:hover:text-zinc-300"
       >
         <ChevronRight size={14} />
@@ -338,6 +348,7 @@ function MonthGrid({
   byDay,
   selectedDay,
   backContext,
+  scanId,
   onSelectDay,
   onClose
 }: {
@@ -346,6 +357,7 @@ function MonthGrid({
   byDay: Map<string, CommonCrawlCapture[]>;
   selectedDay: string | null;
   backContext: ResultsBackContext;
+  scanId?: string;
   onSelectDay: (key: string) => void;
   onClose: () => void;
 }) {
@@ -389,6 +401,7 @@ function MonthGrid({
                 isSelected={isSelected}
                 dotClass={dotClass}
                 backContext={backContext}
+                scanId={scanId}
                 onSelectDay={onSelectDay}
                 onClose={onClose}
               />
@@ -412,6 +425,7 @@ function DayCell({
   isSelected,
   dotClass,
   backContext,
+  scanId,
   onSelectDay,
   onClose
 }: {
@@ -421,6 +435,7 @@ function DayCell({
   isSelected: boolean;
   dotClass: string;
   backContext: ResultsBackContext;
+  scanId?: string;
   onSelectDay: (key: string) => void;
   onClose: () => void;
 }) {
@@ -454,7 +469,7 @@ function DayCell({
       >
         {day}
       </button>
-      {isSelected ? <DayPopover dateKey={dateKey} captures={captures} backContext={backContext} /> : null}
+      {isSelected ? <DayPopover dateKey={dateKey} captures={captures} backContext={backContext} scanId={scanId} /> : null}
     </div>
   );
 }
@@ -462,11 +477,13 @@ function DayCell({
 function DayPopover({
   dateKey,
   captures,
-  backContext
+  backContext,
+  scanId
 }: {
   dateKey: string;
   captures: CommonCrawlCapture[];
   backContext: ResultsBackContext;
+  scanId?: string;
 }) {
   const parts = parseDayKey(dateKey);
   const sorted = useMemo(
@@ -491,9 +508,7 @@ function DayPopover({
           {sorted.map((capture) => {
             const time = formatCaptureTime(capture.timestamp);
             const isRedirect = /^3\d\d$/.test(capture.status);
-            const dayViewerParams = captureToViewerParams(capture);
-            appendResultsBackContext(dayViewerParams, backContext);
-            const viewerUrl = `/view?${dayViewerParams.toString()}`;
+            const viewerUrl = createViewerHref(capture, { scanId, legacyBackContext: backContext });
             return (
               <li
                 key={`${capture.collectionId}:${capture.timestamp}:${capture.filename}:${capture.offset}`}

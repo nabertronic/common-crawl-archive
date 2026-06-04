@@ -1,7 +1,8 @@
 "use client";
 
 import { ArrowDown, ArrowUp, ArrowUpRight, ChevronsUpDown, CornerDownRight } from "lucide-react";
-import { appendResultsBackContext, captureToViewerParams, type CommonCrawlCapture, type ResultsBackContext } from "@/lib/common-crawl";
+import { type CommonCrawlCapture, type ResultsBackContext } from "@/lib/common-crawl";
+import { createLegacySearchHref, createViewerHref } from "@/lib/navigation-state";
 import { describeHttpStatus, formatBytes, formatTimestamp } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { LinkButton } from "@/components/ui/button";
@@ -82,10 +83,16 @@ function SortHeader({
   );
 }
 
-export function CaptureRow({ capture, backContext }: { capture: CommonCrawlCapture; backContext: ResultsBackContext }) {
-  const viewerParams = captureToViewerParams(capture);
-  appendResultsBackContext(viewerParams, backContext);
-  const viewerUrl = `/view?${viewerParams.toString()}`;
+export function CaptureRow({
+  capture,
+  backContext,
+  scanId
+}: {
+  capture: CommonCrawlCapture;
+  backContext: ResultsBackContext;
+  scanId?: string;
+}) {
+  const viewerUrl = createViewerHref(capture, { scanId, legacyBackContext: backContext });
   const isRedirect = /^3\d\d$/.test(capture.status);
   const statusTone = capture.status === "200" ? "green" : isRedirect ? "amber" : "neutral";
   const followTarget = capture.redirect ?? "";
@@ -176,12 +183,12 @@ export function CaptureRow({ capture, backContext }: { capture: CommonCrawlCaptu
 }
 
 function buildFollowSearchHref(targetUrl: string, context: ResultsBackContext) {
-  const params = new URLSearchParams();
-  if (context.mock) params.set("mock", context.mock);
-  if (context.match) params.set("match", context.match);
-  if (context.scope === "all") params.set("scope", context.scope);
-  params.set("url", targetUrl);
-  return `/search?${params.toString()}`;
+  return createLegacySearchHref({
+    url: targetUrl,
+    matchType: context.match === "host" || context.match === "domain" ? context.match : "exact",
+    mock: context.mock === "1",
+    scope: context.scope === "all" ? "all" : "recent"
+  });
 }
 
 function formatTimestampCompact(timestamp: string): string {

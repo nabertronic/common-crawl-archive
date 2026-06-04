@@ -63,15 +63,14 @@ describe("Common Crawl client", () => {
     expect(collections.map((item) => item.id)).toEqual(["CC-MAIN-2026-21", "CC-MAIN-2008-2009"]);
   });
 
-  it("builds CDXJ URLs with the exact target URL and requests the redirect field", () => {
+  it("builds CDXJ URLs with the exact target URL and requests unfiltered captures including redirect fields", () => {
     const url = buildCdxjUrl("https://example.com/a?b=1", collection);
     expect(url).toContain("https://index.commoncrawl.org/CC-MAIN-2026-21-index?");
     expect(url).toContain("url=https%3A%2F%2Fexample.com%2Fa%3Fb%3D1");
     expect(url).toContain("output=json");
     expect(url).toContain("redirect");
     expect(url).toContain("limit=1000");
-    expect(url).toContain("filter=status%3A200");
-    expect(url).toContain("filter=mime%3Ahtml");
+    expect(url).not.toContain("filter=");
     expect(url).not.toContain("matchType");
   });
 
@@ -117,6 +116,25 @@ describe("Common Crawl client", () => {
       })
     ).toBe(
       "/search?match=domain&scope=all&history=1&year=2024&status=200&filter=blog&sort=url-asc&view=calendar&page=3&url=https%3A%2F%2Fexample.com%2F"
+    );
+  });
+
+  it("restores the original full-scan search for capture viewer close links", () => {
+    const viewParams = new URLSearchParams(
+      "url=https%3A%2F%2Fhutt.io%2F&timestamp=20160824102212&collection=CC-MAIN-2016-36&filename=crawl-data%2FCC-MAIN-2016-36%2Fsegments%2F1471982292151.8%2Fwarc%2FCC-MAIN-20160823195812-00086-ip-10-153-172-175.ec2.internal.warc.gz&offset=854275963&length=5187&back_url=hutt.io&back_match=exact&back_scope=all&back_history=1&back_sort=timestamp-desc&back_view=calendar"
+    );
+
+    expect(
+      buildResultsBackHref({
+        url: viewParams.get("back_url"),
+        match: viewParams.get("back_match"),
+        scope: viewParams.get("back_scope"),
+        history: viewParams.get("back_history"),
+        sort: viewParams.get("back_sort"),
+        view: viewParams.get("back_view")
+      })
+    ).toBe(
+      "/search?match=exact&scope=all&history=1&sort=timestamp-desc&view=calendar&url=hutt.io"
     );
   });
 
