@@ -1,10 +1,22 @@
 import { buildRangeHeader, commonCrawlFetch, LARGE_CAPTURE_LIMIT_BYTES, warcRecordUrl } from "@/lib/common-crawl";
+import type { CommonCrawlCapture } from "@/lib/common-crawl";
+import {
+  getCachedCaptureRecord,
+  getSettings,
+  putCachedCaptureRecord,
+  type CachedHtmlCaptureRecord
+} from "@/lib/capture-store";
 
 export type ParsedWarcRecord = {
   warcHeaders: Record<string, string>;
   httpHeaders: Record<string, string>;
   statusLine: string;
   html: string;
+};
+
+export type LoadedCaptureRecord = {
+  record: ParsedWarcRecord;
+  source: "cache" | "network";
 };
 
 export function parseHeaderBlock(block: string): Record<string, string> {
@@ -163,4 +175,36 @@ export async function fetchAndParseWarcRecord({
 
   const decompressed = await decompressGzip(await response.blob());
   return parseWarcRecord(new TextDecoder("utf-8").decode(decompressed));
+}
+
+export async function loadCaptureRecord({
+  capture,
+  signal
+}: {
+  capture: CommonCrawlCapture;
+  signal?: AbortSignal;
+}): Promise<LoadedCaptureRecord> {
+  const settings = await getSettings();
+  if (settings.htmlCacheEnabled) {
+    const cached = await getCachedCaptureRecord(capture);
+    if (cached) return { record: parsedRecordFromCache(cached), source: "cache" };
+  }
+
+  const record = await fetchAndParseWarcRecord({
+    filename: capture.filename,
+    offset: capture.offset,
+    length: capture.length,
+    signal
+  });
+  await putCachedCaptureRecord({ capture, record });
+  return { record, source: "network" };
+}
+
+function parsedRecordFromCache(record: CachedHtmlCaptureRecord): ParsedWarcRecord {
+  return {
+    warcHeaders: record.warcHeaders,
+    httpHeaders: record.httpHeaders,
+    statusLine: record.statusLine,
+    html: record.html
+  };
 }

@@ -2,17 +2,24 @@ import type { CollectionCheckResult, CommonCrawlCapture, CommonCrawlCollection, 
 import { dedupeCaptures, mergeCollectionResult } from "./scan-results";
 
 const DB_NAME = "wayback-fallback";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const LEGACY_SEARCH_STORE = "searches";
 const TARGET_STORE = "targets";
 const COVERAGE_STORE = "coverages";
 const SESSION_STORE = "scanSessions";
+const USER_STORE = "users";
+const SETTINGS_STORE = "settings";
+const HTML_CAPTURE_STORE = "htmlCaptures";
 const CHANNEL_NAME = "wayback-fallback:searches";
+const DEFAULT_LOCAL_USER_ID = "local";
+const ACTIVE_SETTINGS_ID = "active";
+export const DEFAULT_HTML_CACHE_LIMIT_BYTES = 500 * 1024 * 1024;
 
 export type ScanScope = "recent" | "all";
 
 export type StoredSearch = {
   key: string;
+  ownerId?: string;
   url: string;
   matchType: MatchType;
   mock: boolean;
@@ -25,6 +32,7 @@ export type StoredSearch = {
 
 export type SearchTarget = {
   targetId: string;
+  ownerId?: string;
   url: string;
   matchType: MatchType;
   mock: boolean;
@@ -34,6 +42,7 @@ export type SearchTarget = {
 
 export type CoverageRecord = {
   targetId: string;
+  ownerId?: string;
   url: string;
   matchType: MatchType;
   mock: boolean;
@@ -46,6 +55,7 @@ export type CoverageRecord = {
 
 export type ScanSession = {
   scanId: string;
+  ownerId?: string;
   targetId: string;
   url: string;
   matchType: MatchType;
@@ -61,6 +71,48 @@ export type ScanSession = {
   page?: number;
   createdAt: number;
   updatedAt: number;
+};
+
+export type LocalUser = {
+  userId: string;
+  displayName?: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type AppSettings = {
+  id: string;
+  activeUserId: string;
+  htmlCacheEnabled: boolean;
+  htmlCacheLimitBytes: number;
+  autoPruneEnabled: boolean;
+  updatedAt: number;
+};
+
+export type CachedHtmlCaptureRecord = {
+  cacheKey: string;
+  ownerId: string;
+  filename: string;
+  offset: string;
+  length: string;
+  url?: string;
+  timestamp?: string;
+  collectionId?: string;
+  mime?: string;
+  status?: string;
+  warcHeaders: Record<string, string>;
+  httpHeaders: Record<string, string>;
+  statusLine: string;
+  html: string;
+  sizeBytes: number;
+  createdAt: number;
+  lastAccessedAt: number;
+};
+
+export type CacheStats = {
+  count: number;
+  sizeBytes: number;
+  lastAccessedAt?: number;
 };
 
 export function searchKey(url: string, matchType: MatchType | string, mock: boolean): string {
@@ -145,6 +197,15 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(SESSION_STORE)) {
         db.createObjectStore(SESSION_STORE, { keyPath: "scanId" });
       }
+      if (!db.objectStoreNames.contains(USER_STORE)) {
+        db.createObjectStore(USER_STORE, { keyPath: "userId" });
+      }
+      if (!db.objectStoreNames.contains(SETTINGS_STORE)) {
+        db.createObjectStore(SETTINGS_STORE, { keyPath: "id" });
+      }
+      if (!db.objectStoreNames.contains(HTML_CAPTURE_STORE)) {
+        db.createObjectStore(HTML_CAPTURE_STORE, { keyPath: "cacheKey" });
+      }
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error ?? new Error("IndexedDB open failed"));
@@ -179,8 +240,9 @@ async function withStore<T>(
 
 export async function putSearch(record: StoredSearch): Promise<void> {
   try {
+    const ownerId = await activeOwnerId();
     await withStore(LEGACY_SEARCH_STORE, "readwrite", (store) => {
-      store.put(record);
+      store.put({ ...record, ownerId: record.ownerId ?? ownerId });
     });
     notifyUpdated(record.key);
   } catch {
@@ -190,7 +252,7 @@ export async function putSearch(record: StoredSearch): Promise<void> {
 
 export async function getSearch(key: string): Promise<StoredSearch | undefined> {
   try {
-    return await withStore<StoredSearch>(LEGACY_SEARCH_STORE, "readonly", (store) => store.get(key));
+    return withOwner(await withStore<StoredSearch>(LEGACY_SEARCH_STORE, "readonly", (store) => store.get(key)));
   } catch {
     return undefined;
   }
@@ -198,7 +260,10 @@ export async function getSearch(key: string): Promise<StoredSearch | undefined> 
 
 export async function listSearches(): Promise<StoredSearch[]> {
   try {
-    return (await withStore<StoredSearch[]>(LEGACY_SEARCH_STORE, "readonly", (store) => store.getAll())) ?? [];
+    const ownerId = await activeOwnerId();
+    return ((await withStore<StoredSearch[]>(LEGACY_SEARCH_STORE, "readonly", (store) => store.getAll())) ?? [])
+      .map((record) => withOwner(record, ownerId))
+      .filter((record): record is StoredSearch => record !== undefined && record.ownerId === ownerId);
   } catch {
     return [];
   }
@@ -238,8 +303,10 @@ export async function ensureTarget(url: string, matchType: MatchType, mock: bool
   const targetId = targetIdFor(url, matchType, mock);
   const existing = await getTarget(targetId);
   const now = Date.now();
+  const ownerId = await activeOwnerId();
   const next: SearchTarget = {
     targetId,
+    ownerId: existing?.ownerId ?? ownerId,
     url: normalizeTargetUrl(url),
     matchType,
     mock,
@@ -252,7 +319,7 @@ export async function ensureTarget(url: string, matchType: MatchType, mock: bool
 
 export async function getTarget(targetId: string): Promise<SearchTarget | undefined> {
   try {
-    return await withStore<SearchTarget>(TARGET_STORE, "readonly", (store) => store.get(targetId));
+    return withOwner(await withStore<SearchTarget>(TARGET_STORE, "readonly", (store) => store.get(targetId)));
   } catch {
     return undefined;
   }
@@ -260,8 +327,9 @@ export async function getTarget(targetId: string): Promise<SearchTarget | undefi
 
 export async function putTarget(target: SearchTarget): Promise<void> {
   try {
+    const ownerId = await activeOwnerId();
     await withStore(TARGET_STORE, "readwrite", (store) => {
-      store.put(target);
+      store.put({ ...target, ownerId: target.ownerId ?? ownerId });
     });
     notifyUpdated(target.targetId);
   } catch {
@@ -271,7 +339,7 @@ export async function putTarget(target: SearchTarget): Promise<void> {
 
 export async function getCoverage(targetId: string): Promise<CoverageRecord | undefined> {
   try {
-    return await withStore<CoverageRecord>(COVERAGE_STORE, "readonly", (store) => store.get(targetId));
+    return withOwner(await withStore<CoverageRecord>(COVERAGE_STORE, "readonly", (store) => store.get(targetId)));
   } catch {
     return undefined;
   }
@@ -279,8 +347,9 @@ export async function getCoverage(targetId: string): Promise<CoverageRecord | un
 
 export async function putCoverage(record: CoverageRecord): Promise<void> {
   try {
+    const ownerId = await activeOwnerId();
     await withStore(COVERAGE_STORE, "readwrite", (store) => {
-      store.put(record);
+      store.put({ ...record, ownerId: record.ownerId ?? ownerId });
     });
     notifyUpdated(record.targetId);
   } catch {
@@ -289,13 +358,14 @@ export async function putCoverage(record: CoverageRecord): Promise<void> {
 }
 
 export async function upsertCoverageResult(
-  target: Pick<SearchTarget, "targetId" | "url" | "matchType" | "mock">,
+  target: Pick<SearchTarget, "targetId" | "ownerId" | "url" | "matchType" | "mock">,
   result: CollectionCheckResult
 ): Promise<CoverageRecord> {
   const existing = await getCoverage(target.targetId);
   const merged = mergeCollectionResult(existing?.collectionResults[result.collection.id], result);
   const next: CoverageRecord = {
     targetId: target.targetId,
+    ownerId: existing?.ownerId ?? target.ownerId ?? await activeOwnerId(),
     url: target.url,
     matchType: target.matchType,
     mock: target.mock,
@@ -336,7 +406,7 @@ export function coverageCaptures(record: CoverageRecord | undefined): CommonCraw
 
 export async function getScanSession(scanId: string): Promise<ScanSession | undefined> {
   try {
-    return await withStore<ScanSession>(SESSION_STORE, "readonly", (store) => store.get(scanId));
+    return withOwner(await withStore<ScanSession>(SESSION_STORE, "readonly", (store) => store.get(scanId)));
   } catch {
     return undefined;
   }
@@ -344,8 +414,9 @@ export async function getScanSession(scanId: string): Promise<ScanSession | unde
 
 export async function putScanSession(session: ScanSession): Promise<void> {
   try {
+    const ownerId = await activeOwnerId();
     await withStore(SESSION_STORE, "readwrite", (store) => {
-      store.put(session);
+      store.put({ ...session, ownerId: session.ownerId ?? ownerId });
     });
     notifyUpdated(session.scanId);
   } catch {
@@ -371,8 +442,10 @@ export async function ensureScanSession(input: {
   const target = await ensureTarget(input.url, input.matchType, input.mock);
   const existing = input.scanId ? await getScanSession(input.scanId) : undefined;
   const now = Date.now();
+  const ownerId = await activeOwnerId();
   const session: ScanSession = {
     scanId: existing?.scanId ?? input.scanId ?? newScanId(),
+    ownerId: existing?.ownerId ?? target.ownerId ?? ownerId,
     targetId: target.targetId,
     url: target.url,
     matchType: target.matchType,
@@ -446,4 +519,301 @@ export function subscribeToSearchChanges(onUpdate: () => void, key?: string): ()
     return () => {};
   }
   return () => channel?.close();
+}
+
+export async function getOrCreateLocalUser(): Promise<LocalUser> {
+  const settings = await readSettings();
+  const userId = settings?.activeUserId ?? DEFAULT_LOCAL_USER_ID;
+  const existing = await getUser(userId);
+  if (existing) {
+    if (!settings) await writeSettings(defaultSettings(existing.userId));
+    return existing;
+  }
+  const now = Date.now();
+  const user: LocalUser = {
+    userId,
+    createdAt: now,
+    updatedAt: now
+  };
+  await withStore(USER_STORE, "readwrite", (store) => {
+    store.put(user);
+  });
+  if (!settings) await writeSettings(defaultSettings(user.userId));
+  return user;
+}
+
+export async function updateLocalUser(input: { displayName?: string }): Promise<LocalUser> {
+  const current = await getOrCreateLocalUser();
+  const next: LocalUser = {
+    ...current,
+    displayName: input.displayName?.trim() || undefined,
+    updatedAt: Date.now()
+  };
+  await withStore(USER_STORE, "readwrite", (store) => {
+    store.put(next);
+  });
+  notifyUpdated(next.userId);
+  return next;
+}
+
+export async function getSettings(): Promise<AppSettings> {
+  await getOrCreateLocalUser();
+  return (await readSettings()) ?? defaultSettings(DEFAULT_LOCAL_USER_ID);
+}
+
+export async function updateSettings(input: Partial<Pick<AppSettings, "htmlCacheEnabled" | "htmlCacheLimitBytes" | "autoPruneEnabled">>): Promise<AppSettings> {
+  const current = await getSettings();
+  const next: AppSettings = {
+    ...current,
+    htmlCacheEnabled: input.htmlCacheEnabled ?? current.htmlCacheEnabled,
+    htmlCacheLimitBytes: normalizeCacheLimit(input.htmlCacheLimitBytes ?? current.htmlCacheLimitBytes),
+    autoPruneEnabled: input.autoPruneEnabled ?? current.autoPruneEnabled,
+    updatedAt: Date.now()
+  };
+  await writeSettings(next);
+  if (next.autoPruneEnabled && next.htmlCacheEnabled) await pruneHtmlCache(next.htmlCacheLimitBytes);
+  notifyUpdated(SETTINGS_STORE);
+  return next;
+}
+
+export async function resetSettings(): Promise<AppSettings> {
+  const user = await getOrCreateLocalUser();
+  const next = defaultSettings(user.userId);
+  await writeSettings(next);
+  notifyUpdated(SETTINGS_STORE);
+  return next;
+}
+
+export function captureCacheKey(capture: Pick<CommonCrawlCapture, "filename" | "offset" | "length">): string {
+  return `warc:${capture.filename}:${capture.offset}:${capture.length}`;
+}
+
+export async function getCachedCaptureRecord(
+  capture: Pick<CommonCrawlCapture, "filename" | "offset" | "length">
+): Promise<CachedHtmlCaptureRecord | undefined> {
+  try {
+    const ownerId = await activeOwnerId();
+    const cacheKey = captureCacheKey(capture);
+    const record = await withStore<CachedHtmlCaptureRecord>(HTML_CAPTURE_STORE, "readonly", (store) => store.get(cacheKey));
+    if (!record || record.ownerId !== ownerId) return undefined;
+    const next = { ...record, lastAccessedAt: Date.now() };
+    await withStore(HTML_CAPTURE_STORE, "readwrite", (store) => {
+      store.put(next);
+    });
+    return next;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function putCachedCaptureRecord(input: {
+  capture: CommonCrawlCapture;
+  record: Pick<CachedHtmlCaptureRecord, "warcHeaders" | "httpHeaders" | "statusLine" | "html">;
+}): Promise<void> {
+  try {
+    const settings = await getSettings();
+    if (!settings.htmlCacheEnabled) return;
+    const now = Date.now();
+    const ownerId = settings.activeUserId;
+    const cached: CachedHtmlCaptureRecord = {
+      cacheKey: captureCacheKey(input.capture),
+      ownerId,
+      filename: input.capture.filename,
+      offset: input.capture.offset,
+      length: input.capture.length,
+      url: input.capture.url,
+      timestamp: input.capture.timestamp,
+      collectionId: input.capture.collectionId,
+      mime: input.capture.mime,
+      status: input.capture.status,
+      warcHeaders: input.record.warcHeaders,
+      httpHeaders: input.record.httpHeaders,
+      statusLine: input.record.statusLine,
+      html: input.record.html,
+      sizeBytes: byteSize(input.record.html),
+      createdAt: now,
+      lastAccessedAt: now
+    };
+    await withStore(HTML_CAPTURE_STORE, "readwrite", (store) => {
+      store.put(cached);
+    });
+    if (settings.autoPruneEnabled) await pruneHtmlCache(settings.htmlCacheLimitBytes);
+    notifyUpdated(cached.cacheKey);
+  } catch {
+    // Cache writes are best-effort.
+  }
+}
+
+export async function listCachedCaptureRecordsForCaptures(
+  captures: Pick<CommonCrawlCapture, "filename" | "offset" | "length">[]
+): Promise<CachedHtmlCaptureRecord[]> {
+  if (captures.length === 0) return [];
+  try {
+    const ownerId = await activeOwnerId();
+    const keys = new Set(captures.map(captureCacheKey));
+    const records = (await withStore<CachedHtmlCaptureRecord[]>(HTML_CAPTURE_STORE, "readonly", (store) => store.getAll())) ?? [];
+    return records.filter((record) => record.ownerId === ownerId && keys.has(record.cacheKey));
+  } catch {
+    return [];
+  }
+}
+
+export async function deleteCachedCapture(
+  captureOrKey: Pick<CommonCrawlCapture, "filename" | "offset" | "length"> | string
+): Promise<void> {
+  try {
+    const cacheKey = typeof captureOrKey === "string" ? captureOrKey : captureCacheKey(captureOrKey);
+    await withStore(HTML_CAPTURE_STORE, "readwrite", (store) => {
+      store.delete(cacheKey);
+    });
+    notifyUpdated(cacheKey);
+  } catch {
+    // Best-effort persistence.
+  }
+}
+
+export async function deleteCachedCapturesForHistoryRecord(record: Pick<StoredSearch, "captures">): Promise<void> {
+  await deleteCachedCaptures(record.captures);
+}
+
+export async function deleteCachedCaptures(captures: Pick<CommonCrawlCapture, "filename" | "offset" | "length">[]): Promise<void> {
+  if (captures.length === 0) return;
+  try {
+    const keys = Array.from(new Set(captures.map(captureCacheKey)));
+    await withStore(HTML_CAPTURE_STORE, "readwrite", (store) => {
+      for (const key of keys) store.delete(key);
+    });
+    notifyUpdated(HTML_CAPTURE_STORE);
+  } catch {
+    // Best-effort persistence.
+  }
+}
+
+export async function clearHtmlCache(): Promise<void> {
+  try {
+    await withStore(HTML_CAPTURE_STORE, "readwrite", (store) => {
+      store.clear();
+    });
+    notifyUpdated(HTML_CAPTURE_STORE);
+  } catch {
+    // Best-effort persistence.
+  }
+}
+
+export async function clearAllLocalAppData(): Promise<void> {
+  try {
+    const db = await openDB();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(
+        [LEGACY_SEARCH_STORE, TARGET_STORE, COVERAGE_STORE, SESSION_STORE, USER_STORE, SETTINGS_STORE, HTML_CAPTURE_STORE],
+        "readwrite"
+      );
+      for (const storeName of tx.objectStoreNames) tx.objectStore(storeName).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+    db.close();
+    await getOrCreateLocalUser();
+    notifyUpdated("clear-all");
+  } catch {
+    // Best-effort persistence.
+  }
+}
+
+export async function getCacheStats(): Promise<CacheStats> {
+  try {
+    const ownerId = await activeOwnerId();
+    const records = (await withStore<CachedHtmlCaptureRecord[]>(HTML_CAPTURE_STORE, "readonly", (store) => store.getAll())) ?? [];
+    return cacheStatsFor(records.filter((record) => record.ownerId === ownerId));
+  } catch {
+    return { count: 0, sizeBytes: 0 };
+  }
+}
+
+export async function pruneHtmlCache(limitBytes?: number): Promise<void> {
+  const limit = normalizeCacheLimit(limitBytes ?? (await getSettings()).htmlCacheLimitBytes);
+  try {
+    const ownerId = await activeOwnerId();
+    const records = ((await withStore<CachedHtmlCaptureRecord[]>(HTML_CAPTURE_STORE, "readonly", (store) => store.getAll())) ?? [])
+      .filter((record) => record.ownerId === ownerId)
+      .sort((left, right) => left.lastAccessedAt - right.lastAccessedAt);
+    let size = records.reduce((sum, record) => sum + record.sizeBytes, 0);
+    const deleteKeys: string[] = [];
+    for (const record of records) {
+      if (size <= limit) break;
+      deleteKeys.push(record.cacheKey);
+      size -= record.sizeBytes;
+    }
+    if (deleteKeys.length === 0) return;
+    await withStore(HTML_CAPTURE_STORE, "readwrite", (store) => {
+      for (const key of deleteKeys) store.delete(key);
+    });
+    notifyUpdated(HTML_CAPTURE_STORE);
+  } catch {
+    // Best-effort pruning.
+  }
+}
+
+async function getUser(userId: string): Promise<LocalUser | undefined> {
+  try {
+    return await withStore<LocalUser>(USER_STORE, "readonly", (store) => store.get(userId));
+  } catch {
+    return undefined;
+  }
+}
+
+async function readSettings(): Promise<AppSettings | undefined> {
+  try {
+    return await withStore<AppSettings>(SETTINGS_STORE, "readonly", (store) => store.get(ACTIVE_SETTINGS_ID));
+  } catch {
+    return undefined;
+  }
+}
+
+async function writeSettings(settings: AppSettings): Promise<void> {
+  await withStore(SETTINGS_STORE, "readwrite", (store) => {
+    store.put(settings);
+  });
+}
+
+async function activeOwnerId(): Promise<string> {
+  return (await getOrCreateLocalUser()).userId;
+}
+
+function defaultSettings(activeUserId: string): AppSettings {
+  return {
+    id: ACTIVE_SETTINGS_ID,
+    activeUserId,
+    htmlCacheEnabled: true,
+    htmlCacheLimitBytes: DEFAULT_HTML_CACHE_LIMIT_BYTES,
+    autoPruneEnabled: true,
+    updatedAt: Date.now()
+  };
+}
+
+function withOwner<T extends { ownerId?: string }>(record: T | undefined, ownerId = DEFAULT_LOCAL_USER_ID): T | undefined {
+  return record ? { ...record, ownerId: record.ownerId ?? ownerId } : undefined;
+}
+
+function normalizeCacheLimit(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return DEFAULT_HTML_CACHE_LIMIT_BYTES;
+  return Math.max(5 * 1024 * 1024, Math.round(value));
+}
+
+function byteSize(value: string): number {
+  if (typeof Blob !== "undefined") return new Blob([value]).size;
+  return value.length;
+}
+
+function cacheStatsFor(records: CachedHtmlCaptureRecord[]): CacheStats {
+  const lastAccessedAt = records.reduce<number | undefined>(
+    (latest, record) => latest === undefined ? record.lastAccessedAt : Math.max(latest, record.lastAccessedAt),
+    undefined
+  );
+  return {
+    count: records.length,
+    sizeBytes: records.reduce((sum, record) => sum + record.sizeBytes, 0),
+    lastAccessedAt
+  };
 }

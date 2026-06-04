@@ -1,6 +1,6 @@
-# Snapshot Search
+# Crawlback
 
-A Next.js webapp for searching individual URLs across every public Common Crawl index and opening matching WARC captures in a local browser viewer.
+A Next.js webapp for searching individual URLs across every public Common Crawl index and opening matching WARC captures in a local browser viewer. Positioned as a fallback archive: when the Wayback Machine has no capture, Crawlback brings the page back from Common Crawl.
 
 ## Goals
 

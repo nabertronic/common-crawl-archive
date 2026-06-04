@@ -1,4 +1,4 @@
-export const APP_NAME = "Snapshot Search";
+export const APP_NAME = "Crawlback";
 
 export function stripUrlForTitle(url: string): string {
   return url

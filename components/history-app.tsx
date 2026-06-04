@@ -2,14 +2,15 @@
 
 import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Archive,
   ChevronDown,
   ChevronUp,
   ChevronsUpDown,
   Download,
+  Database,
   ExternalLink,
   History,
   RotateCcw,
+  Settings,
   Search,
   SlidersHorizontal,
   Trash2,
@@ -17,14 +18,19 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
+import { BrandLockup } from "@/components/brand";
 import { Button, LinkButton } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   deleteSearch,
   deleteSearches,
+  deleteCachedCapture,
+  deleteCachedCapturesForHistoryRecord,
   listSearches,
+  listCachedCaptureRecordsForCaptures,
   scanSearchKey,
   subscribeToSearchChanges,
+  type CachedHtmlCaptureRecord,
   type StoredSearch
 } from "@/lib/capture-store";
 import {
@@ -49,7 +55,7 @@ type HistoryRecord = StoredSearch & {
 
 const PAGE_SIZE = 25;
 const HISTORY_GRID_CLASS =
-  "grid items-center gap-3 [grid-template-columns:28px_80px_minmax(140px,1fr)_56px_56px_96px_64px_64px_48px_180px] xl:[grid-template-columns:28px_72px_minmax(140px,1fr)_52px_52px_88px_60px_60px_44px_500px]";
+  "grid items-center gap-3 [grid-template-columns:28px_80px_minmax(140px,1fr)_56px_56px_96px_64px_64px_64px_210px] xl:[grid-template-columns:28px_72px_minmax(140px,1fr)_52px_52px_88px_60px_60px_60px_560px]";
 const DEFAULT_SORT_DIR: Record<SortKey, SortDir> = {
   status: "asc",
   url: "asc",
@@ -82,6 +88,8 @@ export function HistoryApp() {
   const [showCoveredScans, setShowCoveredScans] = useState(false);
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [page, setPage] = useState(1);
+  const [cacheRecordsByKey, setCacheRecordsByKey] = useState<Record<string, CachedHtmlCaptureRecord[]>>({});
+  const [expandedCacheKey, setExpandedCacheKey] = useState<string | null>(null);
   const queryInputRef = useRef<HTMLInputElement | null>(null);
   const scopeFilterRef = useRef<HTMLSelectElement | null>(null);
   const outcomeFilterRef = useRef<HTMLSelectElement | null>(null);
@@ -166,6 +174,20 @@ export function HistoryApp() {
     setRecords(mergeHistoryRecords(searches.filter(isHistoryRecord)));
     setCurrentCollections(collections);
   }
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadCacheRecords() {
+      const entries = await Promise.all(
+        records.map(async (record) => [record.key, await listCachedCaptureRecordsForCaptures(record.captures)] as const)
+      );
+      if (!cancelled) setCacheRecordsByKey(Object.fromEntries(entries));
+    }
+    void loadCacheRecords();
+    return () => {
+      cancelled = true;
+    };
+  }, [records]);
 
   const stats = useMemo(() => {
     const captures = records.reduce((sum, record) => sum + record.captures.length, 0);
@@ -265,21 +287,28 @@ export function HistoryApp() {
 
   async function handleDeleteRecord(record: HistoryRecord) {
     if (!window.confirm("Delete this saved scan?")) return;
+    const deleteCache = record.captures.length > 0 && window.confirm("Also delete cached HTML files for this scan?");
     if (record.storageKeys && record.storageKeys.length > 1) {
       await deleteSearches(record.storageKeys);
     } else {
       await deleteSearch(record.key);
     }
+    if (deleteCache) await deleteCachedCapturesForHistoryRecord(record);
     await refreshRecords();
   }
 
   async function handleDeleteSelected() {
     if (selectedKeys.length === 0) return;
     if (!window.confirm(`Delete ${selectedKeys.length} selected saved scan${selectedKeys.length === 1 ? "" : "s"}?`)) return;
+    const deleteCache = window.confirm("Also delete cached HTML files for the selected scans?");
+    const selected = records.filter((record) => selectedKeys.includes(record.key));
     const keys = records
       .filter((record) => selectedKeys.includes(record.key))
       .flatMap((record) => record.storageKeys ?? [record.key]);
     await deleteSearches(Array.from(new Set(keys)));
+    if (deleteCache) {
+      for (const record of selected) await deleteCachedCapturesForHistoryRecord(record);
+    }
     setSelectedKeys([]);
     await refreshRecords();
   }
@@ -287,9 +316,22 @@ export function HistoryApp() {
   async function handleClearHistory() {
     if (records.length === 0) return;
     if (!window.confirm("Delete all saved scan history entries?")) return;
+    const deleteCache = window.confirm("Also delete all cached HTML files referenced by history?");
     await deleteSearches(Array.from(new Set(records.flatMap((record) => record.storageKeys ?? [record.key]))));
+    if (deleteCache) {
+      for (const record of records) await deleteCachedCapturesForHistoryRecord(record);
+    }
     setSelectedKeys([]);
     await refreshRecords();
+  }
+
+  async function handleDeleteCachedCapture(recordKey: string, cacheKey: string) {
+    if (!window.confirm("Delete this cached HTML file?")) return;
+    await deleteCachedCapture(cacheKey);
+    setCacheRecordsByKey((current) => ({
+      ...current,
+      [recordKey]: (current[recordKey] ?? []).filter((record) => record.cacheKey !== cacheKey)
+    }));
   }
 
   return (
@@ -302,9 +344,17 @@ export function HistoryApp() {
                   href="/"
                   aria-label="Start a new search"
                   title="Start a new search"
-                  className="grid h-10 w-10 place-items-center rounded-md border border-amber-300/40 bg-amber-300 text-zinc-950 transition hover:bg-amber-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
+                  className="rounded-md transition focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
                 >
-                  <Archive size={20} />
+                  <BrandLockup wordClassName="text-xl leading-none" />
+                </Link>
+                <Link
+                  href="/settings"
+                  aria-label="Open settings"
+                  title="Open settings"
+                  className="grid h-10 w-10 place-items-center rounded-md border border-zinc-700 bg-zinc-950/70 text-zinc-200 transition hover:border-amber-300 hover:text-amber-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
+                >
+                  <Settings size={20} />
                 </Link>
                 <div>
                   <h1 className="text-xl font-black uppercase tracking-[0.18em] text-zinc-50">
@@ -456,6 +506,7 @@ export function HistoryApp() {
                   <SortHeader label="Match" sortKey="match" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
                   <SortHeader label="Updated" sortKey="updated" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
                   <SortHeader label="Snapshots" sortKey="captures" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
+                  <span className="text-right text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">Cached</span>
                   <SortHeader label="Sources" sortKey="sources" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
                   <SortHeader label="Failed" sortKey="failed" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
                   <span className="text-right text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">Actions</span>
@@ -468,6 +519,10 @@ export function HistoryApp() {
                       currentCollections={currentCollections}
                       hasFullScan={hasCoveringFullScan(record, records, currentCollections)}
                       selected={selectedKeySet.has(record.key)}
+                      cacheRecords={cacheRecordsByKey[record.key] ?? []}
+                      cacheExpanded={expandedCacheKey === record.key}
+                      onToggleCache={(key) => setExpandedCacheKey((current) => current === key ? null : key)}
+                      onDeleteCachedCapture={handleDeleteCachedCapture}
                       onSelectedChange={toggleRecordSelection}
                       onDelete={handleDeleteRecord}
                     />
@@ -554,6 +609,10 @@ function HistoryRow({
   currentCollections,
   hasFullScan,
   selected,
+  cacheRecords,
+  cacheExpanded,
+  onToggleCache,
+  onDeleteCachedCapture,
   onSelectedChange,
   onDelete
 }: {
@@ -561,6 +620,10 @@ function HistoryRow({
   currentCollections: CommonCrawlCollection[];
   hasFullScan: boolean;
   selected: boolean;
+  cacheRecords: CachedHtmlCaptureRecord[];
+  cacheExpanded: boolean;
+  onToggleCache: (key: string) => void;
+  onDeleteCachedCapture: (recordKey: string, cacheKey: string) => Promise<void>;
   onSelectedChange: (key: string, checked: boolean) => void;
   onDelete: (record: HistoryRecord) => Promise<void>;
 }) {
@@ -576,6 +639,7 @@ function HistoryRow({
   const canRunFullScan = record.scanScope === "recent" && !hasFullScan;
 
   return (
+    <>
     <article className={`${HISTORY_GRID_CLASS} px-4 py-3 text-sm transition hover:bg-zinc-900/45`}>
       <label>
         <input
@@ -609,6 +673,7 @@ function HistoryRow({
         {formatDate(record.updatedAt)}
       </time>
       <Metric value={String(record.captures.length)} tone={record.captures.length > 0 ? "green" : "neutral"} />
+      <Metric value={`${cacheRecords.length}/${record.captures.length}`} tone={cacheRecords.length > 0 ? "green" : "neutral"} />
       <Metric value={`${sourceStats.processed}/${sourceStats.total}`} tone={sourceStats.missing > 0 ? "red" : "neutral"} />
       <Metric value={String(sourceStats.failed)} tone={sourceStats.failed > 0 ? "red" : "neutral"} />
       <div className="flex items-center justify-end gap-1">
@@ -634,12 +699,42 @@ function HistoryRow({
           <ExternalLink size={14} />
           <span className="hidden xl:inline">Open</span>
         </LinkButton>
+        <Button type="button" size="sm" variant="secondary" aria-label="Manage cached HTML" title="Cached HTML" onClick={() => onToggleCache(record.key)} className="w-8 px-0 xl:w-auto xl:px-3">
+          <Database size={14} />
+          <span className="hidden xl:inline">Storage</span>
+        </Button>
         <Button type="button" size="sm" variant="danger" aria-label="Delete saved scan" title="Delete" onClick={() => void onDelete(record)} className="w-8 px-0 xl:w-auto xl:px-3">
           <Trash2 size={14} />
           <span className="hidden xl:inline">Delete</span>
         </Button>
       </div>
     </article>
+    {cacheExpanded ? (
+      <section className="border-t border-zinc-900 bg-zinc-950/45 px-4 py-3">
+        {cacheRecords.length === 0 ? (
+          <p className="text-xs font-semibold text-zinc-500">No cached HTML files for this scan yet.</p>
+        ) : (
+          <div className="grid gap-2">
+            {cacheRecords.map((cached) => (
+              <div key={cached.cacheKey} className="grid items-center gap-3 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs sm:grid-cols-[minmax(0,1fr)_110px_96px_36px]">
+                <div className="min-w-0">
+                  <p className="truncate font-semibold text-zinc-200" title={cached.url ?? cached.filename}>
+                    {cached.url ?? cached.filename}
+                  </p>
+                  <p className="mt-0.5 truncate text-zinc-500">{cached.timestamp || cached.collectionId || cached.filename}</p>
+                </div>
+                <span className="font-mono text-zinc-400">{formatStorageBytes(cached.sizeBytes)}</span>
+                <time className="text-zinc-500" title={formatDateTime(cached.lastAccessedAt)}>{formatDate(cached.lastAccessedAt)}</time>
+                <Button type="button" size="sm" variant="danger" aria-label="Delete cached HTML" title="Delete cached HTML" onClick={() => void onDeleteCachedCapture(record.key, cached.cacheKey)} className="w-8 px-0">
+                  <Trash2 size={14} />
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+    ) : null}
+    </>
   );
 }
 
@@ -983,6 +1078,12 @@ function formatDateTime(timestamp: number) {
     dateStyle: "medium",
     timeStyle: "short"
   }).format(timestamp);
+}
+
+function formatStorageBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function downloadCsv(records: HistoryRecord[], mode: "all" | "filtered" | "selected") {

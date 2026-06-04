@@ -3,8 +3,8 @@
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, X } from "lucide-react";
 import Link from "next/link";
 import { useMemo } from "react";
+import { BrandWordmark } from "@/components/brand";
 import type { CommonCrawlCapture } from "@/lib/common-crawl";
-import { APP_NAME } from "@/lib/app-meta";
 import { cn, formatTimestamp } from "@/lib/utils";
 
 type NavBarProps = {
@@ -64,13 +64,10 @@ export function CaptureNavBar({ url, timestamp, captures, currentIndex, backHref
       <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1 px-4 pb-2 pt-2 lg:px-6">
         <Link
           href="/"
-          className="group flex h-9 shrink-0 items-center gap-2 rounded-md border border-amber-300/30 bg-zinc-900/60 px-2.5 text-zinc-200 transition hover:border-amber-300 hover:text-amber-100"
+          className="group flex h-9 shrink-0 items-center rounded-md border border-amber-300/30 bg-zinc-900/60 px-2.5 text-zinc-200 transition hover:border-amber-300 hover:text-amber-100"
           title="Start a new search"
         >
-          <span className="grid h-5 w-5 place-items-center rounded-sm bg-amber-300 text-zinc-950 transition group-hover:bg-amber-200">
-            <SnapshotMark />
-          </span>
-          <span className="hidden text-[10px] font-black uppercase tracking-[0.22em] sm:inline">{APP_NAME}</span>
+          <BrandWordmark className="text-[13px]" />
         </Link>
 
         <UrlField url={url} />
@@ -186,17 +183,6 @@ function UrlField({ url }: { url: string }) {
       </span>
       <span className="truncate text-zinc-100">{url || "—"}</span>
     </div>
-  );
-}
-
-function SnapshotMark() {
-  return (
-    <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M2 4h12" />
-      <path d="M2 8h12" />
-      <path d="M2 12h12" />
-      <circle cx="11" cy="8" r="1.3" fill="currentColor" stroke="none" />
-    </svg>
   );
 }
 

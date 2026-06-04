@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Check, Copy, Download, FileCode2, Loader2 } from "lucide-react";
+import { AlertTriangle, Check, Copy, Database, Download, FileCode2, Loader2, Settings } from "lucide-react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   LARGE_CAPTURE_LIMIT_BYTES,
@@ -9,7 +10,7 @@ import {
   type CommonCrawlCapture,
   type MatchType
 } from "@/lib/common-crawl";
-import { fetchAndParseWarcRecord, sanitizeHtmlForPreview, type ParsedWarcRecord } from "@/lib/warc";
+import { loadCaptureRecord, sanitizeHtmlForPreview, type ParsedWarcRecord } from "@/lib/warc";
 import { cn, formatBytes } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { createMockWarcRecord, isMockCaptureFilename } from "@/lib/mock-data";
@@ -30,8 +31,8 @@ import {
 import { createViewerHref, parseViewerRoute, viewerBackHref } from "@/lib/navigation-state";
 
 type ViewerState =
-  | { kind: "loading" }
-  | { kind: "loaded"; record: ParsedWarcRecord }
+  | { kind: "loading"; source?: "cache" | "network" }
+  | { kind: "loaded"; record: ParsedWarcRecord; source: "cache" | "network" }
   | { kind: "too-large"; length: number }
   | { kind: "error"; message: string };
 
@@ -95,6 +96,23 @@ export function CaptureViewerApp() {
     );
   }, [captures, filename, offset, timestamp]);
 
+  const routeCapture = useMemo<CommonCrawlCapture>(
+    () => ({
+      collectionId: collection,
+      collectionName: collection,
+      collectionFrom: "",
+      collectionTo: "",
+      timestamp,
+      url,
+      status: "",
+      mime: "text/html",
+      filename,
+      offset,
+      length
+    }),
+    [collection, filename, length, offset, timestamp, url]
+  );
+
   useEffect(() => {
     if (!copied) return;
     const timer = window.setTimeout(() => setCopied(false), 1800);
@@ -111,7 +129,8 @@ export function CaptureViewerApp() {
     if (isMockCaptureFilename(filename)) {
       setState({
         kind: "loaded",
-        record: createMockWarcRecord({ filename, timestamp, url, collection })
+        record: createMockWarcRecord({ filename, timestamp, url, collection }),
+        source: "network"
       });
       return;
     }
@@ -120,15 +139,15 @@ export function CaptureViewerApp() {
       return;
     }
 
-    void fetchAndParseWarcRecord({ filename, offset, length, signal: controller.signal })
-      .then((record) => setState({ kind: "loaded", record }))
+    void loadCaptureRecord({ capture: routeCapture, signal: controller.signal })
+      .then(({ record, source }) => setState({ kind: "loaded", record, source }))
       .catch((error) => {
         if (controller.signal.aborted) return;
         setState({ kind: "error", message: error instanceof Error ? error.message : "Could not load WARC record." });
       });
 
     return () => controller.abort();
-  }, [collection, filename, length, numericLength, offset, timestamp, url]);
+  }, [collection, filename, length, numericLength, offset, routeCapture, timestamp, url]);
 
   useEffect(() => {
     if (scanId) {
@@ -241,10 +260,11 @@ export function CaptureViewerApp() {
           <section className="grid flex-1 min-h-96 place-items-center bg-zinc-950/40 p-8">
             <div className="text-center">
               <Loader2 className="mx-auto mb-3 animate-spin text-amber-200" size={30} />
-              <p className="font-semibold">Loading WARC range from Common Crawl...</p>
+              <p className="font-semibold">Loading capture...</p>
               <p className="mt-1 text-sm text-zinc-500">
-                {isMockCaptureFilename(filename) ? filename : warcRecordUrl(filename)}
+                Checking local cache before requesting Common Crawl.
               </p>
+              <p className="mt-1 text-xs text-zinc-600">{isMockCaptureFilename(filename) ? filename : warcRecordUrl(filename)}</p>
             </div>
           </section>
         ) : null}
@@ -280,6 +300,18 @@ export function CaptureViewerApp() {
                 ))}
               </div>
               <div className="flex gap-2">
+                <div className="hidden items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-400 sm:flex">
+                  <Database size={13} className={state.source === "cache" ? "text-emerald-300" : "text-amber-200"} />
+                  {state.source === "cache" ? "Local cache" : "Common Crawl"}
+                </div>
+                <Link
+                  href="/settings"
+                  aria-label="Open settings"
+                  title="Open settings"
+                  className="grid h-8 w-8 place-items-center rounded-md border border-zinc-800 bg-zinc-950 text-zinc-400 transition hover:border-amber-300/60 hover:text-amber-100"
+                >
+                  <Settings size={14} />
+                </Link>
                 <Button
                   variant="secondary"
                   size="sm"

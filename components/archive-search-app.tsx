@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Archive,
   Ban,
   CalendarDays,
   ChevronDown,
@@ -13,8 +12,10 @@ import {
   History as HistoryIcon,
   Info,
   List,
+  Menu,
   Play,
   RotateCcw,
+  Settings,
   SlidersHorizontal,
   Square,
   Terminal,
@@ -45,6 +46,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tooltip } from "@/components/ui/tooltip";
+import { BrandLockup } from "@/components/brand";
 import { CaptureRow, CaptureRowHeader, type SortOption } from "@/components/capture-row";
 import { CalendarView } from "@/components/calendar-view";
 import { createMockSearchDataset, createMockWarcRecord, isMockCaptureFilename } from "@/lib/mock-data";
@@ -72,7 +74,7 @@ import {
   type StoredSearch
 } from "@/lib/capture-store";
 import { dedupeCaptures, mergeCollectionResults, upsertCollectionResult } from "@/lib/scan-results";
-import { fetchAndParseWarcRecord } from "@/lib/warc";
+import { loadCaptureRecord } from "@/lib/warc";
 import { createZipBlob } from "@/lib/zip";
 import { robotsUrlForTarget, type RobotsCheckResult } from "@/lib/robots";
 import { readCachedRobotsStatus, writeCachedRobotsStatus } from "@/lib/robots-cache";
@@ -418,6 +420,112 @@ function htmlArchiveFilename(capture: CommonCrawlCapture, index: number) {
   ].join("_") + ".html";
 }
 
+// Sorts before the "0001_…" capture files so it is the first entry users see.
+const HTML_ZIP_WARNING_FILENAME = "0000_WARNING_READ-ME-FIRST.txt";
+
+function htmlZipWarningContent(): string {
+  return `================================================================
+  WARNING – READ ME FIRST
+  Security & privacy when opening these HTML files
+================================================================
+
+This ZIP contains archived HTML pages from the Common Crawl
+dataset. Only the HTML document itself was stored — NOT the images,
+scripts, stylesheets, fonts or other assets it references.
+
+Those assets are still present in the HTML as references to the
+LIVE WEB (e.g. <img src="https://...">, <script src="...">,
+<link href="...">). As soon as you open one of these files in a
+browser WITH an internet connection, the browser fetches that
+content in real time from third-party servers.
+
+This is NOT a true snapshot of the images/assets — it is a live
+fetch performed at the moment you open the file.
+
+
+----------------------------------------------------------------
+PRIVACY RISKS
+----------------------------------------------------------------
+
+* Revealing connections: Every fetched asset sends a request to a
+  third-party server, exposing your IP address, a timestamp, your
+  browser/device identifier (User-Agent) and possibly the referrer.
+
+* Tracking pixels & beacons: Archived pages often contain invisible
+  counting/tracking pixels, analytics and ad scripts. Opening the
+  file tells the operators (and ad/tracking networks) THAT and WHEN
+  you are viewing this specific content.
+
+* Re-identification: Your IP address gets linked to the viewing of
+  one specific archived item — even if the original site has long
+  been offline.
+
+* Cookies & local storage: Embedded third-party content can set
+  cookies or send existing ones if you are signed in to services in
+  the same browser.
+
+
+----------------------------------------------------------------
+SECURITY RISKS
+----------------------------------------------------------------
+
+* Active code: The raw HTML can contain <script> tags and event
+  handlers. Opening it directly in a browser may EXECUTE that code
+  (unlike the app's hardened preview, which runs in a sandbox and
+  blocks assets).
+
+* Malicious code from the live web: The fetched server content is
+  NOT the content from back then. If an original domain has since
+  been taken over, hijacked or replaced with malicious code, opening
+  the file may deliver current malware (drive-by downloads, exploits).
+
+* Misleading rendering: Because images/scripts load live, the page
+  may NO LONGER reflect the archived state. For evidence
+  preservation, research or documentation, the rendering is
+  therefore not trustworthy.
+
+* Phishing / mixed content: Embedded forms or redirects may point to
+  current, possibly malicious destinations.
+
+
+----------------------------------------------------------------
+HOW TO REDUCE THE RISKS
+----------------------------------------------------------------
+
+1. OPEN WITHOUT AN INTERNET CONNECTION (most important step)
+   Disconnect from the internet before opening a file (airplane
+   mode, Wi-Fi/LAN off, or a firewall block). The browser then
+   CANNOT fetch any assets and CANNOT contact any third-party
+   server. You will see only the archived HTML text — images and
+   external content stay blank. This is intended and the safest
+   state.
+
+2. Disable JavaScript
+   Turn off JavaScript in your browser before opening the file so
+   that embedded active code cannot run.
+
+3. Use an isolated environment
+   Open the files in a virtual machine, a separate browser profile
+   with no logins/extensions, or a throwaway container. This
+   protects your cookies, logins and main system.
+
+4. Use a content/tracking blocker
+   An ad/tracking blocker reduces third-party content if you do open
+   the file online.
+
+5. Only open captures you trust
+   Be especially careful with pages from unknown or dubious sources.
+
+Rule of thumb: open OFFLINE for plain reading/archiving. Only go
+online if you deliberately and knowingly want to contact the
+original source again.
+
+================================================================
+Generated by the Common Crawl Archive Viewer.
+================================================================
+`;
+}
+
 function downloadBlob(blob: Blob, filename: string) {
   const objectUrl = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -606,6 +714,62 @@ function scanLogRowClass(withDate: boolean) {
   return `grid gap-2 px-3 py-2 text-xs text-zinc-400 ${
     withDate ? "sm:grid-cols-[150px_130px_1fr]" : "sm:grid-cols-[74px_130px_1fr]"
   }`;
+}
+
+function TopRightMenu() {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointer = (event: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", handlePointer);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("mousedown", handlePointer);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [open]);
+
+  const itemClass =
+    "flex items-center gap-2 px-3 py-2.5 text-sm font-semibold text-zinc-100 transition hover:bg-zinc-800 focus:outline-none focus-visible:bg-zinc-800";
+
+  return (
+    <div ref={containerRef} className="fixed right-4 top-4 z-30 md:right-8 md:top-6">
+      <button
+        type="button"
+        aria-label="Open menu"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="grid h-10 w-10 place-items-center rounded-md border border-zinc-700 bg-zinc-950/70 text-zinc-200 transition hover:border-amber-300 hover:text-amber-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
+      >
+        <Menu size={20} />
+      </button>
+      {open ? (
+        <div
+          role="menu"
+          className="absolute right-0 mt-2 w-44 overflow-hidden rounded-md border border-zinc-700 bg-zinc-950/95 shadow-lg shadow-black/40 backdrop-blur"
+        >
+          <Link href="/history" role="menuitem" className={itemClass} onClick={() => setOpen(false)}>
+            <HistoryIcon size={16} />
+            History
+          </Link>
+          <Link href="/settings" role="menuitem" className={itemClass} onClick={() => setOpen(false)}>
+            <Settings size={16} />
+            Settings
+          </Link>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 export function ArchiveSearchApp({
@@ -1324,7 +1488,9 @@ export function ArchiveSearchApp({
     });
 
     try {
-      const entries: { filename: string; content: string }[] = [];
+      const entries: { filename: string; content: string }[] = [
+        { filename: HTML_ZIP_WARNING_FILENAME, content: htmlZipWarningContent() }
+      ];
       for (let index = 0; index < capturesToDownload.length; index += 1) {
         if (controller.signal.aborted) throw new DOMException("The operation was aborted.", "AbortError");
         const capture = capturesToDownload[index];
@@ -1335,12 +1501,10 @@ export function ArchiveSearchApp({
               url: capture.url,
               collection: capture.collectionId
             })
-          : await fetchAndParseWarcRecord({
-              filename: capture.filename,
-              offset: capture.offset,
-              length: capture.length,
+          : await loadCaptureRecord({
+              capture,
               signal: controller.signal
-            });
+            }).then((loaded) => loaded.record);
 
         entries.push({
           filename: htmlArchiveFilename(capture, index),
@@ -1710,20 +1874,21 @@ export function ArchiveSearchApp({
           : "grid min-h-screen place-items-center px-4 py-8 text-zinc-100 md:px-8"
       }
     >
+      {hasStartedSearch ? null : <TopRightMenu />}
       <div className={hasStartedSearch ? "mx-auto flex max-w-7xl flex-col gap-4" : "mx-auto w-full max-w-3xl"}>
         <header className={hasStartedSearch ? "archive-panel rounded-md p-4" : "p-0"}>
           <div className={hasStartedSearch ? "flex flex-col gap-4 lg:flex-row lg:items-end" : "flex flex-col gap-4"}>
             <div className="flex-1">
-              <div className={hasStartedSearch ? "mb-3 flex items-center gap-3" : "mb-8 flex flex-col items-center gap-4 text-center"}>
+              <div className={hasStartedSearch ? "mb-3 flex items-center gap-3" : "relative mb-8 flex flex-col items-center gap-4 text-center"}>
                 {hasStartedSearch ? (
                   <div className="flex items-center gap-2">
                     <Link
                       href="/"
                       aria-label="Start a new search"
                       title="Start a new search"
-                      className="grid h-10 w-10 place-items-center rounded-md border border-amber-300/40 bg-amber-300 text-zinc-950 transition hover:bg-amber-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
+                      className="rounded-md transition focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
                     >
-                      <Archive size={20} />
+                      <BrandLockup wordClassName="text-xl leading-none" />
                     </Link>
                     <Link
                       href="/history"
@@ -1733,13 +1898,31 @@ export function ArchiveSearchApp({
                     >
                       <HistoryIcon size={20} />
                     </Link>
+                    <Link
+                      href="/settings"
+                      aria-label="Open settings"
+                      title="Open settings"
+                      className="grid h-10 w-10 place-items-center rounded-md border border-zinc-700 bg-zinc-950/70 text-zinc-200 transition hover:border-amber-300 hover:text-amber-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
+                    >
+                      <Settings size={20} />
+                    </Link>
                   </div>
                 ) : null}
-                <div>
-                  <h1 className={hasStartedSearch ? "text-xl font-black uppercase tracking-[0.18em] text-zinc-50" : "text-4xl font-black uppercase tracking-[0.18em] text-zinc-50 sm:text-5xl"}>
-                    {APP_NAME}
-                  </h1>
-                </div>
+                {hasStartedSearch ? null : (
+                  <>
+                    <p className="absolute bottom-full left-1/2 mb-16 w-full max-w-xl -translate-x-1/2 text-balance text-2xl font-black leading-tight tracking-tight text-zinc-100 sm:mb-24 sm:text-3xl">
+                      Search <span className="text-amber-300">hundreds of billions</span> of
+                      archived web pages.
+                    </p>
+                    <h1>
+                      <BrandLockup
+                        size="hero"
+                        className="justify-center gap-5"
+                        wordClassName="leading-none"
+                      />
+                    </h1>
+                  </>
+                )}
               </div>
               <div className="flex flex-col gap-2 sm:flex-row" suppressHydrationWarning>
                 {hasStartedSearch ? (
@@ -1773,15 +1956,6 @@ export function ArchiveSearchApp({
                     <Play size={16} />
                     Start scan
                   </Button>
-                ) : null}
-                {!hasStartedSearch ? (
-                  <Link
-                    href="/history"
-                    className="inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-md border border-zinc-700 bg-zinc-900 px-4 text-sm font-semibold text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-500"
-                  >
-                    <HistoryIcon size={16} />
-                    History
-                  </Link>
                 ) : null}
               </div>
               {!hasStartedSearch ? (
