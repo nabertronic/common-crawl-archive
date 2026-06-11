@@ -135,6 +135,15 @@ describe("ArchiveSearchApp", () => {
     expect(screen.getByRole("button", { name: /^list$/i })).toHaveClass("bg-amber-300");
   });
 
+  it("shows one continue action for failed scan results", async () => {
+    render(<ArchiveSearchApp initialParams={{ mock: "1", url: "example.org" }} />);
+
+    await waitFor(() => expect(screen.getByLabelText("Scanned URL")).toHaveTextContent("example.org"));
+
+    expect(screen.queryByRole("button", { name: /retry failed/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /continue/i })).toBeInTheDocument();
+  });
+
   it("clears the URL when navigating from a search flow back to the home screen", async () => {
     const { unmount } = render(<ArchiveSearchApp initialParams={{ mock: "1", url: "hutt.io" }} />);
 

@@ -151,7 +151,7 @@ describe("Common Crawl client", () => {
     );
   });
 
-  it("treats root domain searches as covering subdomain targets", () => {
+  it("recognizes URL compatibility for reusing broader stored scans", () => {
     expect(searchUrlCoversTarget("https://example.com/", "domain", "https://blog.example.com/post", "host")).toBe(true);
     expect(searchUrlCoversTarget("https://www.example.com/", "domain", "https://blog.example.com/post", "exact")).toBe(true);
     expect(searchUrlCoversTarget("https://example.com/", "domain", "https://badexample.com/post", "host")).toBe(false);

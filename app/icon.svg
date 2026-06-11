@@ -1,13 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Crawlback">
-  <g transform="translate(92 9) scale(1.42) translate(0 350) scale(0.1 -0.1)">
-    <path d="M785 3145 c-47 -17 -67 -39 -90 -100 -20 -50 -15 -93 15 -142 42 -69
-32 -67 465 -73 l390 -5 3 -1097 2 -1098 -373 0 c-367 0 -373 0 -417 -22 -119
--60 -129 -212 -19 -285 l43 -28 409 -3 c446 -3 484 1 567 53 51 32 96 101 110
-169 7 35 10 428 8 1241 l-3 1190 -23 47 c-28 57 -105 129 -158 148 -59 21
--872 26 -929 5z" fill="#FFD84A"/>
-    <path d="M1015 2484 c-16 -8 -182 -164 -367 -347 -369 -364 -362 -355 -338
--449 9 -38 48 -80 338 -367 180 -178 341 -332 357 -342 40 -25 110 -25 152 1
-52 31 77 96 62 157 -8 31 -59 86 -291 314 l-282 276 273 269 c150 147 279 280
-287 295 8 16 14 48 14 73 0 98 -115 166 -205 120z" fill="#F7F7F5"/>
-  </g>
+  <rect width="512" height="512" rx="96" fill="#09090b"/>
+  <text
+    y="56%"
+    dominant-baseline="middle"
+    text-anchor="middle"
+    font-family="ui-monospace, SFMono-Regular, Cascadia Code, Liberation Mono, Menlo, monospace"
+    font-size="244"
+    font-weight="900"
+  >
+    <tspan x="205" fill="#f4f4f5">c</tspan><tspan x="318" fill="#fcd34d">b</tspan>
+  </text>
 </svg>

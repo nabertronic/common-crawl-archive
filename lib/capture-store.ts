@@ -1,4 +1,4 @@
-import type { CollectionCheckResult, CommonCrawlCapture, CommonCrawlCollection, MatchType } from "./common-crawl";
+import type { CollectionCheckResult, CommonCrawlCapture, CommonCrawlCollection, MatchType, ScanLogEntry } from "./common-crawl";
 import { dedupeCaptures, mergeCollectionResult } from "./scan-results";
 
 const DB_NAME = "wayback-fallback";
@@ -27,6 +27,7 @@ export type StoredSearch = {
   scanScope?: ScanScope;
   collections?: CommonCrawlCollection[];
   results?: CollectionCheckResult[];
+  scanLogResults?: ScanLogEntry[];
   updatedAt: number;
 };
 
@@ -47,9 +48,11 @@ export type CoverageRecord = {
   matchType: MatchType;
   mock: boolean;
   collectionResults: Record<string, CollectionCheckResult>;
+  scanLogResults?: ScanLogEntry[];
   // Accumulated active scanning time across all runs, so a scan reopened from
   // history can show how long the run actually took instead of 0:00.
   durationMs?: number;
+  activeScanStartedAt?: number;
   updatedAt: number;
 };
 
@@ -373,7 +376,30 @@ export async function upsertCoverageResult(
       ...(existing?.collectionResults ?? {}),
       [result.collection.id]: merged
     },
+    scanLogResults: [...(existing?.scanLogResults ?? coverageResults(existing)), result],
     durationMs: existing?.durationMs,
+    activeScanStartedAt: existing?.activeScanStartedAt,
+    updatedAt: Date.now()
+  };
+  await putCoverage(next);
+  return next;
+}
+
+export async function appendCoverageScanLogEntry(
+  target: Pick<SearchTarget, "targetId" | "ownerId" | "url" | "matchType" | "mock">,
+  entry: ScanLogEntry
+): Promise<CoverageRecord> {
+  const existing = await getCoverage(target.targetId);
+  const next: CoverageRecord = {
+    targetId: target.targetId,
+    ownerId: existing?.ownerId ?? target.ownerId ?? await activeOwnerId(),
+    url: target.url,
+    matchType: target.matchType,
+    mock: target.mock,
+    collectionResults: existing?.collectionResults ?? {},
+    scanLogResults: [...(existing?.scanLogResults ?? coverageResults(existing)), entry],
+    durationMs: existing?.durationMs,
+    activeScanStartedAt: existing?.activeScanStartedAt,
     updatedAt: Date.now()
   };
   await putCoverage(next);
@@ -389,8 +415,36 @@ export async function addCoverageDuration(targetId: string, segmentMs: number): 
   await putCoverage({
     ...existing,
     durationMs: (existing.durationMs ?? 0) + Math.round(segmentMs),
+    activeScanStartedAt: undefined,
     updatedAt: Date.now()
   });
+}
+
+export async function startCoverageRun(
+  target: Pick<SearchTarget, "targetId" | "ownerId" | "url" | "matchType" | "mock">,
+  startedAt: number,
+  durationMs: number
+): Promise<void> {
+  if (!Number.isFinite(startedAt) || !Number.isFinite(durationMs) || durationMs < 0) return;
+  const existing = await getCoverage(target.targetId);
+  await putCoverage({
+    targetId: target.targetId,
+    ownerId: existing?.ownerId ?? target.ownerId ?? await activeOwnerId(),
+    url: target.url,
+    matchType: target.matchType,
+    mock: target.mock,
+    collectionResults: existing?.collectionResults ?? {},
+    scanLogResults: existing?.scanLogResults,
+    durationMs: Math.round(durationMs),
+    activeScanStartedAt: Math.round(startedAt),
+    updatedAt: Date.now()
+  });
+}
+
+export function coverageDurationMs(record: CoverageRecord | undefined, now = Date.now()): number {
+  const storedDuration = record?.durationMs ?? 0;
+  const activeSegment = record?.activeScanStartedAt ? Math.max(0, now - record.activeScanStartedAt) : 0;
+  return storedDuration + activeSegment;
 }
 
 export function coverageResults(record: CoverageRecord | undefined): CollectionCheckResult[] {
@@ -398,6 +452,14 @@ export function coverageResults(record: CoverageRecord | undefined): CollectionC
     ...result,
     checkedAt: result.checkedAt ?? record?.updatedAt
   }));
+}
+
+export function coverageScanLogResults(record: CoverageRecord | undefined): ScanLogEntry[] {
+  if (!record?.scanLogResults?.length) return coverageResults(record);
+  return record.scanLogResults.map((result) => ("kind" in result
+    ? { ...result, checkedAt: result.checkedAt ?? record.updatedAt }
+    : { ...result, checkedAt: result.checkedAt ?? record.updatedAt }
+  ));
 }
 
 export function coverageCaptures(record: CoverageRecord | undefined): CommonCrawlCapture[] {

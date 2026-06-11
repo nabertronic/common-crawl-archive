@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Ban,
   CalendarDays,
@@ -32,11 +32,14 @@ import {
   isLikelyRateLimitError,
   queryCollection,
   searchUrlCoversTarget,
+  type CollectionAttemptLog,
   type CollectionCheckResult,
   type CommonCrawlCapture,
   type CommonCrawlCollection,
   type MatchType,
   type ResultsBackContext,
+  type ScanLogEntry,
+  type ScanLogEvent,
   type SearchProgress,
   type SearchStopReason,
   warcRecordUrl
@@ -53,8 +56,11 @@ import { createMockSearchDataset, createMockWarcRecord, isMockCaptureFilename } 
 import { APP_NAME, buildTabTitle, stripUrlForTitle } from "@/lib/app-meta";
 import {
   coverageCaptures,
+  coverageDurationMs,
   coverageResults,
+  coverageScanLogResults,
   addCoverageDuration,
+  appendCoverageScanLogEntry,
   deleteSearches,
   ensureScanSession,
   ensureTarget,
@@ -68,6 +74,7 @@ import {
   putSearch,
   scanSearchKey,
   searchKey,
+  startCoverageRun,
   subscribeToSearchChanges,
   upsertCoverageResult,
   type ScanSession,
@@ -264,6 +271,74 @@ function capturesFromResults(results: CollectionCheckResult[]) {
   return dedupeCaptures(results.flatMap((result) => result.captures));
 }
 
+function resultFromAttemptLog(collection: CommonCrawlCollection, attemptLog: CollectionAttemptLog): CollectionCheckResult {
+  return {
+    collection,
+    status: attemptLog.status,
+    captures: [],
+    checkedAt: attemptLog.checkedAt,
+    httpStatus: attemptLog.httpStatus,
+    error: attemptLog.error,
+    errorKind: attemptLog.errorKind,
+    attempts: 1,
+    runs: 1,
+    attemptLogs: [attemptLog]
+  };
+}
+
+function isCollectionScanLogEntry(entry: ScanLogEntry): entry is CollectionCheckResult {
+  return !("kind" in entry);
+}
+
+function scanLogEvent(event: ScanLogEvent["event"], message: string, tone: ScanLogEvent["tone"] = "neutral"): ScanLogEvent {
+  return {
+    kind: "event",
+    event,
+    checkedAt: Date.now(),
+    message,
+    tone
+  };
+}
+
+function scanStartEventForMode(mode: RunSearchMode) {
+  if (mode === "retry-failed") return scanLogEvent("retry-started", "Retry failed started.", "amber");
+  if (mode === "resume") return scanLogEvent("continue-started", "Scan continued from stored history.", "amber");
+  if (mode === "missing") return scanLogEvent("continue-started", "Missing collections scan started.", "amber");
+  if (mode === "auto-retry") return scanLogEvent("auto-retry-started", "Auto retry started.", "amber");
+  return scanLogEvent("scan-started", "Scan started.");
+}
+
+function scanScopeEvent(scope: ScanScope) {
+  return scanLogEvent(
+    "scope-selected",
+    scope === "all" ? "Full scan selected." : "Recent scan selected."
+  );
+}
+
+function scanCompletionEvent(input: { checked: number; failed: number; captures: number }) {
+  return scanLogEvent(
+    "scan-completed",
+    `Scan completed · ${input.checked} checked · ${input.failed} failed · ${input.captures} capture${input.captures === 1 ? "" : "s"}.`
+  );
+}
+
+function filterScanLogForCollections(entries: ScanLogEntry[], activeCollections: CommonCrawlCollection[]) {
+  const activeIds = new Set(activeCollections.map((collection) => collection.id));
+  return entries.filter((entry) => !isCollectionScanLogEntry(entry) || activeIds.has(entry.collection.id));
+}
+
+function scanLogEntryKey(entry: ScanLogEntry) {
+  if (!isCollectionScanLogEntry(entry)) {
+    return `event:${entry.event}:${entry.checkedAt ?? ""}:${entry.message}`;
+  }
+  return `collection:${entry.collection.id}:${entry.checkedAt ?? ""}:${entry.status}:${entry.errorKind ?? ""}:${entry.httpStatus ?? ""}`;
+}
+
+function mergeScanLogSnapshot(snapshot: ScanLogEntry[], current: ScanLogEntry[]) {
+  const keys = new Set(snapshot.map(scanLogEntryKey));
+  return [...snapshot, ...current.filter((entry) => !keys.has(scanLogEntryKey(entry)))];
+}
+
 // Rebuild per-collection scan-log entries from cached captures for records that
 // stored captures but no `results` (legacy/captures-only). Collections that
 // already have a real stored result are skipped so we never overwrite richer data.
@@ -323,6 +398,12 @@ function validStoredResults(results: CollectionCheckResult[] | undefined, collec
   if (!Array.isArray(results)) return [];
   const validIds = new Set(collections.map((collection) => collection.id));
   return results.filter((result) => typeof result?.collection?.id === "string" && validIds.has(result.collection.id));
+}
+
+function validStoredScanLogResults(record: StoredSearch, collections: CommonCrawlCollection[]) {
+  const entries = record.scanLogResults ?? record.results ?? [];
+  const validIds = new Set(collections.map((collection) => collection.id));
+  return entries.filter((entry) => !isCollectionScanLogEntry(entry) || validIds.has(entry.collection.id));
 }
 
 function resultCollectionIds(results: CollectionCheckResult[], status?: CollectionCheckResult["status"]) {
@@ -606,7 +687,15 @@ function filterStoredSearchForRequest(record: StoredSearch, url: string, matchTy
       ...result,
       captures: result.captures.filter(filterCapture),
       blockedCaptures: result.blockedCaptures?.filter((blocked) => filterCapture(blocked.capture))
-    }))
+    })),
+    scanLogResults: record.scanLogResults?.map((entry) => isCollectionScanLogEntry(entry)
+      ? {
+          ...entry,
+          captures: entry.captures.filter(filterCapture),
+          blockedCaptures: entry.blockedCaptures?.filter((blocked) => filterCapture(blocked.capture))
+        }
+      : entry
+    )
   };
 }
 
@@ -716,6 +805,37 @@ function scanLogRowClass(withDate: boolean) {
   }`;
 }
 
+function LandingStatsFooter() {
+  return (
+    <div
+      className="reveal-fade pointer-events-none fixed inset-x-0 top-0 z-10 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 px-4 pt-7 text-[11px] uppercase tracking-[0.22em] text-zinc-500"
+      style={{ animationDelay: "560ms" }}
+    >
+      <span>
+        <span className="text-zinc-300">300B+</span> pages
+      </span>
+      <span className="text-amber-300/70">·</span>
+      <span>
+        <span className="text-zinc-300">100+</span> crawls
+      </span>
+      <span className="text-amber-300/70">·</span>
+      <span>
+        since <span className="text-zinc-300">2008</span>
+      </span>
+    </div>
+  );
+}
+
+function LandingAtmosphere() {
+  return (
+    <div className="landing-atmosphere" aria-hidden>
+      <div className="landing-scanlines" />
+      <div className="landing-grain" />
+      <div className="landing-vignette" />
+    </div>
+  );
+}
+
 function TopRightMenu() {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -801,6 +921,7 @@ export function ArchiveSearchApp({
   const [collections, setCollections] = useState<CommonCrawlCollection[]>([]);
   const [captures, setCaptures] = useState<CommonCrawlCapture[]>([]);
   const [failedResults, setFailedResults] = useState<CollectionCheckResult[]>([]);
+  const [liveFailedResults, setLiveFailedResults] = useState<CollectionCheckResult[]>([]);
   const [progress, setProgress] = useState<SearchProgress>({
     checked: 0,
     total: 0,
@@ -820,12 +941,14 @@ export function ArchiveSearchApp({
   const [scanScope, setScanScope] = useState<ScanScope>(initialScanScope);
   const [page, setPage] = useState(initialPage);
   const [checkedCollectionIds, setCheckedCollectionIds] = useState<Set<string>>(new Set());
-  const [scanLog, setScanLog] = useState<CollectionCheckResult[]>([]);
+  const [scanLog, setScanLog] = useState<ScanLogEntry[]>([]);
   const [scanLogOpen, setScanLogOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [scanStartedAt, setScanStartedAt] = useState<number | undefined>();
   const [activeScanId, setActiveScanId] = useState(initialScanId ?? "");
   const [persistedScanScope, setPersistedScanScope] = useState<ScanScope>(initialScanScope);
+  const [storedDurationMs, setStoredDurationMs] = useState(0);
+  const [isPersistedScanRunning, setIsPersistedScanRunning] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [autoRetryEnabled, setAutoRetryEnabled] = useState(true);
   const [nextAutoRetryAt, setNextAutoRetryAt] = useState<number | undefined>();
@@ -853,6 +976,7 @@ export function ArchiveSearchApp({
   const autoStartedSignatureRef = useRef<string | null>(null);
   const filterResetMountedRef = useRef(false);
   const targetUrlInputRef = useRef<HTMLInputElement | null>(null);
+  const loggedAutoRetryAtRef = useRef<number | undefined>(undefined);
   const autoStartSignature = [
     initialMockMode ? "mock" : "live",
     initialUrl,
@@ -906,6 +1030,7 @@ export function ArchiveSearchApp({
     setMatchType(DEFAULT_MATCH_TYPE);
     setCaptures([]);
     setFailedResults([]);
+    setLiveFailedResults([]);
     setProgress({
       checked: 0,
       total: 0,
@@ -931,6 +1056,8 @@ export function ArchiveSearchApp({
     setScanStartedAt(undefined);
     setActiveScanId("");
     setPersistedScanScope("recent");
+    setStoredDurationMs(0);
+    setIsPersistedScanRunning(false);
     setElapsedMs(0);
     setAutoRetryEnabled(true);
     setNextAutoRetryAt(undefined);
@@ -1063,25 +1190,32 @@ export function ArchiveSearchApp({
     const activeIds = new Set(activeCollections.map((collection) => collection.id));
     const coverage = await getCoverage(session.targetId);
     const results = coverageResults(coverage).filter((result) => activeIds.has(result.collection.id));
+    const logResults = filterScanLogForCollections(coverageScanLogResults(coverage), activeCollections);
     const checkedIds = resultCollectionIds(results);
     const failed = results.filter((result) => result.status === "not-checked");
     const storedCaptures = dedupeCaptures(
       coverageCaptures(coverage).filter((capture) => activeIds.has(capture.collectionId))
     );
+    const activeStartedAt = coverage?.activeScanStartedAt;
+    const storedDuration = coverage?.durationMs ?? 0;
+    const displayedDuration = coverageDurationMs(coverage);
 
     setCollections(loadedCollections);
     setCaptures(storedCaptures);
     setFailedResults(failed);
     setCheckedCollectionIds(checkedIds);
-    setScanLog(results);
+    setScanLog(logResults);
+    setLiveFailedResults([]);
     // The scan log always starts collapsed when restoring a stored scan; its
     // open/closed state is intentionally not remembered across visits.
     setScanLogOpen(false);
     setError("");
     setState(results.length > 0 ? "done" : startsFromSearchRoute ? "done" : "idle");
     setIsStoredView(results.length > 0);
-    setScanStartedAt(coverage?.updatedAt);
-    setElapsedMs(coverage?.durationMs ?? 0);
+    setScanStartedAt(activeStartedAt ?? coverage?.updatedAt);
+    setStoredDurationMs(storedDuration);
+    setIsPersistedScanRunning(Boolean(activeStartedAt));
+    setElapsedMs(displayedDuration);
     setProgress({
       checked: checkedIds.size,
       total: activeCollections.length,
@@ -1127,6 +1261,7 @@ export function ArchiveSearchApp({
     setCollections(mock.collections);
     setCaptures(mock.captures);
     setFailedResults(mock.failedResults);
+    setLiveFailedResults([]);
     setCheckedCollectionIds(checkedIds);
     setScanLog(mock.scanLog);
     // The scan log only opens when the user expands it.
@@ -1135,6 +1270,8 @@ export function ArchiveSearchApp({
     setState("done");
     setIsStoredView(true);
     setScanStartedAt(Date.now() - 129000);
+    setStoredDurationMs(129000);
+    setIsPersistedScanRunning(false);
     setElapsedMs(129000);
     setAutoRetryEnabled(persistedAutoRetry?.enabled ?? true);
     setNextAutoRetryAt(persistedAutoRetry?.nextRetryAt);
@@ -1211,22 +1348,38 @@ export function ArchiveSearchApp({
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
-    void checkRobotsForUrl(url, controller.signal);
     setError("");
     setOptOutMatch(null);
     setIsStoredView(false);
+    setLiveFailedResults([]);
+    setIsPersistedScanRunning(true);
     setScanScope(activeScope);
     setPersistedScanScope(activeScope);
-    const startedAt = mode === "fresh" || !scanStartedAt ? Date.now() : scanStartedAt;
-    setScanStartedAt(startedAt);
-    setElapsedMs(mode === "fresh" ? 0 : Date.now() - startedAt);
+    const coverageBeforeRun = await getCoverage(session.targetId);
+    const baseDurationMs = mode === "fresh" ? 0 : coverageDurationMs(coverageBeforeRun) || storedDurationMs;
+    const runStartedAt = Date.now();
+    await startCoverageRun(session, runStartedAt, baseDurationMs);
+    let durationPersisted = false;
+    const persistRunDuration = async () => {
+      if (durationPersisted) return;
+      durationPersisted = true;
+      const segmentMs = Date.now() - runStartedAt;
+      const nextDurationMs = baseDurationMs + Math.max(0, segmentMs);
+      setStoredDurationMs(nextDurationMs);
+      setIsPersistedScanRunning(false);
+      setElapsedMs(nextDurationMs);
+      await addCoverageDuration(session.targetId, segmentMs);
+    };
+    setScanStartedAt(runStartedAt);
+    setStoredDurationMs(baseDurationMs);
+    setElapsedMs(baseDurationMs);
     setNextAutoRetryAt(undefined);
     setState(collections.length > 0 ? "running" : "loading-collections");
 
     const loadStoredForMode =
       mode === "fresh" ||
       mode === "missing" ||
-      ((mode === "retry-failed" || mode === "auto-retry") &&
+      ((mode === "resume" || mode === "retry-failed" || mode === "auto-retry") &&
         checkedCollectionIds.size === 0 &&
         failedResults.length === 0);
 
@@ -1238,8 +1391,32 @@ export function ArchiveSearchApp({
       setProgress({ checked: 0, total: 0, hits: 0, failed: 0, activeCollections: [] });
     }
 
+    const appendRunLogEvent = (entry: ScanLogEvent) => {
+      setScanLog((current) => [...current, entry]);
+      void appendCoverageScanLogEntry(session, entry);
+    };
+    appendRunLogEvent(scanStartEventForMode(mode));
+    appendRunLogEvent(scanScopeEvent(activeScope));
+    if (mode === "fresh") {
+      appendRunLogEvent(scanLogEvent("fresh-scan-cleared", "Fresh scan started with a clean result view."));
+    }
+    void checkRobotsForUrl(url, controller.signal, appendRunLogEvent);
+    let cancellationLogged = false;
+    const appendCancellationLog = () => {
+      if (cancellationLogged) return;
+      cancellationLogged = true;
+      appendRunLogEvent(scanLogEvent("scan-cancelled", "Scan cancelled.", "red"));
+    };
+
     try {
       const activeOptOutMatch = await findOptOutMatch(url, activeMatchType, controller.signal);
+      appendRunLogEvent(
+        scanLogEvent(
+          "opt-out-checked",
+          activeOptOutMatch ? "Opt-out registry matched this URL." : "Opt-out registry checked: no match.",
+          activeOptOutMatch ? "red" : "neutral"
+        )
+      );
       if (activeOptOutMatch) {
         const activeCollections = collectionsForScope(collections, activeScope);
         const storedRecords = loadStoredForMode ? await getStoredScanVariants(url, activeMatchType, false, activeScope) : [];
@@ -1263,23 +1440,27 @@ export function ArchiveSearchApp({
         const recordTimestamps = [...storedRecords, ...compatibleCaptureRecords]
           .map((record) => record.updatedAt)
           .filter((value): value is number => typeof value === "number");
-        const scannedAt = recordTimestamps.length > 0 ? Math.max(...recordTimestamps) : startedAt;
+        const scannedAt = recordTimestamps.length > 0 ? Math.max(...recordTimestamps) : runStartedAt;
         const reconstructedResults = [
           ...storedResults,
           ...synthesizeResultsFromCaptures(storedCaptures, storedResults, activeCollections, scannedAt)
         ];
+        const reconstructedScanLog = [
+          ...storedRecords.flatMap((record) => validStoredScanLogResults(record, activeCollections)),
+          ...synthesizeResultsFromCaptures(storedCaptures, storedResults, activeCollections, scannedAt)
+        ];
         const storedCheckedIds = resultCollectionIds(reconstructedResults);
         const storedFailedResults = reconstructedResults.filter((result) => result.status === "not-checked");
-        const optOutCoverage = await getCoverage(session.targetId);
 
         setOptOutMatch(activeOptOutMatch);
         setIsStoredView(true);
         setOptOutCachedScanAt(storedCaptures.length > 0 ? scannedAt : undefined);
-        setElapsedMs(optOutCoverage?.durationMs ?? 0);
+        await persistRunDuration();
         setCaptures(storedCaptures);
         setFailedResults(storedFailedResults);
+        setLiveFailedResults([]);
         setCheckedCollectionIds(storedCheckedIds);
-        setScanLog(reconstructedResults);
+        setScanLog((current) => mergeScanLogSnapshot(reconstructedScanLog, current));
         // Restored historical scan (live re-scan blocked) stays collapsed.
         setScanLogOpen(false);
         setProgress({
@@ -1300,6 +1481,7 @@ export function ArchiveSearchApp({
       let currentResults = coverageResults(coverage).filter((result) =>
         activeCollections.some((collection) => collection.id === result.collection.id)
       );
+      let currentScanLog = filterScanLogForCollections(coverageScanLogResults(coverage), activeCollections);
       let currentCaptures = coverageCaptures(coverage).filter((capture) =>
         activeCollections.some((collection) => collection.id === capture.collectionId)
       );
@@ -1307,7 +1489,7 @@ export function ArchiveSearchApp({
       let currentFailedResults = currentResults.filter((result) => result.status === "not-checked");
       const failedIds = new Set(currentFailedResults.map((result) => result.collection.id));
       const attemptedIds = resultCollectionIds(currentResults);
-      let searchSet = activeCollections.filter((collection) => !currentCheckedIds.has(collection.id));
+      let searchSet = activeCollections.filter((collection) => !attemptedIds.has(collection.id) || failedIds.has(collection.id));
 
       if (mode === "missing") {
         searchSet = activeCollections.filter((collection) => !attemptedIds.has(collection.id));
@@ -1321,7 +1503,7 @@ export function ArchiveSearchApp({
       setCaptures(currentCaptures);
       setFailedResults(currentFailedResults);
       setCheckedCollectionIds(currentCheckedIds);
-      setScanLog(currentResults);
+      setScanLog((current) => mergeScanLogSnapshot(currentScanLog, current));
       // Stored coverage loaded before a (re)scan stays collapsed; the live scan
       // loop below will expand it once new results start streaming in.
       setScanLogOpen(false);
@@ -1332,14 +1514,30 @@ export function ArchiveSearchApp({
         failed: currentFailedResults.length,
         activeCollections: []
       });
+      if (currentResults.length > 0 || currentCaptures.length > 0) {
+        appendRunLogEvent(
+          scanLogEvent(
+            "stored-coverage-loaded",
+            `Loaded stored coverage · ${currentResults.length} collection${currentResults.length === 1 ? "" : "s"} · ${currentCaptures.length} capture${currentCaptures.length === 1 ? "" : "s"}.`
+          )
+        );
+      }
 
       if (searchSet.length === 0) {
+        if (mode === "auto-retry") {
+          appendRunLogEvent(scanLogEvent("auto-retry-skipped", "Auto retry skipped: no failed or unchecked collections remain.", "amber"));
+        }
+        appendRunLogEvent(scanCompletionEvent({
+          checked: currentCheckedIds.size,
+          failed: currentFailedResults.length,
+          captures: currentCaptures.length
+        }));
+        await persistRunDuration();
         setState("done");
         return;
       }
 
       setState("running");
-      const runStartedAt = Date.now();
       let consecutiveAvailabilitySignals = 0;
       let stopReason: SearchStopReason = "completed";
 
@@ -1349,25 +1547,49 @@ export function ArchiveSearchApp({
         coverage = await getCoverage(session.targetId);
         const existing = coverage?.collectionResults[collection.id];
         if (existing?.status === "checked") {
+          appendRunLogEvent(scanLogEvent("collection-skipped", `${collection.id} skipped: already checked successfully.`));
           currentResults = coverageResults(coverage).filter((result) =>
             activeCollections.some((activeCollection) => activeCollection.id === result.collection.id)
           );
+          currentScanLog = filterScanLogForCollections(coverageScanLogResults(coverage), activeCollections);
           currentCaptures = coverageCaptures(coverage).filter((capture) =>
             activeCollections.some((activeCollection) => activeCollection.id === capture.collectionId)
           );
           currentCheckedIds = resultCollectionIds(currentResults);
           setCaptures(currentCaptures);
           setCheckedCollectionIds(currentCheckedIds);
-          setScanLog(currentResults);
+          setScanLog((current) => mergeScanLogSnapshot(currentScanLog, current));
           continue;
         }
 
         setProgress((current) => ({ ...current, activeCollections: [collection.id] }));
-        const result = await queryCollection(url, collection, controller.signal, undefined, undefined, undefined, undefined, activeMatchType);
+        const result = await queryCollection(
+          url,
+          collection,
+          controller.signal,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          activeMatchType,
+          (attemptLog) => {
+            setScanLog((current) => [...current, resultFromAttemptLog(collection, attemptLog)]);
+            if (attemptLog.errorKind === "timeout") {
+              appendRunLogEvent(scanLogEvent("request-timeout", `${collection.id} request timed out.`, "red"));
+            }
+          },
+          (delayMs) => appendRunLogEvent(
+            scanLogEvent("retry-wait-started", `${collection.id} retry wait started · ${formatDuration(delayMs)}.`, "amber")
+          )
+        );
+        if (result.fromCache) {
+          appendRunLogEvent(scanLogEvent("cache-hit", `${collection.id} loaded from CDX cache.`));
+        }
         coverage = await upsertCoverageResult(target, result);
         currentResults = coverageResults(coverage).filter((storedResult) =>
           activeCollections.some((activeCollection) => activeCollection.id === storedResult.collection.id)
         );
+        currentScanLog = filterScanLogForCollections(coverageScanLogResults(coverage), activeCollections);
         currentCaptures = coverageCaptures(coverage).filter((capture) =>
           activeCollections.some((activeCollection) => activeCollection.id === capture.collectionId)
         );
@@ -1376,8 +1598,9 @@ export function ArchiveSearchApp({
 
         setCaptures(currentCaptures);
         setFailedResults(currentFailedResults);
+        setLiveFailedResults((currentLiveFailures) => upsertLiveFailures(currentLiveFailures, result));
         setCheckedCollectionIds(currentCheckedIds);
-        setScanLog(currentResults);
+        setScanLog((current) => mergeScanLogSnapshot(currentScanLog, current));
         setProgress({
           checked: currentCheckedIds.size,
           total: activeCollections.length,
@@ -1396,30 +1619,52 @@ export function ArchiveSearchApp({
         }
       }
 
-      void addCoverageDuration(target.targetId, Date.now() - runStartedAt);
+      await persistRunDuration();
 
       if (controller.signal.aborted) {
+        appendCancellationLog();
         setState("cancelled");
       } else if (stopReason === "circuit-breaker") {
+        appendRunLogEvent(
+          scanLogEvent(
+            "scan-paused",
+            `Circuit breaker threshold reached: paused after ${DEFAULT_CIRCUIT_BREAKER_THRESHOLD} consecutive availability failures.`,
+            "amber"
+          )
+        );
         setState("paused");
       } else {
+        appendRunLogEvent(scanCompletionEvent({
+          checked: currentCheckedIds.size,
+          failed: currentFailedResults.length,
+          captures: currentCaptures.length
+        }));
         setState("done");
       }
     } catch (err) {
       if (controller.signal.aborted) {
+        appendCancellationLog();
+        await persistRunDuration();
         setState("cancelled");
         return;
       }
       setError(formatSearchError(err));
+      appendRunLogEvent(scanLogEvent("scan-failed", formatSearchError(err), "red"));
+      await persistRunDuration();
       setState("error");
     }
   }
 
-  async function checkRobotsForUrl(url: string, parentSignal?: AbortSignal) {
+  async function checkRobotsForUrl(
+    url: string,
+    parentSignal?: AbortSignal,
+    appendLogEvent?: (entry: ScanLogEvent) => void
+  ) {
     const target = robotsUrlForTarget(url);
     const cached = readCachedRobotsStatus(url);
     if (cached) {
       setRobotsStatus(cached);
+      appendLogEvent?.(scanLogEvent("robots-cached", "CCBot robots.txt loaded from cache."));
       return;
     }
 
@@ -1442,6 +1687,7 @@ export function ArchiveSearchApp({
       if (!controller.signal.aborted) {
         writeCachedRobotsStatus(url, result);
         setRobotsStatus(result);
+        appendLogEvent?.(scanLogEvent("robots-checked", "CCBot robots.txt checked live."));
       }
     } catch {
       if (!controller.signal.aborted) {
@@ -1454,6 +1700,7 @@ export function ArchiveSearchApp({
         };
         writeCachedRobotsStatus(url, result);
         setRobotsStatus(result);
+        appendLogEvent?.(scanLogEvent("robots-checked", "CCBot robots.txt checked live: unavailable.", "red"));
       }
     } finally {
       parentSignal?.removeEventListener("abort", abortFromParent);
@@ -1481,6 +1728,12 @@ export function ArchiveSearchApp({
     if (capturesToDownload.length === 0 || htmlZipDownload.active) return;
     const controller = new AbortController();
     htmlZipAbortRef.current = controller;
+    appendUiScanLogEvent(
+      scanLogEvent(
+        "html-zip-started",
+        `HTML ZIP download started · ${capturesToDownload.length} capture${capturesToDownload.length === 1 ? "" : "s"}.`
+      )
+    );
     setHtmlZipDownload({
       active: true,
       completed: 0,
@@ -1526,6 +1779,12 @@ export function ArchiveSearchApp({
         completed: capturesToDownload.length,
         total: capturesToDownload.length
       });
+      appendUiScanLogEvent(
+        scanLogEvent(
+          "html-zip-completed",
+          `HTML ZIP download completed · ${capturesToDownload.length} capture${capturesToDownload.length === 1 ? "" : "s"}.`
+        )
+      );
     } catch (error) {
       if (controller.signal.aborted) {
         setHtmlZipDownload({
@@ -1533,14 +1792,17 @@ export function ArchiveSearchApp({
           completed: 0,
           total: 0
         });
+        appendUiScanLogEvent(scanLogEvent("html-zip-cancelled", "HTML ZIP download cancelled.", "amber"));
         return;
       }
+      const message = error instanceof Error ? error.message : "Could not download all HTML captures.";
       setHtmlZipDownload({
         active: false,
         completed: 0,
         total: capturesToDownload.length,
-        error: error instanceof Error ? error.message : "Could not download all HTML captures."
+        error: message
       });
+      appendUiScanLogEvent(scanLogEvent("html-zip-failed", `HTML ZIP download failed: ${message}`, "red"));
     } finally {
       if (htmlZipAbortRef.current === controller) htmlZipAbortRef.current = null;
     }
@@ -1565,7 +1827,7 @@ export function ArchiveSearchApp({
         if (initialAction === "fresh") {
           await executeRunSearch("fresh", { session });
         } else if (initialAction === "retry-failed") {
-          await runSearch("retry-failed", { url: session.url, matchType: session.matchType, scope: session.scope });
+          await runSearch("resume", { url: session.url, matchType: session.matchType, scope: session.scope });
         } else if (initialAction === "missing") {
           await runSearch("missing", { url: session.url, matchType: session.matchType, scope: session.scope });
         }
@@ -1594,7 +1856,7 @@ export function ArchiveSearchApp({
       if (initialHistoryMode) return;
 
       if (initialAction === "retry-failed") {
-        await runSearch("retry-failed", { url: initialUrl, matchType: nextMatchType, scope: initialScanScope });
+        await runSearch("resume", { url: initialUrl, matchType: nextMatchType, scope: initialScanScope });
         return;
       }
       if (initialAction === "missing") {
@@ -1607,33 +1869,33 @@ export function ArchiveSearchApp({
   }, [autoStart, autoStartSignature, initialScanId, initialUrl, initialMatchType, initialScanScope, initialHistoryMode, initialAction, initialMockMode, applyRouteResultParams]);
 
   const isRunning = state === "loading-collections" || state === "running";
-  const currentFailedResults = scanLog.filter((result) => result.status === "not-checked");
-  const retryableFailedResults = failedResults.length > 0 ? failedResults : currentFailedResults;
-  const availabilityIssue = retryableFailedResults.some((result) =>
+  const currentNoticeFailedResults = liveFailedResults;
+  const availabilityIssue = currentNoticeFailedResults.some((result) =>
     isLikelyCommonCrawlAvailabilityIssue(result.error, result.httpStatus, result.errorKind)
   );
-  const hasExplicitRateLimit = retryableFailedResults.some((result) =>
+  const hasExplicitRateLimit = currentNoticeFailedResults.some((result) =>
     isLikelyRateLimitError(result.error, result.httpStatus, result.errorKind)
   );
-  const hasGatewayTimeout = retryableFailedResults.some((result) => result.errorKind === "http_504_gateway_timeout");
-  const hasSlowDown = retryableFailedResults.some((result) => result.errorKind === "http_500_slowdown");
-  const failedCount = currentFailedResults.length;
+  const hasGatewayTimeout = currentNoticeFailedResults.some((result) => result.errorKind === "http_504_gateway_timeout");
+  const hasSlowDown = currentNoticeFailedResults.some((result) => result.errorKind === "http_500_slowdown");
+  const failedCount = failedResults.length;
+  const noticeFailedCount = currentNoticeFailedResults.length;
   // Only successfully checked sources count as "done" — a failed source still
   // needs a (re)check, so it must not push completion to 100%.
   const successfulCount = Math.max(0, checkedCollectionIds.size - failedCount);
   const uncheckedCount = Math.max(0, (scopedCollections.length || progress.total) - checkedCollectionIds.size);
-  const canResume = !isRunning && !optOutMatch && targetUrl.trim() && uncheckedCount > 0 && checkedCollectionIds.size > 0;
-  const canStartFresh = !isRunning && targetUrl.trim() && !canResume;
+  const continueWorkCount = failedCount + uncheckedCount;
+  const canContinue = !isRunning && !optOutMatch && Boolean(targetUrl.trim()) && continueWorkCount > 0 && checkedCollectionIds.size > 0;
+  const canStartFresh = !isRunning && targetUrl.trim() && !canContinue;
   const hasStartedSearch =
     state !== "idle" ||
     progress.total > 0 ||
     checkedCollectionIds.size > 0 ||
     captures.length > 0 ||
-    retryableFailedResults.length > 0;
+    failedResults.length > 0;
   const hasCaptures = captures.length > 0;
   const completion = progress.total > 0 ? Math.round((successfulCount / progress.total) * 100) : 0;
-  const canRetryFailed = !isRunning && !optOutMatch && retryableFailedResults.length > 0;
-  const hasAutoRetryWork = availabilityIssue && (retryableFailedResults.length > 0 || uncheckedCount > 0);
+  const hasAutoRetryWork = availabilityIssue && (currentNoticeFailedResults.length > 0 || uncheckedCount > 0);
   const canScheduleAutoRetry = !isRunning && !isStoredView && Boolean(targetUrl.trim()) && hasAutoRetryWork;
   const canAutoRetryFailed = autoRetryEnabled && canScheduleAutoRetry;
   const autoRetryCountdown = nextAutoRetryAt ? formatDuration(nextAutoRetryAt - nowMs) : "";
@@ -1641,7 +1903,7 @@ export function ArchiveSearchApp({
   const isWaitingForAutoRetry = canAutoRetryFailed && Boolean(nextAutoRetryAt);
   const scanNotice = isRunning || isWaitingForAutoRetry
     ? buildScanNotice({
-        failedCount,
+        failedCount: noticeFailedCount,
         hasExplicitRateLimit,
         hasGatewayTimeout,
         hasSlowDown,
@@ -1650,7 +1912,30 @@ export function ArchiveSearchApp({
       })
     : "";
   const showOptOutNotice = Boolean(optOutMatch);
-  const scanLogCount = scanLog.length + (robotsStatus ? 1 : 0) + (optOutMatch ? 1 : 0);
+  const scanLogCount =
+    scanLog.reduce((count, result) => count + scanLogRowsForResult(result), 0) +
+    (robotsStatus ? 1 : 0) +
+    (optOutMatch ? 1 : 0);
+  const appendUiScanLogEvent = (entry: ScanLogEvent) => {
+    setScanLog((current) => [...current, entry]);
+    const trimmedUrl = targetUrl.trim();
+    if (!trimmedUrl) return;
+    void ensureScanSession({
+      scanId: activeScanId || undefined,
+      url: trimmedUrl,
+      matchType,
+      mock: initialMockMode,
+      scope: scanScope,
+      year: yearFilter,
+      collection: collectionFilter,
+      mime: mimeFilter,
+      status: statusFilter,
+      filter: urlFilter,
+      sort: sortBy,
+      view: viewMode,
+      page: page > 1 ? page : undefined
+    }).then((session) => appendCoverageScanLogEntry(session, entry));
+  };
   const resultsBackContext = useMemo<ResultsBackContext>(
     () => ({
       url: targetUrl.trim(),
@@ -1684,17 +1969,6 @@ export function ArchiveSearchApp({
   );
   const statusActions = hasStartedSearch ? (
     <div className="flex shrink-0 flex-wrap justify-end gap-2">
-      {canRetryFailed ? (
-        <Button
-          className="shrink-0 whitespace-nowrap"
-          size="sm"
-          variant="secondary"
-          onClick={() => void runSearch("retry-failed")}
-        >
-          <RotateCcw size={14} />
-          Retry failed
-        </Button>
-      ) : null}
       {state === "error" && targetUrl.trim() ? (
         <Button
           className="shrink-0 whitespace-nowrap"
@@ -1705,7 +1979,7 @@ export function ArchiveSearchApp({
           Try again
         </Button>
       ) : null}
-      {canResume ? (
+      {canContinue ? (
         <Button size="sm" variant="secondary" onClick={() => void runSearch("resume")}>
           <RotateCcw size={14} />
           Continue
@@ -1716,7 +1990,17 @@ export function ArchiveSearchApp({
           className="shrink-0 whitespace-nowrap"
           size="sm"
           title="Toggle automatic retry for failed and unchecked sources"
-          onClick={() => setAutoRetryEnabled((value) => !value)}
+          onClick={() => {
+            setAutoRetryEnabled((value) => {
+              const enabled = !value;
+              appendUiScanLogEvent(
+                enabled
+                  ? scanLogEvent("auto-retry-enabled", "Auto retry started.", "amber")
+                  : scanLogEvent("auto-retry-disabled", "Auto retry stopped.", "amber")
+              );
+              return enabled;
+            });
+          }}
         >
           <Clock size={14} />
           {autoRetryEnabled ? `Auto retry ${autoRetryCountdown ? `in ${autoRetryCountdown}` : "on"}` : "Auto retry off"}
@@ -1738,6 +2022,10 @@ export function ArchiveSearchApp({
 
   useEffect(() => {
     if (!canScheduleAutoRetry) {
+      if (nextAutoRetryAt) {
+        appendUiScanLogEvent(scanLogEvent("auto-retry-skipped", "Auto retry skipped: no retryable work remains.", "amber"));
+        loggedAutoRetryAtRef.current = undefined;
+      }
       setNextAutoRetryAt(undefined);
       return;
     }
@@ -1745,6 +2033,10 @@ export function ArchiveSearchApp({
 
     const retryAt = nextAutoRetryAt ?? Date.now() + AUTO_RETRY_INTERVAL_MS;
     if (!nextAutoRetryAt) setNextAutoRetryAt(retryAt);
+    if (loggedAutoRetryAtRef.current !== retryAt) {
+      loggedAutoRetryAtRef.current = retryAt;
+      appendUiScanLogEvent(scanLogEvent("auto-retry-scheduled", `Auto retry scheduled in ${formatDuration(retryAt - Date.now())}.`, "amber"));
+    }
     const timeoutId = window.setTimeout(() => {
       void runSearch("auto-retry");
     }, Math.max(0, retryAt - Date.now()));
@@ -1783,12 +2075,12 @@ export function ArchiveSearchApp({
   }, [nextAutoRetryAt]);
 
   useEffect(() => {
-    if (!isRunning || !scanStartedAt) return;
-    const updateElapsed = () => setElapsedMs(Date.now() - scanStartedAt);
+    if ((!isRunning && !isPersistedScanRunning) || !scanStartedAt) return;
+    const updateElapsed = () => setElapsedMs(storedDurationMs + Date.now() - scanStartedAt);
     updateElapsed();
     const intervalId = window.setInterval(updateElapsed, 1000);
     return () => window.clearInterval(intervalId);
-  }, [isRunning, scanStartedAt]);
+  }, [isRunning, isPersistedScanRunning, scanStartedAt, storedDurationMs]);
 
   useEffect(() => {
     const trimmedUrl = targetUrl.trim();
@@ -1813,6 +2105,7 @@ export function ArchiveSearchApp({
     const key = scanSearchKey(trimmedUrl, matchType, initialMockMode, persistedScanScope);
     const legacyKeys = [legacyScanSearchKey(trimmedUrl, matchType, initialMockMode, persistedScanScope)];
     const persistedCollections = collectionsForScope(collections, persistedScanScope);
+    const persistedResults = mergeCollectionResults(scanLog.filter(isCollectionScanLogEntry));
     const timer = window.setTimeout(() => {
       void putSearch({
         key,
@@ -1822,7 +2115,8 @@ export function ArchiveSearchApp({
         scanScope: persistedScanScope,
         collections: persistedCollections,
         captures,
-        results: scanLog,
+        results: persistedResults,
+        scanLogResults: scanLog,
         updatedAt: Date.now()
       }).then(() => deleteSearches(legacyKeys));
     }, 250);
@@ -1874,12 +2168,14 @@ export function ArchiveSearchApp({
           : "grid min-h-screen place-items-center px-4 py-8 text-zinc-100 md:px-8"
       }
     >
+      {hasStartedSearch ? null : <LandingAtmosphere />}
       {hasStartedSearch ? null : <TopRightMenu />}
-      <div className={hasStartedSearch ? "mx-auto flex max-w-7xl flex-col gap-4" : "mx-auto w-full max-w-3xl"}>
+      {hasStartedSearch ? null : <LandingStatsFooter />}
+      <div className={hasStartedSearch ? "mx-auto flex max-w-7xl flex-col gap-4" : "relative z-10 mx-auto w-full max-w-3xl"}>
         <header className={hasStartedSearch ? "archive-panel rounded-md p-4" : "p-0"}>
           <div className={hasStartedSearch ? "flex flex-col gap-4 lg:flex-row lg:items-end" : "flex flex-col gap-4"}>
             <div className="flex-1">
-              <div className={hasStartedSearch ? "mb-3 flex items-center gap-3" : "relative mb-8 flex flex-col items-center gap-4 text-center"}>
+              <div className={hasStartedSearch ? "mb-3 flex items-center gap-3" : "mb-8 flex flex-col items-center gap-3 text-center"}>
                 {hasStartedSearch ? (
                   <div className="flex items-center gap-2">
                     <Link
@@ -1910,21 +2206,28 @@ export function ArchiveSearchApp({
                 ) : null}
                 {hasStartedSearch ? null : (
                   <>
-                    <p className="absolute bottom-full left-1/2 mb-16 w-full max-w-xl -translate-x-1/2 text-balance text-2xl font-black leading-tight tracking-tight text-zinc-100 sm:mb-24 sm:text-3xl">
-                      Search <span className="text-amber-300">hundreds of billions</span> of
-                      archived web pages.
-                    </p>
                     <h1>
                       <BrandLockup
                         size="hero"
                         className="justify-center gap-5"
-                        wordClassName="leading-none"
+                        wordClassName="leading-none decode-in"
                       />
                     </h1>
+                    <p
+                      className="reveal-fade whitespace-nowrap text-sm leading-relaxed text-zinc-400 sm:text-base"
+                      style={{ animationDelay: "200ms" }}
+                    >
+                      Search <span className="text-amber-300/90">hundreds of billions</span> of
+                      archived web pages.
+                    </p>
                   </>
                 )}
               </div>
-              <div className="flex flex-col gap-2 sm:flex-row" suppressHydrationWarning>
+              <div
+                className={`flex gap-2${hasStartedSearch ? " flex-col sm:flex-row" : " flex-row reveal"}`}
+                style={hasStartedSearch ? undefined : { animationDelay: "260ms" }}
+                suppressHydrationWarning
+              >
                 {hasStartedSearch ? (
                   <div
                     aria-label="Scanned URL"
@@ -1934,22 +2237,31 @@ export function ArchiveSearchApp({
                     <span className="truncate font-mono">{targetUrl}</span>
                   </div>
                 ) : (
-                  <Input
-                    ref={targetUrlInputRef}
-                    aria-label="URL to search"
-                    disabled={isRunning}
-                    value={targetUrl}
-                    placeholder="https://example.com/page"
-                    autoComplete="off"
-                    onChange={(event) => setTargetUrl(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") void runSearch("fresh", { url: event.currentTarget.value, scope: scanScope });
-                    }}
-                  />
+                  <div className="relative flex-1">
+                    <span
+                      aria-hidden
+                      className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 font-mono text-sm font-bold text-amber-300"
+                    >
+                      &gt;
+                    </span>
+                    <Input
+                      ref={targetUrlInputRef}
+                      aria-label="URL to search"
+                      disabled={isRunning}
+                      value={targetUrl}
+                      placeholder="whitehouse.gov/administration"
+                      autoComplete="off"
+                      className="terminal-input pl-8 font-mono"
+                      onChange={(event) => setTargetUrl(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") void runSearch("fresh", { url: event.currentTarget.value, scope: scanScope });
+                      }}
+                    />
+                  </div>
                 )}
                 {!hasStartedSearch ? (
                   <Button
-                    className="h-11 shrink-0 whitespace-nowrap"
+                    className="h-11 shrink-0 whitespace-nowrap transition-transform hover:-translate-y-0.5 active:translate-y-0"
                     disabled={!canStartFresh}
                     onClick={() => void runSearch("fresh", { url: targetUrlInputRef.current?.value, scope: scanScope })}
                   >
@@ -1959,16 +2271,18 @@ export function ArchiveSearchApp({
                 ) : null}
               </div>
               {!hasStartedSearch ? (
-                <AdvancedSettings
-                  open={advancedOpen}
-                  onToggle={() => setAdvancedOpen((value) => !value)}
-                  matchType={matchType}
-                  onMatchTypeChange={setMatchType}
-                  fullScan={scanScope === "all"}
-                  onFullScanChange={(checked) => setScanScope(checked ? "all" : "recent")}
-                  disabled={isRunning}
-                  earliestArchiveYear={earliestArchiveYear}
-                />
+                <div className="reveal" style={{ animationDelay: "380ms" }}>
+                  <AdvancedSettings
+                    open={advancedOpen}
+                    onToggle={() => setAdvancedOpen((value) => !value)}
+                    matchType={matchType}
+                    onMatchTypeChange={setMatchType}
+                    fullScan={scanScope === "all"}
+                    onFullScanChange={(checked) => setScanScope(checked ? "all" : "recent")}
+                    disabled={isRunning}
+                    earliestArchiveYear={earliestArchiveYear}
+                  />
+                </div>
               ) : null}
             </div>
             {hasStartedSearch ? (
@@ -2296,26 +2610,109 @@ function Stat({ label, value, tone = "neutral" }: { label: string; value: string
   );
 }
 
-function scanLogMessage(result: CollectionCheckResult) {
-  const status = result.httpStatus ? `HTTP ${result.httpStatus}` : "No HTTP response";
-  const error = result.error ?? "not checked";
-  const attempts = result.attempts > 1 ? ` · ${result.attempts} request attempts` : "";
-  const runs = result.runs > 1 ? ` across ${result.runs} runs` : "";
+function scanLogCallMessage(call: CollectionAttemptLog, result: CollectionCheckResult) {
+  const status = call.httpStatus ? `HTTP ${call.httpStatus}` : "No HTTP response";
+  if (call.status === "not-checked") return `${status} · ${call.error ?? "not checked"}`;
   const cacheText = result.fromCache ? " · cache" : "";
-  const retryText = attempts || runs ? `${attempts}${runs}` : "";
+  const captureCount = call.captureCount ?? result.captures.length;
   const blockedText =
     result.blockedCaptures && result.blockedCaptures.length > 0
       ? ` · ${result.blockedCaptures.length} blocked over viewer limit (${result.blockedCaptures
           .map((blocked) => `${formatBytes(blocked.sizeBytes)} / ${blocked.sizeBytes} bytes`)
           .join(", ")})`
       : "";
-  if (result.status === "not-checked") {
-    return `${status} · ${error}${retryText}`;
+  if (captureCount > 0) {
+    return `${status}${cacheText} · found ${captureCount} HTML capture${captureCount === 1 ? "" : "s"}${blockedText}`;
   }
-  if (result.captures.length > 0) {
-    return `${status}${cacheText} · found ${result.captures.length} HTML capture${result.captures.length === 1 ? "" : "s"}${retryText}${blockedText}`;
+  return `${status}${cacheText} · no matching HTML 200 capture`;
+}
+
+function scanLogCallTone(call: CollectionAttemptLog) {
+  if (call.status === "not-checked") return "text-red-200";
+  return call.captureCount && call.captureCount > 0 ? "text-emerald-200" : "text-zinc-500";
+}
+
+function scanLogRowsForResult(result: ScanLogEntry) {
+  if (!isCollectionScanLogEntry(result)) return 1;
+  return result.attemptLogs?.length ? result.attemptLogs.length : 1;
+}
+
+function scanLogTimestampsForResult(result: ScanLogEntry) {
+  if (!isCollectionScanLogEntry(result)) return [result.checkedAt];
+  return result.attemptLogs?.length
+    ? result.attemptLogs.map((call) => call.checkedAt ?? result.checkedAt)
+    : [result.checkedAt];
+}
+
+function scanLogEventTone(event: ScanLogEvent) {
+  if (event.tone === "red") return "text-red-200";
+  if (event.tone === "amber") return "text-amber-200";
+  return "text-zinc-400";
+}
+
+type ScanLogRenderRow =
+  | { kind: "collection"; result: CollectionCheckResult; call: CollectionAttemptLog; index: number; timestamp?: number; sequence: number }
+  | { kind: "event"; event: ScanLogEvent; timestamp?: number; sequence: number }
+  | { kind: "robots"; status: RobotsUiState; timestamp?: number; sequence: number }
+  | { kind: "opt-out"; checkedAt?: number; cachedCount: number; timestamp?: number; sequence: number };
+
+function scanLogRenderRows(input: {
+  results: ScanLogEntry[];
+  robotsStatus?: RobotsUiState | null;
+  optOutMatch?: OptOutMatch | null;
+  optOutCheckedAt?: number;
+  optOutCachedCount: number;
+}): ScanLogRenderRow[] {
+  const rows: ScanLogRenderRow[] = [];
+  let sequence = 0;
+  if (input.robotsStatus) {
+    rows.push({ kind: "robots", status: input.robotsStatus, timestamp: input.robotsStatus.checkedAt, sequence: sequence++ });
   }
-  return `${status}${cacheText} · no matching HTML 200 capture${retryText}`;
+  if (input.optOutMatch) {
+    rows.push({ kind: "opt-out", checkedAt: input.optOutCheckedAt, cachedCount: input.optOutCachedCount, timestamp: input.optOutCheckedAt, sequence: sequence++ });
+  }
+  for (const result of input.results) {
+    if (!isCollectionScanLogEntry(result)) {
+      rows.push({ kind: "event", event: result, timestamp: result.checkedAt, sequence: sequence++ });
+      continue;
+    }
+    const calls = result.attemptLogs?.length
+      ? result.attemptLogs
+      : [{
+          status: result.status,
+          checkedAt: result.checkedAt,
+          httpStatus: result.httpStatus,
+          error: result.error,
+          errorKind: result.errorKind,
+          captureCount: result.captures.length
+        } satisfies CollectionAttemptLog];
+    calls.forEach((call, index) => {
+      rows.push({
+        kind: "collection",
+        result,
+        call,
+        index,
+        timestamp: call.checkedAt ?? result.checkedAt,
+        sequence: sequence++
+      });
+    });
+  }
+  return rows.sort((left, right) => {
+    const leftTimestamp = left.timestamp ?? 0;
+    const rightTimestamp = right.timestamp ?? 0;
+    if (leftTimestamp !== rightTimestamp) return leftTimestamp - rightTimestamp;
+    return left.sequence - right.sequence;
+  });
+}
+
+function upsertLiveFailures(
+  currentFailures: CollectionCheckResult[],
+  result: CollectionCheckResult
+): CollectionCheckResult[] {
+  if (result.status === "checked") {
+    return currentFailures.filter((failure) => failure.collection.id !== result.collection.id);
+  }
+  return upsertCollectionResult(currentFailures, result);
 }
 
 function formatSearchError(error: unknown) {
@@ -2363,8 +2760,8 @@ function buildScanNotice({
   }
 
   return hasSlowDown
-    ? `${issueText} Some snapshots may still work. Retry failed items later.`
-    : `${issueText} The scan is still running. Retry failed items later if needed.`;
+    ? `${issueText} Some snapshots may still work. Continue later to check failed and remaining items.`
+    : `${issueText} The scan is still running. Continue later if needed.`;
 }
 
 function robotsStatusHeadline(status: RobotsUiState) {
@@ -2434,49 +2831,66 @@ function ScanLog({
   optOutCheckedAt,
   optOutCachedCount = 0
 }: {
-  results: CollectionCheckResult[];
+  results: ScanLogEntry[];
   robotsStatus?: RobotsUiState | null;
   optOutMatch?: OptOutMatch | null;
   optOutCheckedAt?: number;
   optOutCachedCount?: number;
 }) {
-  const showDate = scanLogNeedsDate([
-    ...results.map((result) => result.checkedAt),
-    robotsStatus?.checkedAt,
-    optOutMatch ? optOutCheckedAt : undefined
-  ]);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const rows = scanLogRenderRows({ results, robotsStatus, optOutMatch, optOutCheckedAt, optOutCachedCount });
+  const showDate = scanLogNeedsDate(rows.map((row) => row.timestamp));
+  const rowCount = rows.length;
+
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    element.scrollTop = element.scrollHeight;
+  }, [rowCount]);
+
   return (
     <section className="mt-3 rounded-md border border-zinc-800 bg-zinc-950/70">
-      <div className="max-h-64 overflow-auto thin-scrollbar">
-        {results.length === 0 && !robotsStatus && !optOutMatch ? (
+      <div ref={scrollRef} className="max-h-64 overflow-auto thin-scrollbar">
+        {rows.length === 0 ? (
           <p className="p-3 text-xs text-zinc-500">No collections checked yet.</p>
         ) : (
           <div className="divide-y divide-zinc-900">
-            {robotsStatus ? <RobotsScanLogEntry status={robotsStatus} withDate={showDate} /> : null}
-            {optOutMatch ? (
-              <OptOutScanLogEntry checkedAt={optOutCheckedAt} cachedCount={optOutCachedCount} withDate={showDate} />
-            ) : null}
-            {results.map((result, index) => (
-              <div key={`${result.collection.id}:${index}`} className={scanLogRowClass(showDate)}>
-                <p className="whitespace-nowrap font-mono text-[11px] text-zinc-500">{formatLogTimestamp(result.checkedAt, showDate)}</p>
-                <p className="whitespace-nowrap font-semibold text-zinc-200">{result.collection.id}</p>
-                <p
-                  className={
-                    result.status === "not-checked"
-                      ? "text-red-200"
-                      : result.captures.length > 0
-                        ? "text-emerald-200"
-                        : "text-zinc-500"
-                  }
-                >
-                  {scanLogMessage(result)}
-                </p>
-              </div>
-            ))}
+            {rows.map((row) => {
+              if (row.kind === "robots") {
+                return <RobotsScanLogEntry key={`robots:${row.timestamp ?? "unknown"}:${row.sequence}`} status={row.status} withDate={showDate} />;
+              }
+              if (row.kind === "opt-out") {
+                return <OptOutScanLogEntry key={`opt-out:${row.timestamp ?? "unknown"}:${row.sequence}`} checkedAt={row.checkedAt} cachedCount={row.cachedCount} withDate={showDate} />;
+              }
+              if (row.kind === "event") {
+                return <ScanLogEventEntry key={`${row.event.event}:${row.event.checkedAt ?? "unknown"}:${row.sequence}`} event={row.event} withDate={showDate} />;
+              }
+              return <ScanLogCollectionEntry key={`${row.result.collection.id}:${row.timestamp ?? "unknown"}:${row.index}:${row.sequence}`} result={row.result} call={row.call} withDate={showDate} />;
+            })}
           </div>
         )}
       </div>
     </section>
+  );
+}
+
+function ScanLogEventEntry({ event, withDate }: { event: ScanLogEvent; withDate: boolean }) {
+  return (
+    <div className={scanLogRowClass(withDate)}>
+      <p className="whitespace-nowrap font-mono text-[11px] text-zinc-500">{formatLogTimestamp(event.checkedAt, withDate)}</p>
+      <p className="whitespace-nowrap font-semibold text-zinc-200">Scan</p>
+      <p className={scanLogEventTone(event)}>{event.message}</p>
+    </div>
+  );
+}
+
+function ScanLogCollectionEntry({ result, call, withDate }: { result: CollectionCheckResult; call: CollectionAttemptLog; withDate: boolean }) {
+  return (
+    <div className={scanLogRowClass(withDate)}>
+      <p className="whitespace-nowrap font-mono text-[11px] text-zinc-500">{formatLogTimestamp(call.checkedAt ?? result.checkedAt, withDate)}</p>
+      <p className="whitespace-nowrap font-semibold text-zinc-200">{result.collection.id}</p>
+      <p className={scanLogCallTone(call)}>{scanLogCallMessage(call, result)}</p>
+    </div>
   );
 }
 

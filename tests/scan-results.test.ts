@@ -40,7 +40,7 @@ function result(overrides: Partial<CollectionCheckResult>): CollectionCheckResul
 }
 
 describe("scan result merging", () => {
-  it("keeps an existing hit when a later scan for the same collection fails", () => {
+  it("keeps existing captures but marks the latest status failed when a later scan fails", () => {
     const existingHit = result({ captures: [capture()] });
     const laterFailure = result({
       status: "not-checked",
@@ -52,15 +52,16 @@ describe("scan result merging", () => {
 
     expect(mergeCollectionResults([existingHit], [laterFailure])).toMatchObject([
       {
-        status: "checked",
+        status: "not-checked",
         captures: [expect.objectContaining({ timestamp: "20260501120000" })],
+        errorKind: "http_503_unavailable",
         attempts: 2,
         runs: 2
       }
     ]);
   });
 
-  it("keeps an existing checked-empty result when a later scan fails", () => {
+  it("marks an existing checked-empty result failed when a later scan fails", () => {
     const checkedEmpty = result({ captures: [], httpStatus: 404 });
     const laterFailure = result({
       status: "not-checked",
@@ -72,9 +73,9 @@ describe("scan result merging", () => {
 
     expect(mergeCollectionResults([checkedEmpty], [laterFailure])).toMatchObject([
       {
-        status: "checked",
+        status: "not-checked",
         captures: [],
-        httpStatus: 404,
+        httpStatus: 504,
         attempts: 2,
         runs: 2
       }

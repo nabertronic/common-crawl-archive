@@ -37,10 +37,12 @@ export function mergeCollectionResult(
 
   if (existing.status === "checked" && next.status === "not-checked") {
     return {
-      ...existing,
+      ...next,
+      captures: existing.captures,
+      blockedCaptures: mergeBlockedCaptures(existing.blockedCaptures, next.blockedCaptures),
       attempts,
       runs,
-      checkedAt: existing.checkedAt ?? next.checkedAt
+      checkedAt: next.checkedAt ?? existing.checkedAt
     };
   }
 

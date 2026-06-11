@@ -36,7 +36,7 @@ const checkedResult: CollectionCheckResult = {
   runs: 1
 };
 
-const records: StoredSearch[] = [
+const baseRecords: StoredSearch[] = [
   {
     key: "live:exact:https://alpha.example/:scan:recent",
     url: "https://alpha.example/",
@@ -61,11 +61,13 @@ const records: StoredSearch[] = [
   }
 ];
 
+let storedRecords: StoredSearch[] = baseRecords;
+
 vi.mock("@/lib/capture-store", async () => {
   const actual = await vi.importActual<typeof import("@/lib/capture-store")>("@/lib/capture-store");
   return {
     ...actual,
-    listSearches: vi.fn(async () => records),
+    listSearches: vi.fn(async () => storedRecords),
     deleteSearch: vi.fn(),
     deleteSearches: vi.fn(),
     subscribeToSearchChanges: vi.fn(() => () => {})
@@ -93,6 +95,7 @@ function dispatchPageShow(persisted: boolean) {
 
 describe("HistoryApp", () => {
   beforeEach(() => {
+    storedRecords = baseRecords;
     window.history.pushState({}, "", "/history");
   });
 
@@ -121,5 +124,39 @@ describe("HistoryApp", () => {
     await waitFor(() => expect(input).toHaveValue(""));
     expect(screen.getByText("alpha.example")).toBeInTheDocument();
     expect(screen.getByText("beta.example")).toBeInTheDocument();
+  });
+
+  it("shows narrower scans even when a broader complete scan exists", async () => {
+    storedRecords = [
+      ...baseRecords,
+      {
+        key: "live:exact:https://blog.example.com/:scan:recent",
+        url: "https://blog.example.com/",
+        matchType: "exact",
+        mock: false,
+        captures: [],
+        scanScope: "recent",
+        collections: [collection],
+        results: [{ ...checkedResult, captures: [] }],
+        updatedAt: 3
+      },
+      {
+        key: "live:domain:https://example.com/:scan:all",
+        url: "https://example.com/",
+        matchType: "domain",
+        mock: false,
+        captures: [capture],
+        scanScope: "all",
+        collections: [collection],
+        results: [checkedResult],
+        updatedAt: 4
+      }
+    ];
+
+    render(<HistoryApp />);
+
+    await waitFor(() => expect(screen.getByText("blog.example.com")).toBeInTheDocument());
+    expect(screen.getByText("example.com")).toBeInTheDocument();
+    expect(screen.getByText("Scans").parentElement).toHaveTextContent("4");
   });
 });

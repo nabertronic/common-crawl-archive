@@ -66,7 +66,53 @@ export type CollectionCheckResult = {
   runs: number;
   fromCache?: boolean;
   blockedCaptures?: BlockedCapture[];
+  attemptLogs?: CollectionAttemptLog[];
 };
+
+export type CollectionAttemptLog = {
+  status: "checked" | "not-checked";
+  checkedAt?: number;
+  httpStatus?: number;
+  error?: string;
+  errorKind?: CollectionErrorKind;
+  captureCount?: number;
+};
+
+export type ScanLogEvent = {
+  kind: "event";
+  event:
+    | "scan-started"
+    | "retry-started"
+    | "continue-started"
+    | "auto-retry-started"
+    | "auto-retry-enabled"
+    | "auto-retry-disabled"
+    | "auto-retry-scheduled"
+    | "auto-retry-skipped"
+    | "cache-hit"
+    | "collection-skipped"
+    | "fresh-scan-cleared"
+    | "html-zip-cancelled"
+    | "html-zip-completed"
+    | "html-zip-failed"
+    | "html-zip-started"
+    | "opt-out-checked"
+    | "request-timeout"
+    | "retry-wait-started"
+    | "robots-cached"
+    | "robots-checked"
+    | "scan-completed"
+    | "scan-cancelled"
+    | "scan-paused"
+    | "scan-failed"
+    | "scope-selected"
+    | "stored-coverage-loaded";
+  checkedAt?: number;
+  message: string;
+  tone?: "neutral" | "amber" | "red";
+};
+
+export type ScanLogEntry = CollectionCheckResult | ScanLogEvent;
 
 export type BlockedCapture = {
   capture: CommonCrawlCapture;
@@ -562,7 +608,9 @@ export async function queryCollection(
   retryCount = DEFAULT_RETRY_COUNT,
   retryDelayMs = DEFAULT_RETRY_DELAY_MS,
   maxRetryDelayMs = DEFAULT_MAX_RETRY_DELAY_MS,
-  matchType: MatchType = DEFAULT_MATCH_TYPE
+  matchType: MatchType = DEFAULT_MATCH_TYPE,
+  onAttempt?: (attempt: CollectionAttemptLog) => void,
+  onRetryWait?: (delayMs: number) => void
 ): Promise<CollectionCheckResult> {
   const cachedResult = readCachedCdxResult(targetUrl, collection, matchType);
   if (cachedResult) return cachedResult;
@@ -572,6 +620,11 @@ export async function queryCollection(
   let lastHttpStatus: number | undefined;
   let retryAfterMs: number | undefined;
   let attempts = 0;
+  const attemptLogs: CollectionAttemptLog[] = [];
+  const recordAttempt = (attemptLog: CollectionAttemptLog) => {
+    attemptLogs.push(attemptLog);
+    onAttempt?.(attemptLog);
+  };
 
   for (let attempt = 0; attempt <= retryCount; attempt += 1) {
     attempts = attempt + 1;
@@ -583,14 +636,22 @@ export async function queryCollection(
       });
 
       if (response.status === 404) {
+        const checkedAt = Date.now();
+        recordAttempt({
+          status: "checked",
+          checkedAt,
+          httpStatus: response.status,
+          captureCount: 0
+        });
         const result: CollectionCheckResult = {
           collection,
           status: "checked",
           captures: [],
-          checkedAt: Date.now(),
+          checkedAt,
           httpStatus: response.status,
           attempts,
-          runs: 1
+          runs: 1,
+          attemptLogs
         };
         writeCachedCdxResult(targetUrl, collection, matchType, result);
         return result;
@@ -598,15 +659,23 @@ export async function queryCollection(
 
       if (response.ok) {
         const captures = parseCdxjResponse(await response.text(), collection);
+        const checkedAt = Date.now();
+        recordAttempt({
+          status: "checked",
+          checkedAt,
+          httpStatus: response.status,
+          captureCount: captures.length
+        });
         const result: CollectionCheckResult = {
           collection,
           status: "checked",
           captures,
-          checkedAt: Date.now(),
+          checkedAt,
           httpStatus: response.status,
           attempts,
           runs: 1,
-          blockedCaptures: blockedCapturesFor(captures)
+          blockedCaptures: blockedCapturesFor(captures),
+          attemptLogs
         };
         writeCachedCdxResult(targetUrl, collection, matchType, result);
         return result;
@@ -617,18 +686,27 @@ export async function queryCollection(
       const described = describeHttpError(response, await readErrorBody(response));
       lastError = described.error;
       lastErrorKind = described.errorKind;
+      const checkedAt = Date.now();
+      recordAttempt({
+        status: "not-checked",
+        checkedAt,
+        httpStatus: lastHttpStatus,
+        error: lastError,
+        errorKind: lastErrorKind
+      });
 
       if (response.status !== 429 && response.status < 500) {
         return {
           collection,
           status: "not-checked",
           captures: [],
-          checkedAt: Date.now(),
+          checkedAt,
           httpStatus: response.status,
           error: lastError,
           errorKind: lastErrorKind,
           attempts,
-          runs: 1
+          runs: 1,
+          attemptLogs
         };
       }
     } catch (error) {
@@ -637,10 +715,18 @@ export async function queryCollection(
       const described = describeRequestError(error, requestSignal);
       lastError = described.error;
       lastErrorKind = described.errorKind;
+      recordAttempt({
+        status: "not-checked",
+        checkedAt: Date.now(),
+        error: lastError,
+        errorKind: lastErrorKind
+      });
     }
 
     if (attempt < retryCount && shouldRetryCollectionError(lastErrorKind)) {
-      await wait(retryDelayForAttempt(attempt, retryDelayMs, retryAfterMs, maxRetryDelayMs), signal);
+      const delayMs = retryDelayForAttempt(attempt, retryDelayMs, retryAfterMs, maxRetryDelayMs);
+      onRetryWait?.(delayMs);
+      await wait(delayMs, signal);
     } else {
       break;
     }
@@ -655,7 +741,8 @@ export async function queryCollection(
     error: lastError,
     errorKind: lastErrorKind,
     attempts,
-    runs: 1
+    runs: 1,
+    attemptLogs
   };
 }
 
@@ -688,7 +775,8 @@ function readCachedCdxResult(
     runs: 1,
     fromCache: true,
     checkedAt: record.result.checkedAt ?? record.fetchedAt,
-    blockedCaptures: blockedCapturesFor(record.result.captures ?? [])
+    blockedCaptures: blockedCapturesFor(record.result.captures ?? []),
+    attemptLogs: undefined
   };
 }
 

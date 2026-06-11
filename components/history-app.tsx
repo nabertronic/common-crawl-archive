@@ -6,10 +6,8 @@ import {
   ChevronUp,
   ChevronsUpDown,
   Download,
-  Database,
   ExternalLink,
   History,
-  RotateCcw,
   Settings,
   Search,
   SlidersHorizontal,
@@ -24,7 +22,6 @@ import { Input } from "@/components/ui/input";
 import {
   deleteSearch,
   deleteSearches,
-  deleteCachedCapture,
   deleteCachedCapturesForHistoryRecord,
   listSearches,
   listCachedCaptureRecordsForCaptures,
@@ -36,7 +33,6 @@ import {
 import {
   fetchCollections,
   filterCollectionsByRecentMonths,
-  searchUrlCoversTarget,
   type CollectionCheckResult,
   type CommonCrawlCollection
 } from "@/lib/common-crawl";
@@ -54,8 +50,18 @@ type HistoryRecord = StoredSearch & {
 };
 
 const PAGE_SIZE = 25;
-const HISTORY_GRID_CLASS =
-  "grid items-center gap-3 [grid-template-columns:28px_80px_minmax(140px,1fr)_56px_56px_96px_64px_64px_64px_210px] xl:[grid-template-columns:28px_72px_minmax(140px,1fr)_52px_52px_88px_60px_60px_60px_560px]";
+const HISTORY_GRID_CLASS = "history-grid";
+const HISTORY_SELECT_COL_CLASS = "history-col-select";
+const HISTORY_STATUS_COL_CLASS = "history-col-status";
+const HISTORY_URL_COL_CLASS = "history-col-url";
+const HISTORY_SCOPE_COL_CLASS = "history-col-scope";
+const HISTORY_MATCH_COL_CLASS = "history-col-match";
+const HISTORY_UPDATED_COL_CLASS = "history-col-updated";
+const HISTORY_SNAPSHOTS_COL_CLASS = "history-col-snapshots";
+const HISTORY_CACHED_COL_CLASS = "history-col-cached";
+const HISTORY_SOURCES_COL_CLASS = "history-col-sources";
+const HISTORY_FAILED_COL_CLASS = "history-col-failed";
+const HISTORY_ACTIONS_COL_CLASS = "history-col-actions";
 const DEFAULT_SORT_DIR: Record<SortKey, SortDir> = {
   status: "asc",
   url: "asc",
@@ -85,17 +91,14 @@ export function HistoryApp() {
   const [sortKey, setSortKey] = useState<SortKey>("updated");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [showCoveredScans, setShowCoveredScans] = useState(false);
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [page, setPage] = useState(1);
   const [cacheRecordsByKey, setCacheRecordsByKey] = useState<Record<string, CachedHtmlCaptureRecord[]>>({});
-  const [expandedCacheKey, setExpandedCacheKey] = useState<string | null>(null);
   const queryInputRef = useRef<HTMLInputElement | null>(null);
   const scopeFilterRef = useRef<HTMLSelectElement | null>(null);
   const outcomeFilterRef = useRef<HTMLSelectElement | null>(null);
   const dateFromRef = useRef<HTMLInputElement | null>(null);
   const dateToRef = useRef<HTMLInputElement | null>(null);
-  const showCoveredRef = useRef<HTMLInputElement | null>(null);
 
   const syncRestoredControls = useCallback(() => {
     const restoredQuery = queryInputRef.current?.value ?? "";
@@ -103,7 +106,6 @@ export function HistoryApp() {
     const restoredOutcome = outcomeFilterRef.current?.value;
     const restoredDateFrom = dateFromRef.current?.value ?? "";
     const restoredDateTo = dateToRef.current?.value ?? "";
-    const restoredShowCovered = showCoveredRef.current?.checked;
 
     setQuery((current) => (current === restoredQuery ? current : restoredQuery));
     if (restoredScope === "any" || restoredScope === "recent" || restoredScope === "all") {
@@ -114,9 +116,6 @@ export function HistoryApp() {
     }
     setDateFrom((current) => (current === restoredDateFrom ? current : restoredDateFrom));
     setDateTo((current) => (current === restoredDateTo ? current : restoredDateTo));
-    if (typeof restoredShowCovered === "boolean") {
-      setShowCoveredScans((current) => (current === restoredShowCovered ? current : restoredShowCovered));
-    }
   }, []);
 
   const clearFreshControls = useCallback(() => {
@@ -125,13 +124,11 @@ export function HistoryApp() {
     setOutcomeFilter("all");
     setDateFrom("");
     setDateTo("");
-    setShowCoveredScans(false);
     if (queryInputRef.current) queryInputRef.current.value = "";
     if (scopeFilterRef.current) scopeFilterRef.current.value = "any";
     if (outcomeFilterRef.current) outcomeFilterRef.current.value = "all";
     if (dateFromRef.current) dateFromRef.current.value = "";
     if (dateToRef.current) dateToRef.current.value = "";
-    if (showCoveredRef.current) showCoveredRef.current.checked = false;
   }, []);
 
   useEffect(() => {
@@ -189,25 +186,12 @@ export function HistoryApp() {
     };
   }, [records]);
 
-  const stats = useMemo(() => {
-    const captures = records.reduce((sum, record) => sum + record.captures.length, 0);
-    const failed = records.reduce((sum, record) => sum + failedCount(record, currentCollections), 0);
-    return { scans: records.length, captures, failed };
-  }, [currentCollections, records]);
-
-  const visibleBaseRecords = useMemo(() => {
-    if (showCoveredScans) return records;
-    return records.filter((record) => !isCoveredByBroaderCompleteScan(record, records, currentCollections));
-  }, [currentCollections, records, showCoveredScans]);
-
-  const hiddenCoveredCount = records.length - visibleBaseRecords.length;
-
   const filteredRecords = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     const fromTimestamp = dateFrom ? new Date(`${dateFrom}T00:00:00`).getTime() : undefined;
     const toTimestamp = dateTo ? new Date(`${dateTo}T23:59:59.999`).getTime() : undefined;
 
-    return visibleBaseRecords.filter((record) => {
+    return records.filter((record) => {
       if (scopeFilter !== "any" && record.scanScope !== scopeFilter) return false;
       if (outcomeFilter !== "all" && scanOutcome(record, currentCollections) !== outcomeFilter) return false;
       if (fromTimestamp !== undefined && record.updatedAt < fromTimestamp) return false;
@@ -215,13 +199,18 @@ export function HistoryApp() {
       if (!normalizedQuery) return true;
       return record.url.toLowerCase().includes(normalizedQuery);
     });
-  }, [currentCollections, dateFrom, dateTo, outcomeFilter, query, scopeFilter, visibleBaseRecords]);
+  }, [currentCollections, dateFrom, dateTo, outcomeFilter, query, records, scopeFilter]);
 
   const sortedRecords = useMemo(() => {
     return [...filteredRecords].sort((left, right) =>
       compareRecords(left, right, sortKey, sortDir, currentCollections)
     );
   }, [filteredRecords, sortKey, sortDir, currentCollections]);
+
+  const stats = useMemo(() => {
+    const captures = sortedRecords.reduce((sum, record) => sum + record.captures.length, 0);
+    return { scans: sortedRecords.length, captures };
+  }, [sortedRecords]);
 
   useEffect(() => {
     setPage(1);
@@ -255,8 +244,7 @@ export function HistoryApp() {
     scopeFilter !== "any",
     outcomeFilter !== "all",
     !!dateFrom,
-    !!dateTo,
-    showCoveredScans
+    !!dateTo
   ].filter(Boolean).length;
   const hasActiveFilters = activeFilterCount > 0 || query.trim().length > 0;
 
@@ -266,7 +254,6 @@ export function HistoryApp() {
     setOutcomeFilter("all");
     setDateFrom("");
     setDateTo("");
-    setShowCoveredScans(false);
   }
 
   function toggleRecordSelection(key: string, checked: boolean) {
@@ -325,15 +312,6 @@ export function HistoryApp() {
     await refreshRecords();
   }
 
-  async function handleDeleteCachedCapture(recordKey: string, cacheKey: string) {
-    if (!window.confirm("Delete this cached HTML file?")) return;
-    await deleteCachedCapture(cacheKey);
-    setCacheRecordsByKey((current) => ({
-      ...current,
-      [recordKey]: (current[recordKey] ?? []).filter((record) => record.cacheKey !== cacheKey)
-    }));
-  }
-
   return (
     <main className="min-h-screen px-4 py-5 text-zinc-100 md:px-8">
       <div className="mx-auto flex max-w-7xl flex-col gap-4" suppressHydrationWarning>
@@ -362,10 +340,9 @@ export function HistoryApp() {
                   </h1>
                 </div>
             </div>
-            <div className="grid grid-cols-3 divide-x divide-zinc-800 overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/60 lg:w-[430px]">
+            <div className="grid grid-cols-2 divide-x divide-zinc-800 overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/60 lg:w-[290px]">
               <Stat label="Scans" value={String(stats.scans)} />
               <Stat label="Snapshots" value={String(stats.captures)} tone={stats.captures > 0 ? "green" : "neutral"} />
-              <Stat label="Failed" value={String(stats.failed)} tone={stats.failed > 0 ? "red" : "neutral"} />
             </div>
           </div>
         </header>
@@ -432,16 +409,6 @@ export function HistoryApp() {
               />
               <DateControl label="From" inputRef={dateFromRef} value={dateFrom} onChange={setDateFrom} />
               <DateControl label="To" inputRef={dateToRef} value={dateTo} onChange={setDateTo} />
-              <label className="flex h-10 items-center gap-2 self-end rounded-md border border-zinc-800 bg-zinc-950 px-3 text-sm font-semibold text-zinc-200">
-                <input
-                  ref={showCoveredRef}
-                  type="checkbox"
-                  checked={showCoveredScans}
-                  onChange={(event) => setShowCoveredScans(event.target.checked)}
-                  className="h-4 w-4 accent-amber-300"
-                />
-                Show covered
-              </label>
             </div>
           ) : null}
         </section>
@@ -459,11 +426,9 @@ export function HistoryApp() {
               Select visible
             </label>
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs text-zinc-500">
-                {selectedKeys.length > 0
-                  ? `${selectedKeys.length} selected`
-                  : `${sortedRecords.length} shown${hiddenCoveredCount > 0 && !showCoveredScans ? `, ${hiddenCoveredCount} covered hidden` : ""}`}
-              </span>
+              {selectedKeys.length > 0 ? (
+                <span className="text-xs text-zinc-500">{selectedKeys.length} selected</span>
+              ) : null}
               <Button
                 type="button"
                 size="sm"
@@ -499,17 +464,33 @@ export function HistoryApp() {
             <>
               <div>
                 <div className={`${HISTORY_GRID_CLASS} border-b border-zinc-800 px-4 py-3`}>
-                  <span />
-                  <SortHeader label="Status" sortKey="status" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
-                  <SortHeader label="URL" sortKey="url" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
-                  <SortHeader label="Scope" sortKey="scope" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
-                  <SortHeader label="Match" sortKey="match" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
-                  <SortHeader label="Updated" sortKey="updated" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
-                  <SortHeader label="Snapshots" sortKey="captures" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
-                  <span className="text-right text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">Cached</span>
-                  <SortHeader label="Sources" sortKey="sources" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
-                  <SortHeader label="Failed" sortKey="failed" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
-                  <span className="text-right text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">Actions</span>
+                  <span className={HISTORY_SELECT_COL_CLASS} />
+                  <div className={HISTORY_STATUS_COL_CLASS}>
+                    <SortHeader label="Status" sortKey="status" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
+                  </div>
+                  <div className={HISTORY_URL_COL_CLASS}>
+                    <SortHeader label="URL" sortKey="url" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
+                  </div>
+                  <div className={HISTORY_SCOPE_COL_CLASS}>
+                    <SortHeader label="Scope" sortKey="scope" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
+                  </div>
+                  <div className={HISTORY_MATCH_COL_CLASS}>
+                    <SortHeader label="Match" sortKey="match" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
+                  </div>
+                  <div className={HISTORY_UPDATED_COL_CLASS}>
+                    <SortHeader label="Updated" sortKey="updated" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
+                  </div>
+                  <div className={HISTORY_SNAPSHOTS_COL_CLASS}>
+                    <SortHeader label="Snapshots" sortKey="captures" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
+                  </div>
+                  <span className={`${HISTORY_CACHED_COL_CLASS} text-right text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500`}>Cached</span>
+                  <div className={HISTORY_SOURCES_COL_CLASS}>
+                    <SortHeader label="Sources" sortKey="sources" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
+                  </div>
+                  <div className={HISTORY_FAILED_COL_CLASS}>
+                    <SortHeader label="Failed" sortKey="failed" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
+                  </div>
+                  <span className={`${HISTORY_ACTIONS_COL_CLASS} text-right text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500`}>Actions</span>
                 </div>
                 <div className="divide-y divide-zinc-800/70">
                   {visibleRecords.map((record) => (
@@ -517,12 +498,8 @@ export function HistoryApp() {
                       key={record.key}
                       record={record}
                       currentCollections={currentCollections}
-                      hasFullScan={hasCoveringFullScan(record, records, currentCollections)}
                       selected={selectedKeySet.has(record.key)}
                       cacheRecords={cacheRecordsByKey[record.key] ?? []}
-                      cacheExpanded={expandedCacheKey === record.key}
-                      onToggleCache={(key) => setExpandedCacheKey((current) => current === key ? null : key)}
-                      onDeleteCachedCapture={handleDeleteCachedCapture}
                       onSelectedChange={toggleRecordSelection}
                       onDelete={handleDeleteRecord}
                     />
@@ -607,23 +584,15 @@ export function HistoryApp() {
 function HistoryRow({
   record,
   currentCollections,
-  hasFullScan,
   selected,
   cacheRecords,
-  cacheExpanded,
-  onToggleCache,
-  onDeleteCachedCapture,
   onSelectedChange,
   onDelete
 }: {
   record: HistoryRecord;
   currentCollections: CommonCrawlCollection[];
-  hasFullScan: boolean;
   selected: boolean;
   cacheRecords: CachedHtmlCaptureRecord[];
-  cacheExpanded: boolean;
-  onToggleCache: (key: string) => void;
-  onDeleteCachedCapture: (recordKey: string, cacheKey: string) => Promise<void>;
   onSelectedChange: (key: string, checked: boolean) => void;
   onDelete: (record: HistoryRecord) => Promise<void>;
 }) {
@@ -632,16 +601,17 @@ function HistoryRow({
   const path = parsed ? `${parsed.pathname}${parsed.search}` : "";
   const outcome = scanOutcome(record, currentCollections);
   const sourceStats = sourceCounts(record, currentCollections);
-  const openHref = searchHref(record, false);
-  const continueHref = searchHref(record, "missing");
-  const retryFailedHref = searchHref(record, "retry-failed");
-  const fullScanHref = fullScanHrefFor(record);
-  const canRunFullScan = record.scanScope === "recent" && !hasFullScan;
+  const openHref = searchHref(record);
+  const cacheBytes = cacheRecords.reduce((sum, cached) => sum + cached.sizeBytes, 0);
+  const hasCache = cacheRecords.length > 0;
+
+  const labelClass = "hidden lg:inline";
+  const buttonClass = "w-8 px-0 lg:w-auto lg:px-3";
 
   return (
     <>
     <article className={`${HISTORY_GRID_CLASS} px-4 py-3 text-sm transition hover:bg-zinc-900/45`}>
-      <label>
+      <label className={HISTORY_SELECT_COL_CLASS}>
         <input
           type="checkbox"
           checked={selected}
@@ -650,12 +620,12 @@ function HistoryRow({
           className="h-4 w-4 accent-amber-300"
         />
       </label>
-      <div>
+      <div className={HISTORY_STATUS_COL_CLASS}>
         <Badge tone={outcome === "complete" ? "green" : outcome === "partial" ? "amber" : "neutral"}>
           {outcome}
         </Badge>
       </div>
-      <div className="min-w-0">
+      <div className={`${HISTORY_URL_COL_CLASS} min-w-0`}>
         <p className="truncate text-sm font-bold text-zinc-50" title={record.url}>
           {host}
         </p>
@@ -665,75 +635,41 @@ function HistoryRow({
           </p>
         ) : null}
       </div>
-      <span className="truncate text-xs text-zinc-400">
+      <span className={`${HISTORY_SCOPE_COL_CLASS} truncate text-xs text-zinc-400`}>
         {record.scanScope === "all" ? "full" : "recent"}
       </span>
-      <span className="truncate text-xs text-zinc-400">{record.matchType}</span>
-      <time className="truncate text-xs text-zinc-500" title={formatDateTime(record.updatedAt)}>
+      <span className={`${HISTORY_MATCH_COL_CLASS} truncate text-xs text-zinc-400`}>{record.matchType}</span>
+      <time className={`${HISTORY_UPDATED_COL_CLASS} truncate text-xs text-zinc-500`} title={formatDateTime(record.updatedAt)}>
         {formatDate(record.updatedAt)}
       </time>
-      <Metric value={String(record.captures.length)} tone={record.captures.length > 0 ? "green" : "neutral"} />
-      <Metric value={`${cacheRecords.length}/${record.captures.length}`} tone={cacheRecords.length > 0 ? "green" : "neutral"} />
-      <Metric value={`${sourceStats.processed}/${sourceStats.total}`} tone={sourceStats.missing > 0 ? "red" : "neutral"} />
-      <Metric value={String(sourceStats.failed)} tone={sourceStats.failed > 0 ? "red" : "neutral"} />
-      <div className="flex items-center justify-end gap-1">
-        {canRunFullScan ? (
-          <LinkButton href={fullScanHref} size="sm" variant="secondary" title="Full scan" aria-label="Full scan" className="w-8 px-0 xl:w-auto xl:px-3">
-            <RotateCcw size={14} />
-            <span className="hidden xl:inline">Full scan</span>
-          </LinkButton>
+      <div className={HISTORY_SNAPSHOTS_COL_CLASS}>
+        <Metric value={String(record.captures.length)} tone={record.captures.length > 0 ? "green" : "neutral"} />
+      </div>
+      <div className={`${HISTORY_CACHED_COL_CLASS} text-right`}>
+        <p className={`font-mono text-sm font-bold tabular-nums ${hasCache ? "text-emerald-200" : "text-zinc-200"}`}>
+          {cacheRecords.length}/{record.captures.length}
+        </p>
+        {hasCache ? (
+          <p className="font-mono text-[10px] tabular-nums text-zinc-500">{formatStorageBytes(cacheBytes)}</p>
         ) : null}
-        {sourceStats.missing > 0 ? (
-          <LinkButton href={continueHref} size="sm" variant="secondary" title="Continue" aria-label="Continue" className="w-8 px-0 xl:w-auto xl:px-3">
-            <RotateCcw size={14} />
-            <span className="hidden xl:inline">Continue</span>
-          </LinkButton>
-        ) : null}
-        {sourceStats.failed > 0 ? (
-          <LinkButton href={retryFailedHref} size="sm" variant="secondary" title="Retry failed" aria-label="Retry failed" className="w-8 px-0 xl:w-auto xl:px-3">
-            <RotateCcw size={14} />
-            <span className="hidden xl:inline">Retry failed</span>
-          </LinkButton>
-        ) : null}
-        <LinkButton href={openHref} size="sm" variant="primary" title="Open" aria-label="Open" className="w-8 px-0 xl:w-auto xl:px-3">
+      </div>
+      <div className={HISTORY_SOURCES_COL_CLASS}>
+        <Metric value={`${sourceStats.processed}/${sourceStats.total}`} tone={sourceStats.missing > 0 ? "red" : "neutral"} />
+      </div>
+      <div className={HISTORY_FAILED_COL_CLASS}>
+        <Metric value={String(sourceStats.failed)} tone={sourceStats.failed > 0 ? "red" : "neutral"} />
+      </div>
+      <div className={`${HISTORY_ACTIONS_COL_CLASS} flex min-w-0 items-center justify-end gap-1 overflow-hidden`}>
+        <LinkButton href={openHref} size="sm" variant="primary" title="Open" aria-label="Open" className={buttonClass}>
           <ExternalLink size={14} />
-          <span className="hidden xl:inline">Open</span>
+          <span className={labelClass}>Open</span>
         </LinkButton>
-        <Button type="button" size="sm" variant="secondary" aria-label="Manage cached HTML" title="Cached HTML" onClick={() => onToggleCache(record.key)} className="w-8 px-0 xl:w-auto xl:px-3">
-          <Database size={14} />
-          <span className="hidden xl:inline">Storage</span>
-        </Button>
-        <Button type="button" size="sm" variant="danger" aria-label="Delete saved scan" title="Delete" onClick={() => void onDelete(record)} className="w-8 px-0 xl:w-auto xl:px-3">
+        <Button type="button" size="sm" variant="danger" aria-label="Delete saved scan" title="Delete" onClick={() => void onDelete(record)} className={buttonClass}>
           <Trash2 size={14} />
-          <span className="hidden xl:inline">Delete</span>
+          <span className={labelClass}>Delete</span>
         </Button>
       </div>
     </article>
-    {cacheExpanded ? (
-      <section className="border-t border-zinc-900 bg-zinc-950/45 px-4 py-3">
-        {cacheRecords.length === 0 ? (
-          <p className="text-xs font-semibold text-zinc-500">No cached HTML files for this scan yet.</p>
-        ) : (
-          <div className="grid gap-2">
-            {cacheRecords.map((cached) => (
-              <div key={cached.cacheKey} className="grid items-center gap-3 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs sm:grid-cols-[minmax(0,1fr)_110px_96px_36px]">
-                <div className="min-w-0">
-                  <p className="truncate font-semibold text-zinc-200" title={cached.url ?? cached.filename}>
-                    {cached.url ?? cached.filename}
-                  </p>
-                  <p className="mt-0.5 truncate text-zinc-500">{cached.timestamp || cached.collectionId || cached.filename}</p>
-                </div>
-                <span className="font-mono text-zinc-400">{formatStorageBytes(cached.sizeBytes)}</span>
-                <time className="text-zinc-500" title={formatDateTime(cached.lastAccessedAt)}>{formatDate(cached.lastAccessedAt)}</time>
-                <Button type="button" size="sm" variant="danger" aria-label="Delete cached HTML" title="Delete cached HTML" onClick={() => void onDeleteCachedCapture(record.key, cached.cacheKey)} className="w-8 px-0">
-                  <Trash2 size={14} />
-                </Button>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-    ) : null}
     </>
   );
 }
@@ -902,6 +838,10 @@ function mergeHistoryRecords(records: HistoryRecord[]) {
       current.scanScope === "all"
         ? mergeCollectionResults(record.results, current.results)
         : mergeCollectionResults(current.results, record.results);
+    const mergedScanLogResults = [
+      ...(current.scanLogResults ?? current.results),
+      ...(record.scanLogResults ?? record.results)
+    ];
     const mergedCollections =
       record.scanScope === "all"
         ? record.collections ?? current.collections
@@ -913,6 +853,7 @@ function mergeHistoryRecords(records: HistoryRecord[]) {
       scanScope: mergedScope,
       collections: mergedCollections,
       results: mergedResults,
+      scanLogResults: mergedScanLogResults,
       updatedAt: Math.max(current.updatedAt, record.updatedAt),
       storageKeys: Array.from(new Set([...(current.storageKeys ?? [current.key]), record.key]))
     });
@@ -943,49 +884,6 @@ function sourceCounts(record: HistoryRecord, currentCollections: CommonCrawlColl
 
 function failedCount(record: HistoryRecord, currentCollections: CommonCrawlCollection[] = []) {
   return sourceCounts(record, currentCollections).failed;
-}
-
-function matchCoverageRank(matchType: HistoryRecord["matchType"]) {
-  if (matchType === "domain") return 2;
-  if (matchType === "host") return 1;
-  return 0;
-}
-
-function scopeCoverageRank(scope: ScanScope) {
-  return scope === "all" ? 1 : 0;
-}
-
-function isCoveredByBroaderCompleteScan(
-  record: HistoryRecord,
-  records: HistoryRecord[],
-  currentCollections: CommonCrawlCollection[]
-) {
-  const matchRank = matchCoverageRank(record.matchType);
-  const scopeRank = scopeCoverageRank(record.scanScope);
-  return records.some((candidate) => {
-    if (candidate.key === record.key) return false;
-    if (candidate.mock !== record.mock) return false;
-    if (scanOutcome(candidate, currentCollections) !== "complete") return false;
-    const candidateMatchRank = matchCoverageRank(candidate.matchType);
-    const candidateScopeRank = scopeCoverageRank(candidate.scanScope);
-    return searchUrlCoversTarget(candidate.url, candidate.matchType, record.url, record.matchType) &&
-      candidateMatchRank >= matchRank &&
-      candidateScopeRank >= scopeRank &&
-      (candidateMatchRank > matchRank || candidateScopeRank > scopeRank);
-  });
-}
-
-function hasCoveringFullScan(
-  record: HistoryRecord,
-  records: HistoryRecord[],
-  currentCollections: CommonCrawlCollection[]
-) {
-  return records.some((candidate) => {
-    if (candidate.scanScope !== "all") return false;
-    if (candidate.mock !== record.mock) return false;
-    if (scanOutcome(candidate, currentCollections) !== "complete") return false;
-    return searchUrlCoversTarget(candidate.url, candidate.matchType, record.url, record.matchType);
-  });
 }
 
 function scanOutcome(record: HistoryRecord, currentCollections: CommonCrawlCollection[] = []): ScanOutcome {
@@ -1039,25 +937,12 @@ function compareRecords(
   return cmp * sign;
 }
 
-function searchHref(record: HistoryRecord, action: false | "missing" | "retry-failed") {
+function searchHref(record: HistoryRecord) {
   const params = new URLSearchParams();
   params.set("match", record.matchType);
   params.set("url", record.url);
   if (record.scanScope === "all") params.set("scope", "all");
-  if (action) {
-    params.set("action", action);
-  } else {
-    params.set("history", "1");
-  }
-  return `/search?${params.toString()}`;
-}
-
-function fullScanHrefFor(record: HistoryRecord) {
-  const params = new URLSearchParams();
-  params.set("match", record.matchType);
-  params.set("scope", "all");
-  params.set("action", "missing");
-  params.set("url", record.url);
+  params.set("history", "1");
   return `/search?${params.toString()}`;
 }
 
