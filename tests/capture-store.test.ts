@@ -3,14 +3,23 @@ import {
   coverageDurationMs,
   coverageScanLogResults,
   captureCacheKey,
+  DEFAULT_CAPTURE_EXPORT_COLUMNS,
+  DEFAULT_CAPTURE_SORT,
   DEFAULT_HTML_CACHE_LIMIT_BYTES,
+  DEFAULT_HISTORY_PAGE_SIZE,
+  DEFAULT_LARGE_CAPTURE_LIMIT_BYTES,
+  DEFAULT_SEARCH_PAGE_SIZE,
   legacyScanSearchKey,
   legacyScanSearchKeys,
   legacyUnscopedScanSearchKey,
+  mergeStoredSearchRecords,
+  normalizeScanUrl,
   scanSearchKey,
-  targetIdFor
+  scanLogDurationMs,
+  targetIdFor,
+  type StoredSearch
 } from "@/lib/capture-store";
-import type { CollectionCheckResult, CommonCrawlCollection } from "@/lib/common-crawl";
+import type { CollectionCheckResult, CommonCrawlCapture, CommonCrawlCollection } from "@/lib/common-crawl";
 
 describe("capture store keys", () => {
   it("builds stable target ids from url, match type, and mock mode", () => {
@@ -22,6 +31,18 @@ describe("capture store keys", () => {
     );
     expect(targetIdFor("https://example.com/", "exact", false)).not.toBe(
       targetIdFor("https://example.com/", "exact", true)
+    );
+  });
+
+  it("maps raw pre-normalization inputs to the same target as their canonical URL", () => {
+    expect(normalizeScanUrl("hutt.io")).toBe("https://hutt.io/");
+    expect(normalizeScanUrl("  https://hutt.io ")).toBe("https://hutt.io/");
+    expect(normalizeScanUrl("https://hutt.io/page#section")).toBe("https://hutt.io/page");
+    expect(normalizeScanUrl("https://hutt.io/")).toBe("https://hutt.io/");
+    expect(normalizeScanUrl("not a url")).toBe("not a url");
+
+    expect(targetIdFor("hutt.io", "domain", false)).toBe(
+      targetIdFor("https://hutt.io/", "domain", false)
     );
   });
 
@@ -55,6 +76,103 @@ describe("capture store keys", () => {
 
   it("uses a 500 MB default HTML cache limit", () => {
     expect(DEFAULT_HTML_CACHE_LIMIT_BYTES).toBe(500 * 1024 * 1024);
+  });
+
+  it("exposes stable defaults for configurable UI preferences", () => {
+    expect(DEFAULT_CAPTURE_SORT).toBe("timestamp-desc");
+    expect(DEFAULT_SEARCH_PAGE_SIZE).toBe(100);
+    expect(DEFAULT_HISTORY_PAGE_SIZE).toBe(25);
+    expect(DEFAULT_LARGE_CAPTURE_LIMIT_BYTES).toBe(15 * 1024 * 1024);
+    expect(DEFAULT_CAPTURE_EXPORT_COLUMNS).toEqual([
+      "url",
+      "timestamp",
+      "collection",
+      "status",
+      "mime",
+      "digest",
+      "warcUrl",
+      "warcPosition"
+    ]);
+  });
+
+  it("merges saved scan records without letting a later missing run hide previous coverage", () => {
+    const firstCollection: CommonCrawlCollection = {
+      id: "CC-MAIN-2026-21",
+      name: "May 2026 Index",
+      cdxApi: "https://index.commoncrawl.org/CC-MAIN-2026-21-index",
+      from: "2026-05-01T00:00:00",
+      to: "2026-05-15T00:00:00"
+    };
+    const secondCollection: CommonCrawlCollection = {
+      id: "CC-MAIN-2026-25",
+      name: "June 2026 Index",
+      cdxApi: "https://index.commoncrawl.org/CC-MAIN-2026-25-index",
+      from: "2026-06-01T00:00:00",
+      to: "2026-06-15T00:00:00"
+    };
+    const checkedCapture: CommonCrawlCapture = {
+      url: "https://example.com/",
+      timestamp: "20260501120000",
+      status: "200",
+      mime: "text/html",
+      digest: "digest",
+      length: "100",
+      offset: "10",
+      filename: "crawl-data/old.warc.gz",
+      collectionId: firstCollection.id,
+      collectionName: firstCollection.name,
+      collectionFrom: firstCollection.from,
+      collectionTo: firstCollection.to
+    };
+    const storedFullScan: StoredSearch = {
+      key: "live:domain:https://example.com/:scan:all:old",
+      url: "https://example.com/",
+      matchType: "domain",
+      mock: false,
+      captures: [checkedCapture],
+      scanScope: "all",
+      collections: [firstCollection],
+      collectionIds: [firstCollection.id],
+      results: [
+        {
+          collection: firstCollection,
+          status: "checked",
+          captures: [checkedCapture],
+          attempts: 1,
+          runs: 1
+        }
+      ],
+      updatedAt: 1
+    };
+    const failedMissingRun: StoredSearch = {
+      key: "live:domain:https://example.com/:scan:all",
+      url: "https://example.com/",
+      matchType: "domain",
+      mock: false,
+      captures: [],
+      scanScope: "all",
+      collectionIds: [firstCollection.id, secondCollection.id],
+      results: [
+        {
+          collection: secondCollection,
+          status: "not-checked",
+          captures: [],
+          attempts: 1,
+          runs: 1,
+          error: "browser/network request failed before an HTTP response"
+        }
+      ],
+      updatedAt: 2
+    };
+
+    const merged = mergeStoredSearchRecords([failedMissingRun, storedFullScan]);
+
+    expect(merged?.collectionIds).toEqual([firstCollection.id]);
+    expect(merged?.results?.map((result) => [result.collection.id, result.status])).toEqual([
+      [secondCollection.id, "not-checked"],
+      [firstCollection.id, "checked"]
+    ]);
+    expect(merged?.captures).toEqual([checkedCapture]);
   });
 
   it("returns append-only scan log results when a coverage record has them", () => {
@@ -111,5 +229,38 @@ describe("capture store keys", () => {
         updatedAt: 100_000
       }, 130_000)
     ).toBe(75_000);
+  });
+
+  it("infers stored scan duration from scan log timestamps", () => {
+    const collection: CommonCrawlCollection = {
+      id: "CC-MAIN-2026-21",
+      name: "May 2026 Index",
+      cdxApi: "https://index.commoncrawl.org/CC-MAIN-2026-21-index",
+      from: "2026-05-01T00:00:00",
+      to: "2026-05-15T00:00:00"
+    };
+
+    expect(scanLogDurationMs([
+      {
+        kind: "event",
+        event: "scan-started",
+        checkedAt: 10_000,
+        message: "Scan started."
+      },
+      {
+        collection,
+        status: "checked",
+        captures: [],
+        attempts: 1,
+        runs: 1,
+        checkedAt: 70_000
+      },
+      {
+        kind: "event",
+        event: "scan-completed",
+        checkedAt: 75_000,
+        message: "Scan completed."
+      }
+    ])).toBe(65_000);
   });
 });

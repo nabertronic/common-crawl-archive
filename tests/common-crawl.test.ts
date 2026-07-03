@@ -6,6 +6,7 @@ import {
   buildRangeHeader,
   fetchCollections,
   filterCollectionsByRecentMonths,
+  filterCollectionsByDateRange,
   isLikelyCommonCrawlAvailabilityIssue,
   isLikelyRateLimitError,
   LARGE_CAPTURE_LIMIT_BYTES,
@@ -151,6 +152,21 @@ describe("Common Crawl client", () => {
     );
   });
 
+  it("preserves custom date ranges in capture viewer back links", () => {
+    expect(
+      buildResultsBackHref({
+        url: "https://example.com/",
+        match: "domain",
+        scope: "custom",
+        dateFrom: "2020-01-01",
+        dateTo: "2020-12-31",
+        history: "1"
+      })
+    ).toBe(
+      "/search?match=domain&scope=custom&from=2020-01-01&to=2020-12-31&history=1&url=https%3A%2F%2Fexample.com%2F"
+    );
+  });
+
   it("recognizes URL compatibility for reusing broader stored scans", () => {
     expect(searchUrlCoversTarget("https://example.com/", "domain", "https://blog.example.com/post", "host")).toBe(true);
     expect(searchUrlCoversTarget("https://www.example.com/", "domain", "https://blog.example.com/post", "exact")).toBe(true);
@@ -161,6 +177,38 @@ describe("Common Crawl client", () => {
   it("adds matchType when set to host or domain", () => {
     expect(buildCdxjUrl("https://example.com/", collection, "host")).toContain("matchType=host");
     expect(buildCdxjUrl("https://example.com/", collection, "domain")).toContain("matchType=domain");
+  });
+
+  it("filters collections that overlap a custom date range", () => {
+    const collections = filterCollectionsByDateRange(
+      [
+        {
+          id: "CC-MAIN-2019-10",
+          name: "Mar 2019 Index",
+          cdxApi: "https://index.commoncrawl.org/CC-MAIN-2019-10-index",
+          from: "2019-03-01T00:00:00",
+          to: "2019-03-31T23:59:59"
+        },
+        {
+          id: "CC-MAIN-2020-16",
+          name: "Apr 2020 Index",
+          cdxApi: "https://index.commoncrawl.org/CC-MAIN-2020-16-index",
+          from: "2020-04-10T00:00:00",
+          to: "2020-04-25T23:59:59"
+        },
+        {
+          id: "CC-MAIN-2021-04",
+          name: "Jan 2021 Index",
+          cdxApi: "https://index.commoncrawl.org/CC-MAIN-2021-04-index",
+          from: "2021-01-01T00:00:00",
+          to: "2021-01-15T23:59:59"
+        }
+      ],
+      "2020-04-01",
+      "2020-12-31"
+    );
+
+    expect(collections.map((entry) => entry.id)).toEqual(["CC-MAIN-2020-16"]);
   });
 
   it("parses HTML 200 and 3xx redirect captures from NDJSON", () => {
@@ -292,6 +340,42 @@ describe("Common Crawl client", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
+  it("uses exponential retry delays and Retry-After hints for transient failures", async () => {
+    const delays: number[] = [];
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    let call = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        call += 1;
+        if (call === 1) return new Response("rate limited", { status: 429 });
+        if (call === 2) return new Response("still busy", { status: 503, headers: { "Retry-After": "0.003" } });
+        return new Response("", { status: 200 });
+      })
+    );
+
+    try {
+      const result = await queryCollection(
+        "https://example.com/retry-after",
+        collection,
+        undefined,
+        1000,
+        2,
+        1,
+        100,
+        "exact",
+        undefined,
+        (delayMs) => delays.push(delayMs)
+      );
+
+      expect(result.status).toBe("checked");
+      expect(result.attempts).toBe(3);
+      expect(delays).toEqual([1, 3]);
+    } finally {
+      randomSpy.mockRestore();
+    }
+  });
+
   it("uses cached CDX results for repeated checked collection queries", async () => {
     const fetchMock = vi.fn(
       async () =>
@@ -415,21 +499,22 @@ describe("Common Crawl client", () => {
     expect(requested).toContain("matchType=host");
   });
 
-  it("keeps index collection checks serial even when higher concurrency is requested", async () => {
+  it("starts multiple collection workers when higher concurrency is requested", async () => {
     const collections = ["a", "b", "c"].map((id) => ({
       ...collection,
       id,
       cdxApi: `https://index.commoncrawl.org/${id}-index`
     }));
-    let active = 0;
-    let maxActive = 0;
+    let activeNetworkRequests = 0;
+    let maxNetworkRequests = 0;
+    let maxActiveCollections = 0;
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
-        active += 1;
-        maxActive = Math.max(maxActive, active);
+        activeNetworkRequests += 1;
+        maxNetworkRequests = Math.max(maxNetworkRequests, activeNetworkRequests);
         await Promise.resolve();
-        active -= 1;
+        activeNetworkRequests -= 1;
         return new Response("", { status: 404 });
       })
     );
@@ -439,10 +524,14 @@ describe("Common Crawl client", () => {
       collections,
       concurrency: 3,
       timeoutMs: 1000,
-      requestSpacingMs: 0
+      requestSpacingMs: 0,
+      onProgress: (progress) => {
+        maxActiveCollections = Math.max(maxActiveCollections, progress.activeCollections.length);
+      }
     });
 
-    expect(maxActive).toBe(1);
+    expect(maxActiveCollections).toBe(3);
+    expect(maxNetworkRequests).toBe(1);
   });
 
   it("uses fresh cached collinfo without a network request", async () => {
@@ -459,6 +548,29 @@ describe("Common Crawl client", () => {
 
     await expect(fetchCollections()).resolves.toEqual([collection]);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("can force-refresh collinfo even when a fresh cache exists", async () => {
+    const newerCollection = { ...collection, id: "CC-MAIN-2026-26" };
+    localStorage.setItem(
+      "snapshot-search:common-crawl-collections:v2",
+      JSON.stringify({
+        version: 1,
+        fetchedAt: Date.now(),
+        collections: [collection]
+      })
+    );
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify([{
+      id: newerCollection.id,
+      name: newerCollection.name,
+      "cdx-api": newerCollection.cdxApi,
+      from: newerCollection.from,
+      to: newerCollection.to
+    }])));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchCollections({ forceRefresh: true })).resolves.toEqual([newerCollection]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("uses stale cached collinfo when the network fails", async () => {

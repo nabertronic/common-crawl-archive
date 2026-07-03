@@ -1,7 +1,12 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { NextResponse } from "next/server";
 import { OPT_OUT_REGISTRY_CSV_URL, parseOptOutRegistryCsv } from "@/lib/opt-out-registry";
 
 export const dynamic = "force-dynamic";
+
+const ROUTE_CACHE_CONTROL = "public, max-age=3600, stale-while-revalidate=86400";
+const SNAPSHOT_PATH = path.join(process.cwd(), "data", "common-crawl-opt-out-registry-snapshot.csv");
 
 export async function GET() {
   try {
@@ -10,23 +15,38 @@ export async function GET() {
       next: { revalidate: 24 * 60 * 60 }
     });
 
-    if (!response.ok) {
-      return NextResponse.json(
-        { error: `Opt-out registry returned HTTP ${response.status}` },
-        { status: 502 }
-      );
-    }
+    if (!response.ok) throw new Error(`Opt-out registry returned HTTP ${response.status}`);
 
     const registry = parseOptOutRegistryCsv(await response.text());
     return NextResponse.json(registry, {
       headers: {
-        "Cache-Control": "public, max-age=3600, stale-while-revalidate=86400"
+        "Cache-Control": ROUTE_CACHE_CONTROL,
+        "X-Opt-Out-Registry-Source": "live"
       }
     });
   } catch {
+    const snapshot = await readSnapshotRegistry();
+    if (snapshot) {
+      return NextResponse.json(snapshot, {
+        headers: {
+          "Cache-Control": ROUTE_CACHE_CONTROL,
+          "X-Opt-Out-Registry-Source": "snapshot"
+        }
+      });
+    }
+
     return NextResponse.json(
-      { error: "Could not download the Common Crawl opt-out registry." },
+      { error: "Could not download the Common Crawl opt-out registry, and no bundled snapshot was available." },
       { status: 502 }
     );
+  }
+}
+
+async function readSnapshotRegistry() {
+  try {
+    const csv = await readFile(SNAPSHOT_PATH, "utf8");
+    return parseOptOutRegistryCsv(csv);
+  } catch {
+    return null;
   }
 }

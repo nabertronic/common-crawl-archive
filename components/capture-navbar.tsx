@@ -2,7 +2,7 @@
 
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, X } from "lucide-react";
 import Link from "next/link";
-import { useMemo } from "react";
+import { useMemo, useRef, useState } from "react";
 import { BrandWordmark } from "@/components/brand";
 import type { CommonCrawlCapture } from "@/lib/common-crawl";
 import { cn, formatTimestamp } from "@/lib/utils";
@@ -64,10 +64,10 @@ export function CaptureNavBar({ url, timestamp, captures, currentIndex, backHref
       <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-3 gap-y-1 px-4 pb-2 pt-2 lg:px-6">
         <Link
           href="/"
-          className="group flex h-9 shrink-0 items-center rounded-md border border-amber-300/30 bg-zinc-900/60 px-2.5 text-zinc-200 transition hover:border-amber-300 hover:text-amber-100"
+          className="group flex h-9 shrink-0 items-center rounded-md border border-zinc-700 bg-zinc-900 px-4 text-zinc-200 transition hover:border-amber-300/60 hover:bg-zinc-800 hover:text-amber-100"
           title="Start a new search"
         >
-          <BrandWordmark className="text-[13px]" />
+          <BrandWordmark className="text-[16px] leading-none tracking-[-0.03em]" />
         </Link>
 
         <UrlField url={url} />
@@ -113,7 +113,7 @@ export function CaptureNavBar({ url, timestamp, captures, currentIndex, backHref
             </div>
 
             <div className="flex items-center justify-start gap-2">
-              <div className="relative min-w-[340px] max-w-full overflow-hidden">
+              <div className="relative min-w-[340px] max-w-full">
                 <CaptureTimeline
                   sorted={sorted}
                   currentIndex={indexInSorted}
@@ -209,6 +209,23 @@ function CaptureTimeline({
     return groups;
   }, [sorted]);
 
+  const dayCaptureCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const capture of sorted) {
+      const dayKey = capture.timestamp.slice(0, 8);
+      counts.set(dayKey, (counts.get(dayKey) ?? 0) + 1);
+    }
+    return counts;
+  }, [sorted]);
+
+  const maxDayCaptureCount = useMemo(() => {
+    let max = 1;
+    for (const count of dayCaptureCounts.values()) {
+      if (count > max) max = count;
+    }
+    return max;
+  }, [dayCaptureCounts]);
+
   if (yearGroups.length === 0) return null;
 
   const currentYear = currentIndex >= 0 && sorted[currentIndex]
@@ -219,71 +236,152 @@ function CaptureTimeline({
   const TICK_WIDTH = 4;
   const TICK_GAP = 2;
   const MIN_COL_WIDTH = 32;
+  const hoverLayerRef = useRef<HTMLDivElement>(null);
+  const [hovered, setHovered] = useState<{
+    capture: CommonCrawlCapture;
+    sortedIndex: number;
+    clientX: number;
+  } | null>(null);
 
   return (
-    <div className="thin-scrollbar flex h-14 min-w-0 items-end justify-start gap-1 overflow-x-auto rounded-md border border-zinc-800 bg-gradient-to-b from-zinc-950 to-zinc-900/30 px-2 pt-1">
-      {yearGroups.map(({ year, captures }) => {
-        const isSelected = currentYear === year;
-        const yearCount = captures.length;
-        const hasCount = yearCount > 0;
-        const columnWidth = Math.max(MIN_COL_WIDTH, yearCount * (TICK_WIDTH + TICK_GAP) + 6);
-        return (
-          <div
-            key={year}
-            className="flex shrink-0 flex-col items-stretch"
-            style={{ width: `${columnWidth}px` }}
-          >
+    <div ref={hoverLayerRef} className="relative">
+      {hovered ? (
+        <div
+          className="pointer-events-none absolute top-[calc(100%+8px)] z-[80] w-72 max-w-[min(18rem,calc(100vw-2rem))] -translate-x-1/2 rounded-md border border-zinc-700/80 bg-zinc-900 px-3 py-2 text-left text-xs font-medium text-zinc-100 shadow-md shadow-black/40"
+          style={{ left: `${hovered.clientX}px` }}
+        >
+          <CaptureTickHover capture={hovered.capture} sortedIndex={hovered.sortedIndex} />
+          <span
+            aria-hidden
+            className="absolute bottom-full left-1/2 h-2 w-2 -translate-x-1/2 translate-y-1/2 rotate-45 border-l border-t border-zinc-700/80 bg-zinc-900"
+          />
+        </div>
+      ) : null}
+      <div className="thin-scrollbar flex h-14 min-w-0 items-end justify-start gap-1 overflow-x-auto overflow-y-hidden rounded-md border border-zinc-800 bg-gradient-to-b from-zinc-950 to-zinc-900/30 px-2 pt-1">
+        {yearGroups.map(({ year, captures }) => {
+          const isSelected = currentYear === year;
+          const yearCount = captures.length;
+          const hasCount = yearCount > 0;
+          const columnWidth = Math.max(MIN_COL_WIDTH, yearCount * (TICK_WIDTH + TICK_GAP) + 6);
+          return (
             <div
-              className={cn(
-                "flex items-end justify-center border-l px-[3px]",
-                isSelected
-                  ? "border-transparent bg-amber-300/15 shadow-[0_8px_24px_rgba(252,211,77,0.25)]"
-                  : "border-zinc-800/60"
-              )}
-              style={{ height: `${BAR_AREA_HEIGHT}px`, gap: `${TICK_GAP}px` }}
+              key={year}
+              className="flex shrink-0 flex-col items-stretch"
+              style={{ width: `${columnWidth}px` }}
             >
-              {captures.map(({ capture, sortedIndex }) => {
-                const isCurrent = sortedIndex === currentIndex;
-                return (
-                  <button
-                    key={`${capture.timestamp}:${capture.filename}:${capture.offset}`}
-                    type="button"
-                    onClick={() => onJump(sortedIndex)}
-                    title={formatTimestamp(capture.timestamp)}
-                    aria-label={`Capture ${sortedIndex + 1}: ${formatTimestamp(capture.timestamp)}`}
-                    className={cn(
-                      "block rounded-sm transition-colors",
-                      isCurrent
-                        ? "bg-amber-300 shadow-[0_0_10px_rgba(252,211,77,0.55)]"
-                        : isSelected
-                          ? "bg-amber-200/90 hover:bg-amber-100"
-                          : "bg-zinc-300 hover:bg-amber-300"
-                    )}
-                    style={{
-                      width: `${TICK_WIDTH}px`,
-                      height: isCurrent ? "100%" : isSelected ? "65%" : "50%"
-                    }}
-                  />
-                );
-              })}
+              <div
+                className={cn(
+                  "flex items-end justify-center border-l px-[3px]",
+                  isSelected
+                    ? "border-transparent bg-amber-300/15 shadow-[0_8px_24px_rgba(252,211,77,0.25)]"
+                    : "border-zinc-800/60"
+                )}
+                style={{ height: `${BAR_AREA_HEIGHT}px`, gap: `${TICK_GAP}px` }}
+              >
+                {captures.map(({ capture, sortedIndex }) => {
+                  const isCurrent = sortedIndex === currentIndex;
+                  const dayKey = capture.timestamp.slice(0, 8);
+                  const capturesOnDay = dayCaptureCounts.get(dayKey) ?? 1;
+                  return (
+                    <button
+                      key={`${capture.timestamp}:${capture.filename}:${capture.offset}`}
+                      type="button"
+                      onClick={() => onJump(sortedIndex)}
+                      onMouseEnter={(event) => {
+                        const hostRect = hoverLayerRef.current?.getBoundingClientRect();
+                        const tickRect = event.currentTarget.getBoundingClientRect();
+                        setHovered({
+                          capture,
+                          sortedIndex,
+                          clientX: hostRect ? tickRect.left - hostRect.left + tickRect.width / 2 : tickRect.width / 2
+                        });
+                      }}
+                      onMouseLeave={() => setHovered((current) => (current?.sortedIndex === sortedIndex ? null : current))}
+                      onFocus={(event) => {
+                        const hostRect = hoverLayerRef.current?.getBoundingClientRect();
+                        const tickRect = event.currentTarget.getBoundingClientRect();
+                        setHovered({
+                          capture,
+                          sortedIndex,
+                          clientX: hostRect ? tickRect.left - hostRect.left + tickRect.width / 2 : tickRect.width / 2
+                        });
+                      }}
+                      onBlur={() => setHovered((current) => (current?.sortedIndex === sortedIndex ? null : current))}
+                      aria-label={`Capture ${sortedIndex + 1}: ${formatTimestamp(capture.timestamp)} ${capture.url}`}
+                      title={`${capturesOnDay} capture${capturesOnDay === 1 ? "" : "s"} on ${dayKey}`}
+                      className={cn(
+                        "block shrink-0 rounded-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950",
+                        isCurrent
+                          ? "bg-amber-300 shadow-[0_0_10px_rgba(252,211,77,0.55)]"
+                          : isSelected
+                            ? "bg-amber-200/90 hover:bg-amber-100"
+                            : "bg-zinc-300 hover:bg-amber-300"
+                      )}
+                      style={{
+                        width: `${TICK_WIDTH}px`,
+                        height: `${tickHeightForDayDensity(capturesOnDay, maxDayCaptureCount, BAR_AREA_HEIGHT)}px`
+                      }}
+                    />
+                  );
+                })}
+              </div>
+              <span
+                className={cn(
+                  "inline-flex justify-center px-1 text-[11px] tabular-nums",
+                  isSelected
+                    ? "bg-amber-300 font-bold text-zinc-950"
+                    : hasCount
+                      ? "font-semibold text-zinc-300"
+                      : "text-zinc-600"
+                )}
+              >
+                {year}
+              </span>
             </div>
-            <span
-              className={cn(
-                "inline-flex justify-center px-1 text-[11px] tabular-nums",
-                isSelected
-                  ? "bg-amber-300 font-bold text-zinc-950"
-                  : hasCount
-                    ? "font-semibold text-zinc-300"
-                    : "text-zinc-600"
-              )}
-            >
-              {year}
-            </span>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
     </div>
   );
+}
+
+function CaptureTickHover({
+  capture,
+  sortedIndex
+}: {
+  capture: CommonCrawlCapture;
+  sortedIndex: number;
+}) {
+  const isRedirect = /^3\d\d$/.test(capture.status);
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-amber-200">
+          Capture {sortedIndex + 1}
+        </p>
+        <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-400">
+          {capture.collectionId}
+        </p>
+      </div>
+      <p className="break-all font-mono text-[11px] leading-5 text-zinc-100">{capture.url}</p>
+      <div className="space-y-0.5 text-[11px] text-zinc-300">
+        <p>
+          Time: <span className="font-mono text-zinc-100">{formatTimestamp(capture.timestamp)}</span>
+        </p>
+        <p>
+          Status: <span className={cn("font-mono", isRedirect ? "text-emerald-300" : "text-sky-300")}>{capture.status}</span>
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function tickHeightForDayDensity(dayCount: number, maxDayCount: number, maxHeight: number): number {
+  const minHeight = 16;
+  if (maxDayCount <= 1) return minHeight;
+  const ratio = Math.log(dayCount + 1) / Math.log(maxDayCount + 1);
+  return Math.round(minHeight + ratio * (maxHeight - minHeight));
 }
 
 function formatHeadlineDate(timestamp: string): string {

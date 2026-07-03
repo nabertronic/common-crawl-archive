@@ -29,4 +29,26 @@ describe("navigation state", () => {
       action: undefined
     });
   });
+
+  it("parses custom legacy date ranges", () => {
+    expect(parseSearchRoute(new URLSearchParams("url=hutt.io&match=domain&scope=custom&from=2020-01-01&to=2020-12-31"))).toEqual({
+      kind: "legacy",
+      url: "hutt.io",
+      matchType: "domain",
+      mock: false,
+      scope: "custom",
+      dateFrom: "2020-01-01",
+      dateTo: "2020-12-31",
+      history: false,
+      action: undefined,
+      year: undefined,
+      collection: undefined,
+      mime: undefined,
+      status: undefined,
+      filter: undefined,
+      sort: undefined,
+      view: undefined,
+      page: undefined
+    });
+  });
 });

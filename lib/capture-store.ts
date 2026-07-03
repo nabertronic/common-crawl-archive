@@ -1,5 +1,5 @@
 import type { CollectionCheckResult, CommonCrawlCapture, CommonCrawlCollection, MatchType, ScanLogEntry } from "./common-crawl";
-import { dedupeCaptures, mergeCollectionResult } from "./scan-results";
+import { dedupeCaptures, mergeCollectionResult, mergeCollectionResults } from "./scan-results";
 
 const DB_NAME = "wayback-fallback";
 const DB_VERSION = 3;
@@ -14,8 +14,35 @@ const CHANNEL_NAME = "wayback-fallback:searches";
 const DEFAULT_LOCAL_USER_ID = "local";
 const ACTIVE_SETTINGS_ID = "active";
 export const DEFAULT_HTML_CACHE_LIMIT_BYTES = 500 * 1024 * 1024;
+export const DEFAULT_SEARCH_PAGE_SIZE = 100;
+export const DEFAULT_HISTORY_PAGE_SIZE = 25;
+export const DEFAULT_LARGE_CAPTURE_LIMIT_BYTES = 15 * 1024 * 1024;
 
-export type ScanScope = "recent" | "all";
+export type AppViewMode = "list" | "calendar";
+export type AppCaptureColumnKey =
+  | "url"
+  | "timestamp"
+  | "collection"
+  | "status"
+  | "mime"
+  | "digest"
+  | "warcUrl"
+  | "warcPosition";
+
+export const DEFAULT_CAPTURE_EXPORT_COLUMNS: AppCaptureColumnKey[] = [
+  "url",
+  "timestamp",
+  "collection",
+  "status",
+  "mime",
+  "digest",
+  "warcUrl",
+  "warcPosition"
+];
+
+export const DEFAULT_CAPTURE_SORT = "timestamp-desc";
+
+export type ScanScope = "recent" | "all" | "custom";
 
 export type StoredSearch = {
   key: string;
@@ -25,9 +52,17 @@ export type StoredSearch = {
   mock: boolean;
   captures: CommonCrawlCapture[];
   scanScope?: ScanScope;
+  dateFrom?: string;
+  dateTo?: string;
   collections?: CommonCrawlCollection[];
+  collectionIds?: string[];
+  collectionListFetchedAt?: number;
+  scanWindowFrom?: string;
+  scanWindowTo?: string;
   results?: CollectionCheckResult[];
   scanLogResults?: ScanLogEntry[];
+  durationMs?: number;
+  activeScanStartedAt?: number;
   updatedAt: number;
 };
 
@@ -49,6 +84,10 @@ export type CoverageRecord = {
   mock: boolean;
   collectionResults: Record<string, CollectionCheckResult>;
   scanLogResults?: ScanLogEntry[];
+  collectionIds?: string[];
+  collectionListFetchedAt?: number;
+  scanWindowFrom?: string;
+  scanWindowTo?: string;
   // Accumulated active scanning time across all runs, so a scan reopened from
   // history can show how long the run actually took instead of 0:00.
   durationMs?: number;
@@ -64,6 +103,12 @@ export type ScanSession = {
   matchType: MatchType;
   mock: boolean;
   scope: ScanScope;
+  dateFrom?: string;
+  dateTo?: string;
+  collectionIds?: string[];
+  collectionListFetchedAt?: number;
+  scanWindowFrom?: string;
+  scanWindowTo?: string;
   year?: string;
   collection?: string;
   mime?: string;
@@ -89,6 +134,17 @@ export type AppSettings = {
   htmlCacheEnabled: boolean;
   htmlCacheLimitBytes: number;
   autoPruneEnabled: boolean;
+  showHtmlPrivacyWarning: boolean;
+  defaultMatchType: MatchType;
+  defaultScanScope: ScanScope;
+  defaultCustomDateFrom?: string;
+  defaultCustomDateTo?: string;
+  defaultViewMode: AppViewMode;
+  defaultSort: string;
+  searchPageSize: number;
+  historyPageSize: number;
+  defaultExportColumns: AppCaptureColumnKey[];
+  largeCaptureLimitBytes: number;
   updatedAt: number;
 };
 
@@ -126,8 +182,13 @@ export function scanSearchKey(
   url: string,
   matchType: MatchType | string,
   mock: boolean,
-  scope: ScanScope
+  scope: ScanScope,
+  options?: { dateFrom?: string; dateTo?: string }
 ): string {
+  if (scope === "custom") {
+    const rangeKey = `${options?.dateFrom ?? ""}:${options?.dateTo ?? ""}`;
+    return `${searchKey(url, matchType, mock)}:scan:${scope}:${rangeKey}`;
+  }
   return `${searchKey(url, matchType, mock)}:scan:${scope}`;
 }
 
@@ -141,6 +202,7 @@ export function legacyScanSearchKey(
   mock: boolean,
   scope: ScanScope
 ): string {
+  if (scope === "custom") return `${searchKey(url, matchType, mock)}:${scope}`;
   return `${searchKey(url, matchType, mock)}:${scope}`;
 }
 
@@ -152,8 +214,26 @@ export function legacyScanSearchKeys(url: string, matchType: MatchType | string,
   ];
 }
 
+// Older app versions persisted the raw search input ("hutt.io") while newer
+// ones normalize it ("https://hutt.io/") before storing. Every URL comparison
+// and target hash must go through this normalization, otherwise records saved
+// before the change can no longer be matched to their target.
+export function normalizeScanUrl(url: string): string {
+  const trimmed = url.trim();
+  if (!trimmed) return trimmed;
+  const hasExplicitScheme = /^[a-z][a-z\d+.-]*:\/\//i.test(trimmed);
+  try {
+    const parsed = new URL(hasExplicitScheme ? trimmed : `https://${trimmed}`);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return trimmed;
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return trimmed;
+  }
+}
+
 export function normalizeTargetUrl(url: string): string {
-  return url.trim();
+  return normalizeScanUrl(url);
 }
 
 export function targetIdFor(url: string, matchType: MatchType | string, mock: boolean): string {
@@ -376,7 +456,11 @@ export async function upsertCoverageResult(
       ...(existing?.collectionResults ?? {}),
       [result.collection.id]: merged
     },
-    scanLogResults: [...(existing?.scanLogResults ?? coverageResults(existing)), result],
+    scanLogResults: existing?.scanLogResults,
+    collectionIds: existing?.collectionIds,
+    collectionListFetchedAt: existing?.collectionListFetchedAt,
+    scanWindowFrom: existing?.scanWindowFrom,
+    scanWindowTo: existing?.scanWindowTo,
     durationMs: existing?.durationMs,
     activeScanStartedAt: existing?.activeScanStartedAt,
     updatedAt: Date.now()
@@ -398,6 +482,10 @@ export async function appendCoverageScanLogEntry(
     mock: target.mock,
     collectionResults: existing?.collectionResults ?? {},
     scanLogResults: [...(existing?.scanLogResults ?? coverageResults(existing)), entry],
+    collectionIds: existing?.collectionIds,
+    collectionListFetchedAt: existing?.collectionListFetchedAt,
+    scanWindowFrom: existing?.scanWindowFrom,
+    scanWindowTo: existing?.scanWindowTo,
     durationMs: existing?.durationMs,
     activeScanStartedAt: existing?.activeScanStartedAt,
     updatedAt: Date.now()
@@ -423,7 +511,8 @@ export async function addCoverageDuration(targetId: string, segmentMs: number): 
 export async function startCoverageRun(
   target: Pick<SearchTarget, "targetId" | "ownerId" | "url" | "matchType" | "mock">,
   startedAt: number,
-  durationMs: number
+  durationMs: number,
+  metadata: Pick<CoverageRecord, "collectionIds" | "collectionListFetchedAt" | "scanWindowFrom" | "scanWindowTo"> = {}
 ): Promise<void> {
   if (!Number.isFinite(startedAt) || !Number.isFinite(durationMs) || durationMs < 0) return;
   const existing = await getCoverage(target.targetId);
@@ -435,6 +524,10 @@ export async function startCoverageRun(
     mock: target.mock,
     collectionResults: existing?.collectionResults ?? {},
     scanLogResults: existing?.scanLogResults,
+    collectionIds: metadata.collectionIds ?? existing?.collectionIds,
+    collectionListFetchedAt: metadata.collectionListFetchedAt ?? existing?.collectionListFetchedAt,
+    scanWindowFrom: metadata.scanWindowFrom ?? existing?.scanWindowFrom,
+    scanWindowTo: metadata.scanWindowTo ?? existing?.scanWindowTo,
     durationMs: Math.round(durationMs),
     activeScanStartedAt: Math.round(startedAt),
     updatedAt: Date.now()
@@ -445,6 +538,17 @@ export function coverageDurationMs(record: CoverageRecord | undefined, now = Dat
   const storedDuration = record?.durationMs ?? 0;
   const activeSegment = record?.activeScanStartedAt ? Math.max(0, now - record.activeScanStartedAt) : 0;
   return storedDuration + activeSegment;
+}
+
+export function scanLogDurationMs(entries: ScanLogEntry[] | undefined): number {
+  const timestamps = (entries ?? []).flatMap((entry) => {
+    if ("kind" in entry) return [entry.checkedAt];
+    return entry.attemptLogs?.length
+      ? entry.attemptLogs.map((attempt) => attempt.checkedAt ?? entry.checkedAt)
+      : [entry.checkedAt];
+  }).filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  if (timestamps.length < 2) return 0;
+  return Math.max(0, Math.max(...timestamps) - Math.min(...timestamps));
 }
 
 export function coverageResults(record: CoverageRecord | undefined): CollectionCheckResult[] {
@@ -492,6 +596,12 @@ export async function ensureScanSession(input: {
   matchType: MatchType;
   mock: boolean;
   scope: ScanScope;
+  dateFrom?: string;
+  dateTo?: string;
+  collectionIds?: string[];
+  collectionListFetchedAt?: number;
+  scanWindowFrom?: string;
+  scanWindowTo?: string;
   year?: string;
   collection?: string;
   mime?: string;
@@ -513,6 +623,12 @@ export async function ensureScanSession(input: {
     matchType: target.matchType,
     mock: target.mock,
     scope: input.scope,
+    dateFrom: input.dateFrom,
+    dateTo: input.dateTo,
+    collectionIds: input.collectionIds ?? existing?.collectionIds,
+    collectionListFetchedAt: input.collectionListFetchedAt ?? existing?.collectionListFetchedAt,
+    scanWindowFrom: input.scanWindowFrom ?? existing?.scanWindowFrom,
+    scanWindowTo: input.scanWindowTo ?? existing?.scanWindowTo,
     year: input.year,
     collection: input.collection,
     mime: input.mime,
@@ -532,26 +648,194 @@ export async function migrateLegacySearchToSession(
   record: StoredSearch,
   scope: ScanScope = record.scanScope === "all" ? "all" : "recent"
 ): Promise<ScanSession> {
+  const storedResults = resultsForLegacyRecord(record);
+  const collectionIds =
+    record.collectionIds ??
+    record.collections?.map((collection) => collection.id) ??
+    Array.from(new Set(storedResults.map((result) => result.collection.id)));
   const session = await ensureScanSession({
     url: record.url,
     matchType: record.matchType,
     mock: record.mock,
-    scope
+    scope,
+    dateFrom: record.dateFrom,
+    dateTo: record.dateTo,
+    collectionIds,
+    collectionListFetchedAt: record.collectionListFetchedAt,
+    scanWindowFrom: record.scanWindowFrom,
+    scanWindowTo: record.scanWindowTo
   });
   const target = await ensureTarget(record.url, record.matchType, record.mock);
-  for (const result of record.results ?? []) {
+  const storedScanLog = record.scanLogResults ?? record.results;
+  for (const result of storedResults) {
     await upsertCoverageResult(target, result);
   }
+  const existing = await getCoverage(target.targetId);
+  const inferredDurationMs = scanLogDurationMs(storedScanLog);
+  await putCoverage({
+    targetId: target.targetId,
+    ownerId: existing?.ownerId ?? target.ownerId,
+    url: target.url,
+    matchType: target.matchType,
+    mock: target.mock,
+    collectionResults: existing?.collectionResults ?? {},
+    scanLogResults: existing?.scanLogResults?.length ? existing.scanLogResults : storedScanLog,
+    collectionIds: record.collectionIds ?? existing?.collectionIds,
+    collectionListFetchedAt: record.collectionListFetchedAt ?? existing?.collectionListFetchedAt,
+    scanWindowFrom: record.scanWindowFrom ?? existing?.scanWindowFrom,
+    scanWindowTo: record.scanWindowTo ?? existing?.scanWindowTo,
+    durationMs: record.durationMs ?? existing?.durationMs ?? inferredDurationMs,
+    activeScanStartedAt: record.activeScanStartedAt ?? existing?.activeScanStartedAt,
+    updatedAt: Date.now()
+  });
   return session;
 }
 
-export async function findOrCreateLegacySession(url: string, matchType: MatchType, mock: boolean, scope: ScanScope) {
-  const keys = [scanSearchKey(url, matchType, mock, scope), searchKey(url, matchType, mock), ...legacyScanSearchKeys(url, matchType, mock)];
-  const records = (await Promise.all(keys.map((key) => getSearch(key))))
+function resultsForLegacyRecord(record: StoredSearch): CollectionCheckResult[] {
+  const storedScanLog = record.scanLogResults ?? record.results;
+  const storedResults = record.results ?? storedScanLog?.filter((entry): entry is CollectionCheckResult => !("kind" in entry)) ?? [];
+  const resultIds = new Set(storedResults.map((result) => result.collection.id));
+  const collectionsById = new Map((record.collections ?? []).map((collection) => [collection.id, collection]));
+  const capturesByCollection = new Map<string, CommonCrawlCapture[]>();
+  for (const capture of record.captures) {
+    if (resultIds.has(capture.collectionId)) continue;
+    const captures = capturesByCollection.get(capture.collectionId);
+    if (captures) captures.push(capture);
+    else capturesByCollection.set(capture.collectionId, [capture]);
+  }
+  const synthesizedResults = Array.from(capturesByCollection, ([collectionId, captures]) => {
+    const firstCapture = captures[0];
+    return {
+      collection: collectionsById.get(collectionId) ?? {
+        id: collectionId,
+        name: firstCapture?.collectionName ?? collectionId,
+        cdxApi: "",
+        from: firstCapture?.collectionFrom ?? "",
+        to: firstCapture?.collectionTo ?? ""
+      },
+      status: "checked" as const,
+      captures,
+      checkedAt: record.updatedAt,
+      httpStatus: 200,
+      attempts: 1,
+      runs: 1,
+      fromCache: true
+    };
+  });
+  return [...storedResults, ...synthesizedResults];
+}
+
+export function mergeStoredSearchRecords(records: StoredSearch[]): StoredSearch | undefined {
+  if (records.length === 0) return undefined;
+  const [first, ...rest] = records;
+  const coverageAnchor = records.reduce((best, record) =>
+    storedCoverageScore(record) > storedCoverageScore(best) ? record : best
+  , first);
+  return rest.reduce<StoredSearch>((merged, record) => ({
+    ...merged,
+    captures: dedupeCaptures([...merged.captures, ...record.captures]),
+    collections: mergeCollectionsById(merged.collections, record.collections),
+    collectionIds: coverageAnchor.collectionIds ?? coverageAnchor.collections?.map((collection) => collection.id),
+    collectionListFetchedAt: Math.max(merged.collectionListFetchedAt ?? 0, record.collectionListFetchedAt ?? 0) || undefined,
+    scanWindowFrom: coverageAnchor.scanWindowFrom ?? merged.scanWindowFrom ?? record.scanWindowFrom,
+    scanWindowTo: coverageAnchor.scanWindowTo ?? merged.scanWindowTo ?? record.scanWindowTo,
+    results: mergeCollectionResults(resultsForLegacyRecord(merged), resultsForLegacyRecord(record)),
+    scanLogResults: [...(merged.scanLogResults ?? merged.results ?? []), ...(record.scanLogResults ?? record.results ?? [])],
+    durationMs: Math.max(merged.durationMs ?? 0, record.durationMs ?? 0) || undefined,
+    activeScanStartedAt: merged.activeScanStartedAt ?? record.activeScanStartedAt,
+    updatedAt: Math.max(merged.updatedAt, record.updatedAt)
+  }), {
+    ...first,
+    collectionIds: coverageAnchor.collectionIds ?? coverageAnchor.collections?.map((collection) => collection.id),
+    scanWindowFrom: coverageAnchor.scanWindowFrom ?? first.scanWindowFrom,
+    scanWindowTo: coverageAnchor.scanWindowTo ?? first.scanWindowTo,
+    results: resultsForLegacyRecord(first)
+  });
+}
+
+function storedCoverageScore(record: StoredSearch) {
+  return resultsForLegacyRecord(record).filter((result) => result.status === "checked").length;
+}
+
+function mergeCollectionsById(
+  left: CommonCrawlCollection[] | undefined,
+  right: CommonCrawlCollection[] | undefined
+) {
+  const byId = new Map<string, CommonCrawlCollection>();
+  for (const collection of [...(left ?? []), ...(right ?? [])]) {
+    byId.set(collection.id, collection);
+  }
+  return byId.size > 0 ? Array.from(byId.values()) : undefined;
+}
+
+// Move a record stored under a pre-normalization URL ("hutt.io") onto its
+// canonical key/URL so future lookups find it directly. If a record already
+// exists at the canonical key (e.g. junk left behind by a run that could not
+// see the legacy record), merge the two instead of dropping either side.
+async function rekeyLegacyRecord(
+  record: StoredSearch,
+  canonicalUrl: string,
+  fallbackScope: ScanScope
+): Promise<StoredSearch> {
+  if (record.url === canonicalUrl) return record;
+  const canonicalKey = record.key === searchKey(record.url, record.matchType, record.mock)
+    ? searchKey(canonicalUrl, record.matchType, record.mock)
+    : scanSearchKey(canonicalUrl, record.matchType, record.mock, record.scanScope ?? fallbackScope, {
+        dateFrom: record.dateFrom,
+        dateTo: record.dateTo
+      });
+  const existing = await getSearch(canonicalKey);
+  const merged = existing ? mergeStoredSearchRecords([record, existing]) ?? record : record;
+  const healed: StoredSearch = { ...merged, key: canonicalKey, url: canonicalUrl };
+  await putSearch(healed);
+  if (record.key !== canonicalKey) await deleteSearch(record.key);
+  return healed;
+}
+
+export async function findOrCreateLegacySession(
+  url: string,
+  matchType: MatchType,
+  mock: boolean,
+  scope: ScanScope,
+  options?: { dateFrom?: string; dateTo?: string; savedKey?: string }
+) {
+  const canonicalUrl = normalizeScanUrl(url);
+  const matchesTarget = (record: StoredSearch) =>
+    normalizeScanUrl(record.url) === canonicalUrl && record.matchType === matchType && record.mock === mock;
+  const migrateRecords = async (records: StoredSearch[]) => {
+    const healedRecords: StoredSearch[] = [];
+    for (const record of records) {
+      healedRecords.push(await rekeyLegacyRecord(record, canonicalUrl, scope));
+    }
+    const merged = mergeStoredSearchRecords(healedRecords);
+    return merged ? migrateLegacySearchToSession(merged, scope) : undefined;
+  };
+
+  const savedKeys = options?.savedKey?.split(",").map((key) => key.trim()).filter(Boolean) ?? [];
+  const savedRecords = (await Promise.all(savedKeys.map((key) => getSearch(key))))
+    .filter((record): record is StoredSearch => record !== undefined && matchesTarget(record));
+  const savedSession = await migrateRecords(savedRecords);
+  if (savedSession) return savedSession;
+
+  const scopedKeys = [
+    scanSearchKey(canonicalUrl, matchType, mock, scope, options),
+    ...legacyScanSearchKeys(canonicalUrl, matchType, mock)
+  ];
+  const scopedRecords = (await Promise.all(scopedKeys.map((key) => getSearch(key))))
     .filter((record): record is StoredSearch => Boolean(record))
     .sort((left, right) => right.updatedAt - left.updatedAt);
-  if (records[0]) return migrateLegacySearchToSession(records[0], scope);
-  return ensureScanSession({ url, matchType, mock, scope });
+  if (scopedRecords[0]) return migrateLegacySearchToSession(scopedRecords[0], scope);
+  const genericRecord = await getSearch(searchKey(canonicalUrl, matchType, mock));
+  if (genericRecord) return migrateLegacySearchToSession(genericRecord, scope);
+
+  // Key-based lookups only see canonical keys; records saved by older app
+  // versions sit under raw-input keys and are only reachable by scanning.
+  const legacyCandidates = (await listSearches()).filter(matchesTarget);
+  const preferredCandidates = legacyCandidates.filter((record) => (record.scanScope ?? "recent") === scope);
+  const legacySession = await migrateRecords(preferredCandidates.length > 0 ? preferredCandidates : legacyCandidates);
+  if (legacySession) return legacySession;
+
+  return ensureScanSession({ url: canonicalUrl, matchType, mock, scope, dateFrom: options?.dateFrom, dateTo: options?.dateTo });
 }
 
 function notifyUpdated(key: string): void {
@@ -620,18 +904,47 @@ export async function updateLocalUser(input: { displayName?: string }): Promise<
 
 export async function getSettings(): Promise<AppSettings> {
   await getOrCreateLocalUser();
-  return (await readSettings()) ?? defaultSettings(DEFAULT_LOCAL_USER_ID);
+  return normalizeSettings((await readSettings()) ?? defaultSettings(DEFAULT_LOCAL_USER_ID));
 }
 
-export async function updateSettings(input: Partial<Pick<AppSettings, "htmlCacheEnabled" | "htmlCacheLimitBytes" | "autoPruneEnabled">>): Promise<AppSettings> {
+export async function updateSettings(
+  input: Partial<Pick<
+    AppSettings,
+    | "htmlCacheEnabled"
+    | "htmlCacheLimitBytes"
+    | "autoPruneEnabled"
+    | "showHtmlPrivacyWarning"
+    | "defaultMatchType"
+    | "defaultScanScope"
+    | "defaultCustomDateFrom"
+    | "defaultCustomDateTo"
+    | "defaultViewMode"
+    | "defaultSort"
+    | "searchPageSize"
+    | "historyPageSize"
+    | "defaultExportColumns"
+    | "largeCaptureLimitBytes"
+  >>
+): Promise<AppSettings> {
   const current = await getSettings();
-  const next: AppSettings = {
+  const next = normalizeSettings({
     ...current,
     htmlCacheEnabled: input.htmlCacheEnabled ?? current.htmlCacheEnabled,
     htmlCacheLimitBytes: normalizeCacheLimit(input.htmlCacheLimitBytes ?? current.htmlCacheLimitBytes),
     autoPruneEnabled: input.autoPruneEnabled ?? current.autoPruneEnabled,
+    showHtmlPrivacyWarning: input.showHtmlPrivacyWarning ?? current.showHtmlPrivacyWarning ?? true,
+    defaultMatchType: input.defaultMatchType ?? current.defaultMatchType,
+    defaultScanScope: input.defaultScanScope ?? current.defaultScanScope,
+    defaultCustomDateFrom: input.defaultCustomDateFrom ?? current.defaultCustomDateFrom,
+    defaultCustomDateTo: input.defaultCustomDateTo ?? current.defaultCustomDateTo,
+    defaultViewMode: input.defaultViewMode ?? current.defaultViewMode,
+    defaultSort: input.defaultSort ?? current.defaultSort,
+    searchPageSize: input.searchPageSize ?? current.searchPageSize,
+    historyPageSize: input.historyPageSize ?? current.historyPageSize,
+    defaultExportColumns: input.defaultExportColumns ?? current.defaultExportColumns,
+    largeCaptureLimitBytes: input.largeCaptureLimitBytes ?? current.largeCaptureLimitBytes,
     updatedAt: Date.now()
-  };
+  });
   await writeSettings(next);
   if (next.autoPruneEnabled && next.htmlCacheEnabled) await pruneHtmlCache(next.htmlCacheLimitBytes);
   notifyUpdated(SETTINGS_STORE);
@@ -850,8 +1163,95 @@ function defaultSettings(activeUserId: string): AppSettings {
     htmlCacheEnabled: true,
     htmlCacheLimitBytes: DEFAULT_HTML_CACHE_LIMIT_BYTES,
     autoPruneEnabled: true,
+    showHtmlPrivacyWarning: true,
+    defaultMatchType: "exact",
+    defaultScanScope: "recent",
+    defaultViewMode: "list",
+    defaultSort: DEFAULT_CAPTURE_SORT,
+    searchPageSize: DEFAULT_SEARCH_PAGE_SIZE,
+    historyPageSize: DEFAULT_HISTORY_PAGE_SIZE,
+    defaultExportColumns: DEFAULT_CAPTURE_EXPORT_COLUMNS,
+    largeCaptureLimitBytes: DEFAULT_LARGE_CAPTURE_LIMIT_BYTES,
     updatedAt: Date.now()
   };
+}
+
+function normalizeSettings(settings: AppSettings): AppSettings {
+  const normalizedScope = normalizeScanScope(settings.defaultScanScope);
+  const normalizedDateFrom = normalizeDateSetting(settings.defaultCustomDateFrom);
+  const normalizedDateTo = normalizeDateSetting(settings.defaultCustomDateTo);
+  return {
+    ...settings,
+    showHtmlPrivacyWarning: settings.showHtmlPrivacyWarning ?? true,
+    defaultMatchType: normalizeMatchType(settings.defaultMatchType),
+    defaultScanScope: normalizedScope,
+    defaultCustomDateFrom: normalizedScope === "custom" ? normalizedDateFrom : undefined,
+    defaultCustomDateTo: normalizedScope === "custom" ? normalizedDateTo : undefined,
+    defaultViewMode: settings.defaultViewMode === "calendar" ? "calendar" : "list",
+    defaultSort: normalizeSortSetting(settings.defaultSort),
+    searchPageSize: normalizePageSize(settings.searchPageSize, DEFAULT_SEARCH_PAGE_SIZE, 25, 500),
+    historyPageSize: normalizePageSize(settings.historyPageSize, DEFAULT_HISTORY_PAGE_SIZE, 10, 100),
+    defaultExportColumns: normalizeExportColumns(settings.defaultExportColumns),
+    largeCaptureLimitBytes: normalizeLargeCaptureLimit(settings.largeCaptureLimitBytes)
+  };
+}
+
+function normalizeMatchType(value: unknown): MatchType {
+  return value === "host" || value === "domain" || value === "exact" ? value : "exact";
+}
+
+function normalizeScanScope(value: unknown): ScanScope {
+  return value === "all" || value === "custom" || value === "recent" ? value : "recent";
+}
+
+function normalizeDateSetting(value: unknown): string | undefined {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : undefined;
+}
+
+function normalizeSortSetting(value: unknown): string {
+  if (
+    value === "timestamp-asc" ||
+    value === "timestamp-desc" ||
+    value === "url-asc" ||
+    value === "url-desc" ||
+    value === "status-asc" ||
+    value === "status-desc" ||
+    value === "collection-asc" ||
+    value === "collection-desc" ||
+    value === "size-asc" ||
+    value === "size-desc"
+  ) {
+    return value;
+  }
+  return DEFAULT_CAPTURE_SORT;
+}
+
+function normalizePageSize(value: unknown, fallback: number, min: number, max: number): number {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(numeric)));
+}
+
+function normalizeExportColumns(value: unknown): AppCaptureColumnKey[] {
+  const valid = new Set<AppCaptureColumnKey>([
+    "url",
+    "timestamp",
+    "collection",
+    "status",
+    "mime",
+    "digest",
+    "warcUrl",
+    "warcPosition"
+  ]);
+  if (!Array.isArray(value)) return DEFAULT_CAPTURE_EXPORT_COLUMNS;
+  const columns = value.filter((item): item is AppCaptureColumnKey => valid.has(item as AppCaptureColumnKey));
+  return columns.length > 0 ? Array.from(new Set(columns)) : DEFAULT_CAPTURE_EXPORT_COLUMNS;
+}
+
+function normalizeLargeCaptureLimit(value: unknown): number {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return DEFAULT_LARGE_CAPTURE_LIMIT_BYTES;
+  return Math.min(500 * 1024 * 1024, Math.max(1 * 1024 * 1024, Math.round(numeric)));
 }
 
 function withOwner<T extends { ownerId?: string }>(record: T | undefined, ownerId = DEFAULT_LOCAL_USER_ID): T | undefined {

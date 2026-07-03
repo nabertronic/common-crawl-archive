@@ -2,13 +2,14 @@
 
 import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  CircleAlert,
   ChevronDown,
   ChevronUp,
   ChevronsUpDown,
   Download,
   ExternalLink,
   History,
-  Settings,
+  RotateCcw,
   Search,
   SlidersHorizontal,
   Trash2,
@@ -17,28 +18,36 @@ import {
 import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import { BrandLockup } from "@/components/brand";
+import { TopRightMenu } from "@/components/top-right-menu";
 import { Button, LinkButton } from "@/components/ui/button";
+import { DateControl } from "@/components/ui/date-control";
 import { Input } from "@/components/ui/input";
+import { Tooltip } from "@/components/ui/tooltip";
 import {
   deleteSearch,
   deleteSearches,
   deleteCachedCapturesForHistoryRecord,
+  DEFAULT_HISTORY_PAGE_SIZE,
+  getSettings,
   listSearches,
   listCachedCaptureRecordsForCaptures,
+  normalizeScanUrl,
   scanSearchKey,
   subscribeToSearchChanges,
   type CachedHtmlCaptureRecord,
+  type AppSettings,
   type StoredSearch
 } from "@/lib/capture-store";
 import {
   fetchCollections,
+  filterCollectionsByDateRange,
   filterCollectionsByRecentMonths,
   type CollectionCheckResult,
   type CommonCrawlCollection
 } from "@/lib/common-crawl";
 import { dedupeCaptures, mergeCollectionResults } from "@/lib/scan-results";
 
-type ScanScope = "recent" | "all";
+type ScanScope = "recent" | "all" | "custom";
 type ScanOutcome = "complete" | "partial" | "empty";
 type SortKey = "status" | "url" | "scope" | "match" | "updated" | "captures" | "sources" | "failed";
 type SortDir = "asc" | "desc";
@@ -49,7 +58,6 @@ type HistoryRecord = StoredSearch & {
   storageKeys?: string[];
 };
 
-const PAGE_SIZE = 25;
 const HISTORY_GRID_CLASS = "history-grid";
 const HISTORY_SELECT_COL_CLASS = "history-col-select";
 const HISTORY_STATUS_COL_CLASS = "history-col-status";
@@ -81,6 +89,7 @@ function isBackForwardNavigation() {
 
 export function HistoryApp() {
   const [records, setRecords] = useState<HistoryRecord[]>([]);
+  const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
   const [currentCollections, setCurrentCollections] = useState<CommonCrawlCollection[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
@@ -164,12 +173,14 @@ export function HistoryApp() {
   }, [clearFreshControls, syncRestoredControls]);
 
   async function refreshRecords() {
-    const [searches, collections] = await Promise.all([
+    const [searches, collections, settings] = await Promise.all([
       listSearches(),
-      fetchCollections().catch(() => [] as CommonCrawlCollection[])
+      fetchCollections().catch(() => [] as CommonCrawlCollection[]),
+      getSettings().catch(() => null)
     ]);
     setRecords(mergeHistoryRecords(searches.filter(isHistoryRecord)));
     setCurrentCollections(collections);
+    setAppSettings(settings);
   }
 
   useEffect(() => {
@@ -207,11 +218,6 @@ export function HistoryApp() {
     );
   }, [filteredRecords, sortKey, sortDir, currentCollections]);
 
-  const stats = useMemo(() => {
-    const captures = sortedRecords.reduce((sum, record) => sum + record.captures.length, 0);
-    return { scans: sortedRecords.length, captures };
-  }, [sortedRecords]);
-
   useEffect(() => {
     setPage(1);
   }, [query, scopeFilter, outcomeFilter, dateFrom, dateTo, sortKey, sortDir]);
@@ -229,16 +235,21 @@ export function HistoryApp() {
     setSelectedKeys((current) => current.filter((key) => records.some((record) => record.key === key)));
   }, [records]);
 
-  const totalPages = Math.max(1, Math.ceil(sortedRecords.length / PAGE_SIZE));
+  const pageSize = appSettings?.historyPageSize ?? DEFAULT_HISTORY_PAGE_SIZE;
+  const totalPages = Math.max(1, Math.ceil(sortedRecords.length / pageSize));
   const currentPage = Math.min(page, totalPages);
-  const pageStart = (currentPage - 1) * PAGE_SIZE;
-  const visibleRecords = sortedRecords.slice(pageStart, pageStart + PAGE_SIZE);
+  const pageStart = (currentPage - 1) * pageSize;
+  const visibleRecords = sortedRecords.slice(pageStart, pageStart + pageSize);
   const selectedKeySet = useMemo(() => new Set(selectedKeys), [selectedKeys]);
   const allVisibleSelected =
     visibleRecords.length > 0 && visibleRecords.every((record) => selectedKeySet.has(record.key));
   const selectedRecords = useMemo(
     () => records.filter((record) => selectedKeySet.has(record.key)),
     [records, selectedKeySet]
+  );
+  const selectedRecordsWithNewCollections = useMemo(
+    () => selectedRecords.filter((record) => newCollectionsFor(record, currentCollections).length > 0),
+    [currentCollections, selectedRecords]
   );
   const activeFilterCount = [
     scopeFilter !== "any",
@@ -300,6 +311,12 @@ export function HistoryApp() {
     await refreshRecords();
   }
 
+  function handleCheckNewSelected() {
+    for (const record of selectedRecordsWithNewCollections) {
+      window.open(searchHref(record, "missing"), "_blank", "noopener,noreferrer");
+    }
+  }
+
   async function handleClearHistory() {
     if (records.length === 0) return;
     if (!window.confirm("Delete all saved scan history entries?")) return;
@@ -315,34 +332,31 @@ export function HistoryApp() {
   return (
     <main className="min-h-screen px-4 py-5 text-zinc-100 md:px-8">
       <div className="mx-auto flex max-w-7xl flex-col gap-4" suppressHydrationWarning>
-        <header className="archive-panel rounded-md p-4">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-            <div className="flex items-center gap-3">
-                <Link
-                  href="/"
-                  aria-label="Start a new search"
-                  title="Start a new search"
-                  className="rounded-md transition focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
-                >
-                  <BrandLockup wordClassName="text-xl leading-none" />
-                </Link>
-                <Link
-                  href="/settings"
-                  aria-label="Open settings"
-                  title="Open settings"
-                  className="grid h-10 w-10 place-items-center rounded-md border border-zinc-700 bg-zinc-950/70 text-zinc-200 transition hover:border-amber-300 hover:text-amber-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
-                >
-                  <Settings size={20} />
-                </Link>
-                <div>
-                  <h1 className="text-xl font-black uppercase tracking-[0.18em] text-zinc-50">
-                    Scan history
-                  </h1>
-                </div>
+        <header className="archive-panel relative z-40 rounded-md p-4">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+              <Link
+                href="/"
+                aria-label="Start a new search"
+                title="Start a new search"
+                className="rounded-md transition focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
+              >
+                <BrandLockup className="translate-y-[1.5px]" wordClassName="text-xl leading-none" />
+              </Link>
+              <div className="min-w-0">
+                <h1 className="text-xl font-black uppercase leading-none tracking-[0.18em] text-zinc-50">
+                  Scan history
+                </h1>
+              </div>
             </div>
-            <div className="grid grid-cols-2 divide-x divide-zinc-800 overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/60 lg:w-[290px]">
-              <Stat label="Scans" value={String(stats.scans)} />
-              <Stat label="Snapshots" value={String(stats.captures)} tone={stats.captures > 0 ? "green" : "neutral"} />
+            <div className="flex items-center justify-end gap-3">
+              <TopRightMenu
+                mode="inline"
+                items={[
+                  { href: "/", label: "New Scan", icon: "search" },
+                  { href: "/settings", label: "Settings", icon: "settings" }
+                ]}
+              />
             </div>
           </div>
         </header>
@@ -392,7 +406,8 @@ export function HistoryApp() {
                 options={[
                   ["any", "All scopes"],
                   ["recent", "Recent"],
-                  ["all", "Full"]
+                  ["all", "Full"],
+                  ["custom", "Custom"]
                 ]}
               />
               <SelectControl
@@ -443,6 +458,41 @@ export function HistoryApp() {
               <Button
                 type="button"
                 size="sm"
+                variant="secondary"
+                disabled={selectedRecordsWithNewCollections.length === 0}
+                onClick={handleCheckNewSelected}
+                suppressHydrationWarning
+              >
+                <RotateCcw size={14} />
+                Check new selected
+              </Button>
+              {hasActiveFilters ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  disabled={sortedRecords.length === 0}
+                  onClick={() => downloadCsv(sortedRecords, "filtered")}
+                  suppressHydrationWarning
+                >
+                  <Download size={14} />
+                  Export view
+                </Button>
+              ) : null}
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                disabled={records.length === 0}
+                onClick={() => downloadCsv(records, "all")}
+                suppressHydrationWarning
+              >
+                <Download size={14} />
+                Export all
+              </Button>
+              <Button
+                type="button"
+                size="sm"
                 variant="danger"
                 disabled={selectedRecords.length === 0}
                 onClick={() => void handleDeleteSelected()}
@@ -450,6 +500,17 @@ export function HistoryApp() {
               >
                 <Trash2 size={14} />
                 Delete selected
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="danger"
+                disabled={records.length === 0}
+                onClick={() => void handleClearHistory()}
+                suppressHydrationWarning
+              >
+                <Trash2 size={14} />
+                Clear history
               </Button>
             </div>
           </div>
@@ -508,7 +569,7 @@ export function HistoryApp() {
               </div>
               <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-800 p-4 text-xs text-zinc-400">
                 <p>
-                  {sortedRecords.length === 0 ? 0 : pageStart + 1}-{Math.min(pageStart + PAGE_SIZE, sortedRecords.length)} of{" "}
+                  {sortedRecords.length === 0 ? 0 : pageStart + 1}-{Math.min(pageStart + pageSize, sortedRecords.length)} of{" "}
                   {sortedRecords.length}
                 </p>
                 <div className="flex items-center gap-2">
@@ -538,44 +599,6 @@ export function HistoryApp() {
             </>
           )}
         </section>
-
-        <div className="flex flex-wrap justify-end gap-2">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            disabled={records.length === 0}
-            onClick={() => downloadCsv(records, "all")}
-            suppressHydrationWarning
-          >
-            <Download size={14} />
-            Export all
-          </Button>
-          {hasActiveFilters ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              disabled={sortedRecords.length === 0}
-              onClick={() => downloadCsv(sortedRecords, "filtered")}
-              suppressHydrationWarning
-            >
-              <Download size={14} />
-              Export view
-            </Button>
-          ) : null}
-          <Button
-            type="button"
-            variant="danger"
-            size="sm"
-            disabled={records.length === 0}
-            onClick={() => void handleClearHistory()}
-            suppressHydrationWarning
-          >
-            <Trash2 size={14} />
-            Clear history
-          </Button>
-        </div>
       </div>
     </main>
   );
@@ -601,8 +624,10 @@ function HistoryRow({
   const path = parsed ? `${parsed.pathname}${parsed.search}` : "";
   const outcome = scanOutcome(record, currentCollections);
   const sourceStats = sourceCounts(record, currentCollections);
-  const openHref = searchHref(record);
-  const cacheBytes = cacheRecords.reduce((sum, cached) => sum + cached.sizeBytes, 0);
+  const newCount = newCollectionsFor(record, currentCollections).length;
+  const openHref = searchHref(record, newCount > 0 ? "missing" : undefined);
+  const checkNewHref = searchHref(record, "missing");
+  const retryFailedHref = searchHref(record, "retry-failed");
   const hasCache = cacheRecords.length > 0;
 
   const labelClass = "hidden lg:inline";
@@ -621,9 +646,12 @@ function HistoryRow({
         />
       </label>
       <div className={HISTORY_STATUS_COL_CLASS}>
-        <Badge tone={outcome === "complete" ? "green" : outcome === "partial" ? "amber" : "neutral"}>
-          {outcome}
-        </Badge>
+        <div className="flex flex-nowrap items-center gap-1">
+          <Badge tone={outcome === "complete" ? "green" : outcome === "partial" ? "amber" : "neutral"}>
+            {outcome}
+          </Badge>
+          {newCount > 0 ? <NewCollectionsBadge count={newCount} /> : null}
+        </div>
       </div>
       <div className={`${HISTORY_URL_COL_CLASS} min-w-0`}>
         <p className="truncate text-sm font-bold text-zinc-50" title={record.url}>
@@ -636,7 +664,7 @@ function HistoryRow({
         ) : null}
       </div>
       <span className={`${HISTORY_SCOPE_COL_CLASS} truncate text-xs text-zinc-400`}>
-        {record.scanScope === "all" ? "full" : "recent"}
+        {record.scanScope === "all" ? "full" : record.scanScope === "custom" ? "custom" : "recent"}
       </span>
       <span className={`${HISTORY_MATCH_COL_CLASS} truncate text-xs text-zinc-400`}>{record.matchType}</span>
       <time className={`${HISTORY_UPDATED_COL_CLASS} truncate text-xs text-zinc-500`} title={formatDateTime(record.updatedAt)}>
@@ -649,9 +677,6 @@ function HistoryRow({
         <p className={`font-mono text-sm font-bold tabular-nums ${hasCache ? "text-emerald-200" : "text-zinc-200"}`}>
           {cacheRecords.length}/{record.captures.length}
         </p>
-        {hasCache ? (
-          <p className="font-mono text-[10px] tabular-nums text-zinc-500">{formatStorageBytes(cacheBytes)}</p>
-        ) : null}
       </div>
       <div className={HISTORY_SOURCES_COL_CLASS}>
         <Metric value={`${sourceStats.processed}/${sourceStats.total}`} tone={sourceStats.missing > 0 ? "red" : "neutral"} />
@@ -660,6 +685,18 @@ function HistoryRow({
         <Metric value={String(sourceStats.failed)} tone={sourceStats.failed > 0 ? "red" : "neutral"} />
       </div>
       <div className={`${HISTORY_ACTIONS_COL_CLASS} flex min-w-0 items-center justify-end gap-1 overflow-hidden`}>
+        {newCount > 0 ? (
+          <LinkButton href={checkNewHref} size="sm" variant="secondary" title="Check new collections" aria-label="Check new collections" className={buttonClass}>
+            <RotateCcw size={14} />
+            <span className={labelClass}>New</span>
+          </LinkButton>
+        ) : null}
+        {sourceStats.failed > 0 ? (
+          <LinkButton href={retryFailedHref} size="sm" variant="secondary" title="Retry failed collections" aria-label="Retry failed collections" className={buttonClass}>
+            <RotateCcw size={14} />
+            <span className={labelClass}>Retry</span>
+          </LinkButton>
+        ) : null}
         <LinkButton href={openHref} size="sm" variant="primary" title="Open" aria-label="Open" className={buttonClass}>
           <ExternalLink size={14} />
           <span className={labelClass}>Open</span>
@@ -674,22 +711,33 @@ function HistoryRow({
   );
 }
 
-function Stat({
-  label,
-  value,
-  tone = "neutral"
-}: {
-  label: string;
-  value: string;
-  tone?: "neutral" | "green" | "red";
-}) {
-  const valueColor =
-    tone === "green" ? "text-emerald-300" : tone === "red" ? "text-red-300" : "text-zinc-100";
+function NewCollectionsBadge({ count }: { count: number }) {
+  const title = count === 1 ? "New Collection Available" : `${count} New Collections Available`;
+  const description =
+    count === 1
+      ? "Open this scan and search again to include the new Common Crawl collection."
+      : "Open this scan and search again to include the new Common Crawl collections.";
   return (
-    <div className="flex items-center justify-between gap-2 px-3 py-2 leading-none">
-      <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">{label}</span>
-      <span className={`font-mono text-sm font-bold tabular-nums ${valueColor}`}>{value}</span>
-    </div>
+    <Tooltip
+      side="bottom"
+      content={
+        <span className="block">
+          <span className="block font-semibold text-red-100">{title}</span>
+          <span className="mt-1 block text-zinc-300">{description}</span>
+        </span>
+      }
+      className="left-0 w-72 translate-x-0 whitespace-normal text-left normal-case tracking-normal"
+      arrowClassName="left-3 translate-x-0"
+    >
+      <Badge
+        tone="red"
+        tabIndex={0}
+        aria-label={`${title}. ${description}`}
+        className="h-6 w-6 justify-center px-0"
+      >
+        <CircleAlert size={14} aria-hidden="true" />
+      </Badge>
+    </Tooltip>
   );
 }
 
@@ -775,31 +823,6 @@ function SelectControl({
   );
 }
 
-function DateControl({
-  label,
-  value,
-  onChange,
-  inputRef
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  inputRef?: RefObject<HTMLInputElement | null>;
-}) {
-  return (
-    <label className="block">
-      <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">{label}</span>
-      <input
-        ref={inputRef}
-        type="date"
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100 outline-none focus:border-amber-300"
-      />
-    </label>
-  );
-}
-
 function EmptyState({ text }: { text: string }) {
   return (
     <div className="grid min-h-80 place-items-center p-8 text-center">
@@ -814,7 +837,7 @@ function EmptyState({ text }: { text: string }) {
 function isHistoryRecord(record: StoredSearch): record is HistoryRecord {
   return (
     !record.mock &&
-    (record.scanScope === "recent" || record.scanScope === "all") &&
+    (record.scanScope === "recent" || record.scanScope === "all" || record.scanScope === "custom") &&
     Array.isArray(record.results)
   );
 }
@@ -822,18 +845,28 @@ function isHistoryRecord(record: StoredSearch): record is HistoryRecord {
 function mergeHistoryRecords(records: HistoryRecord[]) {
   const byScan = new Map<string, HistoryRecord>();
   for (const record of records) {
-    const identity = `${record.matchType}:${record.url}`;
+    // Match by normalized URL so records saved before URL normalization
+    // ("hutt.io") merge with their canonical twin ("https://hutt.io/").
+    const identity = `${record.matchType}:${normalizeScanUrl(record.url)}:${record.scanScope}:${record.dateFrom ?? ""}:${record.dateTo ?? ""}`;
     const current = byScan.get(identity);
     if (!current) {
       byScan.set(identity, {
         ...record,
-        key: scanSearchKey(record.url, record.matchType, record.mock, record.scanScope),
+        key: scanSearchKey(record.url, record.matchType, record.mock, record.scanScope, {
+          dateFrom: record.dateFrom,
+          dateTo: record.dateTo
+        }),
         storageKeys: [record.key]
       });
       continue;
     }
 
-    const mergedScope: ScanScope = current.scanScope === "all" || record.scanScope === "all" ? "all" : "recent";
+    const mergedScope: ScanScope =
+      current.scanScope === "all" || record.scanScope === "all"
+        ? "all"
+        : current.scanScope === "custom" || record.scanScope === "custom"
+          ? "custom"
+          : "recent";
     const mergedResults =
       current.scanScope === "all"
         ? mergeCollectionResults(record.results, current.results)
@@ -846,12 +879,31 @@ function mergeHistoryRecords(records: HistoryRecord[]) {
       record.scanScope === "all"
         ? record.collections ?? current.collections
         : current.collections ?? record.collections;
+    // Anchor the saved-collection list on the record with the most checked
+    // results; a sparse record (e.g. an interrupted re-scan) may carry a
+    // frozen list that already includes newer collections and would hide the
+    // "new collections available" hint.
+    const checkedCount = (entry: HistoryRecord) =>
+      entry.results.filter((result) => result.status === "checked").length;
+    const coverageAnchor = checkedCount(record) > checkedCount(current) ? record : current;
     byScan.set(identity, {
       ...current,
-      key: scanSearchKey(record.url, record.matchType, record.mock, mergedScope),
+      key: scanSearchKey(record.url, record.matchType, record.mock, mergedScope, {
+        dateFrom: record.dateFrom ?? current.dateFrom,
+        dateTo: record.dateTo ?? current.dateTo
+      }),
       captures: dedupeCaptures([...current.captures, ...record.captures]),
       scanScope: mergedScope,
+      dateFrom: record.dateFrom ?? current.dateFrom,
+      dateTo: record.dateTo ?? current.dateTo,
       collections: mergedCollections,
+      collectionIds:
+        coverageAnchor.collectionIds ??
+        coverageAnchor.collections?.map((collection) => collection.id) ??
+        mergedCollections?.map((collection) => collection.id),
+      collectionListFetchedAt: Math.max(current.collectionListFetchedAt ?? 0, record.collectionListFetchedAt ?? 0) || undefined,
+      scanWindowFrom: current.scanWindowFrom ?? record.scanWindowFrom,
+      scanWindowTo: current.scanWindowTo ?? record.scanWindowTo,
       results: mergedResults,
       scanLogResults: mergedScanLogResults,
       updatedAt: Math.max(current.updatedAt, record.updatedAt),
@@ -862,10 +914,43 @@ function mergeHistoryRecords(records: HistoryRecord[]) {
 }
 
 function activeCollectionsFor(record: HistoryRecord, currentCollections: CommonCrawlCollection[]) {
+  if (record.collections?.length) return record.collections;
+  if (record.collectionIds?.length && currentCollections.length > 0) {
+    const ids = new Set(record.collectionIds);
+    return currentCollections.filter((collection) => ids.has(collection.id));
+  }
+  const resultCollections = record.results.map((result) => result.collection);
+  if (resultCollections.length > 0) return resultCollections;
   if (currentCollections.length > 0) {
-    return record.scanScope === "all" ? currentCollections : filterCollectionsByRecentMonths(currentCollections);
+    if (record.scanScope === "all") return currentCollections;
+    if (record.scanScope === "custom" && record.dateFrom && record.dateTo) {
+      return filterCollectionsByDateRange(currentCollections, record.dateFrom, record.dateTo);
+    }
+    return filterCollectionsByRecentMonths(currentCollections);
   }
   return record.collections ?? record.results.map((result) => result.collection);
+}
+
+function currentCollectionsFor(record: HistoryRecord, currentCollections: CommonCrawlCollection[]) {
+  if (record.scanScope === "recent" || currentCollections.length === 0) return [];
+  if (record.scanScope === "custom" && record.dateFrom && record.dateTo) {
+    return filterCollectionsByDateRange(currentCollections, record.dateFrom, record.dateTo);
+  }
+  return record.scanScope === "all" ? currentCollections : [];
+}
+
+function savedCollectionIds(record: HistoryRecord) {
+  return new Set([
+    ...(record.collectionIds ?? []),
+    ...(record.collections ?? []).map((collection) => collection.id),
+    ...record.results.map((result) => result.collection.id)
+  ]);
+}
+
+function newCollectionsFor(record: HistoryRecord, currentCollections: CommonCrawlCollection[]) {
+  const savedIds = savedCollectionIds(record);
+  if (savedIds.size === 0) return [];
+  return currentCollectionsFor(record, currentCollections).filter((collection) => !savedIds.has(collection.id));
 }
 
 function sourceCounts(record: HistoryRecord, currentCollections: CommonCrawlCollection[]) {
@@ -937,11 +1022,15 @@ function compareRecords(
   return cmp * sign;
 }
 
-function searchHref(record: HistoryRecord) {
+function searchHref(record: HistoryRecord, action?: "missing" | "retry-failed") {
   const params = new URLSearchParams();
   params.set("match", record.matchType);
   params.set("url", record.url);
-  if (record.scanScope === "all") params.set("scope", "all");
+  if (action) params.set("action", action);
+  params.set("saved", (record.storageKeys ?? [record.key]).join(","));
+  if (record.scanScope === "all" || record.scanScope === "custom") params.set("scope", record.scanScope);
+  if (record.dateFrom) params.set("from", record.dateFrom);
+  if (record.dateTo) params.set("to", record.dateTo);
   params.set("history", "1");
   return `/search?${params.toString()}`;
 }
@@ -963,12 +1052,6 @@ function formatDateTime(timestamp: number) {
     dateStyle: "medium",
     timeStyle: "short"
   }).format(timestamp);
-}
-
-function formatStorageBytes(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function downloadCsv(records: HistoryRecord[], mode: "all" | "filtered" | "selected") {

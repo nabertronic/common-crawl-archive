@@ -129,19 +129,23 @@ export async function fetchAndParseWarcRecord({
   filename,
   offset,
   length,
+  largeCaptureLimitBytes = LARGE_CAPTURE_LIMIT_BYTES,
+  allowLarge = false,
   signal
 }: {
   filename: string;
   offset: string;
   length: string;
+  largeCaptureLimitBytes?: number;
+  allowLarge?: boolean;
   signal?: AbortSignal;
 }): Promise<ParsedWarcRecord> {
   const numericLength = Number(length);
   if (!Number.isFinite(numericLength) || numericLength <= 0) {
     throw new Error("Invalid WARC length metadata.");
   }
-  if (numericLength > LARGE_CAPTURE_LIMIT_BYTES) {
-    throw new Error("This capture is larger than the MVP viewer limit.");
+  if (!allowLarge && numericLength > largeCaptureLimitBytes) {
+    throw new Error("This capture is larger than the viewer safety limit.");
   }
 
   let response: Response | undefined;
@@ -179,9 +183,11 @@ export async function fetchAndParseWarcRecord({
 
 export async function loadCaptureRecord({
   capture,
+  allowLarge = false,
   signal
 }: {
   capture: CommonCrawlCapture;
+  allowLarge?: boolean;
   signal?: AbortSignal;
 }): Promise<LoadedCaptureRecord> {
   const settings = await getSettings();
@@ -194,6 +200,8 @@ export async function loadCaptureRecord({
     filename: capture.filename,
     offset: capture.offset,
     length: capture.length,
+    largeCaptureLimitBytes: settings.largeCaptureLimitBytes,
+    allowLarge,
     signal
   });
   await putCachedCaptureRecord({ capture, record });

@@ -82,6 +82,7 @@ export type ScanLogEvent = {
   kind: "event";
   event:
     | "scan-started"
+    | "scan-restarted"
     | "retry-started"
     | "continue-started"
     | "auto-retry-started"
@@ -145,6 +146,11 @@ type CollectionCacheRecord = {
   version: number;
   fetchedAt: number;
   collections: CommonCrawlCollection[];
+};
+
+export type CollectionCacheInfo = {
+  fetchedAt?: number;
+  count: number;
 };
 
 type CdxResultCacheRecord = {
@@ -270,8 +276,21 @@ function writeCollectionCache(collections: CommonCrawlCollection[]): void {
   } satisfies CollectionCacheRecord);
 }
 
-export async function fetchCollections(signal?: AbortSignal): Promise<CommonCrawlCollection[]> {
-  const freshCached = readCollectionCache();
+export function getCollectionCacheInfo(): CollectionCacheInfo {
+  const cached = normalizeCollectionCache(readJsonStorage<unknown>(COLLECTION_CACHE_KEY));
+  if (!cached) return { count: 0 };
+  return {
+    fetchedAt: cached.fetchedAt,
+    count: cached.collections.length
+  };
+}
+
+export async function fetchCollections(
+  input?: AbortSignal | { signal?: AbortSignal; forceRefresh?: boolean }
+): Promise<CommonCrawlCollection[]> {
+  const signal = input instanceof AbortSignal ? input : input?.signal;
+  const forceRefresh = !(input instanceof AbortSignal) && Boolean(input?.forceRefresh);
+  const freshCached = forceRefresh ? [] : readCollectionCache();
   if (freshCached.length > 0) return freshCached;
 
   try {
@@ -287,13 +306,17 @@ export async function fetchCollections(signal?: AbortSignal): Promise<CommonCraw
     return collections;
   } catch (error) {
     if (signal?.aborted) throw error;
-    const staleCached = readCollectionCache({ allowStale: true });
+    const staleCached = forceRefresh ? [] : readCollectionCache({ allowStale: true });
     if (staleCached.length > 0) return staleCached;
     if (error instanceof Error && error.message.startsWith("Common Crawl source list returned")) {
       throw error;
     }
     throw new Error("Could not reach Common Crawl from this network");
   }
+}
+
+export function refreshCollections(signal?: AbortSignal): Promise<CommonCrawlCollection[]> {
+  return fetchCollections({ signal, forceRefresh: true });
 }
 
 export function parseCdxjResponse(
@@ -378,9 +401,33 @@ export function filterCollectionsByRecentMonths(
   const cutoff = new Date(now);
   cutoff.setMonth(cutoff.getMonth() - months);
   return collections.filter((collection) => {
-    const timestamp = Date.parse(collection.to || collection.from);
+    const timestamp = parseArchiveTimestamp(collection.to || collection.from);
     return Number.isFinite(timestamp) && timestamp >= cutoff.getTime();
   });
+}
+
+export function filterCollectionsByDateRange(
+  collections: CommonCrawlCollection[],
+  dateFrom: string,
+  dateTo: string
+): CommonCrawlCollection[] {
+  const fromTimestamp = Date.parse(`${dateFrom}T00:00:00.000Z`);
+  const toTimestamp = Date.parse(`${dateTo}T23:59:59.999Z`);
+  if (!Number.isFinite(fromTimestamp) || !Number.isFinite(toTimestamp) || fromTimestamp > toTimestamp) {
+    return [];
+  }
+
+  return collections.filter((collection) => {
+    const collectionFrom = parseArchiveTimestamp(collection.from);
+    const collectionTo = parseArchiveTimestamp(collection.to || collection.from);
+    if (!Number.isFinite(collectionFrom) || !Number.isFinite(collectionTo)) return false;
+    return collectionFrom <= toTimestamp && collectionTo >= fromTimestamp;
+  });
+}
+
+function parseArchiveTimestamp(value: string): number {
+  if (!value) return Number.NaN;
+  return /(?:Z|[+-]\d{2}:\d{2})$/.test(value) ? Date.parse(value) : Date.parse(`${value}Z`);
 }
 
 export function buildRangeHeader(offset: string | number, length: string | number): string {
@@ -503,9 +550,8 @@ function retryDelayForAttempt(
 ) {
   const exponentialDelay = retryDelayMs * 2 ** attempt;
   const boundedRetryAfter = retryAfterMs === undefined ? 0 : Math.min(retryAfterMs, maxRetryDelayMs);
-  const baseDelay = Math.max(exponentialDelay, boundedRetryAfter);
-  const jitter = Math.round(baseDelay * 0.2 * Math.random());
-  return Math.min(maxRetryDelayMs, baseDelay + jitter);
+  const baseDelay = Math.min(maxRetryDelayMs, Math.max(exponentialDelay, boundedRetryAfter));
+  return Math.min(maxRetryDelayMs, baseDelay + Math.round(baseDelay * 0.2 * Math.random()));
 }
 
 function shouldRetryCollectionError(errorKind: CollectionErrorKind) {
@@ -712,6 +758,7 @@ export async function queryCollection(
     } catch (error) {
       if (signal?.aborted) throw error;
       lastHttpStatus = undefined;
+      retryAfterMs = undefined;
       const described = describeRequestError(error, requestSignal);
       lastError = described.error;
       lastErrorKind = described.errorKind;
@@ -918,9 +965,11 @@ export async function searchCollections({
     }
   };
 
-  await Promise.all(
-    Array.from({ length: Math.max(1, Math.min(concurrency, collections.length, 1)) }, () => worker())
+  const workerCount = Math.max(
+    1,
+    Math.min(Number.isFinite(concurrency) ? Math.floor(concurrency) : DEFAULT_CONCURRENCY, collections.length)
   );
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
   if (signal?.aborted) {
     stopReason = "aborted";
@@ -946,6 +995,8 @@ export type ResultsBackContext = {
   match?: string | null;
   mock?: string | null;
   scope?: string | null;
+  dateFrom?: string | null;
+  dateTo?: string | null;
   history?: string | null;
   year?: string | null;
   collection?: string | null;
@@ -961,7 +1012,9 @@ export function appendResultsBackContext(params: URLSearchParams, context: Resul
   if (context.url) params.set("back_url", context.url);
   if (context.match) params.set("back_match", context.match);
   if (context.mock) params.set("back_mock", context.mock);
-  if (context.scope === "all") params.set("back_scope", context.scope);
+  if (context.scope === "all" || context.scope === "custom") params.set("back_scope", context.scope);
+  if (context.dateFrom) params.set("back_from", context.dateFrom);
+  if (context.dateTo) params.set("back_to", context.dateTo);
   if (context.history === "1") params.set("back_history", context.history);
   if (context.year && context.year !== "all") params.set("back_year", context.year);
   if (context.collection && context.collection !== "all") params.set("back_collection", context.collection);
@@ -979,7 +1032,9 @@ export function buildResultsBackHref(context: ResultsBackContext): string | null
   const params = new URLSearchParams();
   if (context.mock) params.set("mock", context.mock);
   if (context.match) params.set("match", context.match);
-  if (context.scope === "all") params.set("scope", context.scope);
+  if (context.scope === "all" || context.scope === "custom") params.set("scope", context.scope);
+  if (context.dateFrom) params.set("from", context.dateFrom);
+  if (context.dateTo) params.set("to", context.dateTo);
   if (context.history === "1") params.set("history", context.history);
   if (context.year && context.year !== "all") params.set("year", context.year);
   if (context.collection && context.collection !== "all") params.set("collection", context.collection);

@@ -97,7 +97,7 @@ body {
 @media (min-width: 520px) {
   .history-grid {
     grid-template-areas: "select status url actions";
-    grid-template-columns: 28px 76px minmax(0, 1fr) 100px;
+    grid-template-columns: 28px 104px minmax(0, 1fr) 100px;
   }
 
   .history-col-status {
@@ -108,7 +108,7 @@ body {
 @media (min-width: 640px) {
   .history-grid {
     grid-template-areas: "select status url match actions";
-    grid-template-columns: 28px 76px minmax(0, 1fr) 52px 100px;
+    grid-template-columns: 28px 104px minmax(0, 1fr) 52px 100px;
   }
 
   .history-col-match {
@@ -119,7 +119,7 @@ body {
 @media (min-width: 768px) {
   .history-grid {
     grid-template-areas: "select status url scope match actions";
-    grid-template-columns: 28px 76px minmax(0, 1fr) 52px 52px 100px;
+    grid-template-columns: 28px 104px minmax(0, 1fr) 52px 52px 100px;
   }
 
   .history-col-scope {
@@ -130,7 +130,7 @@ body {
 @media (min-width: 860px) {
   .history-grid {
     grid-template-areas: "select status url scope match updated actions";
-    grid-template-columns: 28px 76px minmax(0, 1fr) 52px 52px 88px 100px;
+    grid-template-columns: 28px 104px minmax(0, 1fr) 52px 52px 88px 100px;
   }
 
   .history-col-updated {
@@ -141,7 +141,7 @@ body {
 @media (min-width: 960px) {
   .history-grid {
     grid-template-areas: "select status url scope match updated snapshots actions";
-    grid-template-columns: 28px 72px minmax(0, 1fr) 52px 52px 88px 60px 100px;
+    grid-template-columns: 28px 104px minmax(0, 1fr) 52px 52px 88px 60px 100px;
   }
 
   .history-col-snapshots {
@@ -152,7 +152,7 @@ body {
 @media (min-width: 1024px) {
   .history-grid {
     grid-template-areas: "select status url scope match updated snapshots sources actions";
-    grid-template-columns: 28px 72px minmax(0, 1fr) 52px 52px 88px 60px 60px 172px;
+    grid-template-columns: 28px 104px minmax(0, 1fr) 52px 52px 88px 60px 60px 172px;
   }
 
   .history-col-sources {
@@ -163,7 +163,7 @@ body {
 @media (min-width: 1180px) {
   .history-grid {
     grid-template-areas: "select status url scope match updated snapshots cached sources actions";
-    grid-template-columns: 28px 72px minmax(0, 1fr) 52px 52px 88px 60px 60px 60px 172px;
+    grid-template-columns: 28px 104px minmax(0, 1fr) 52px 52px 88px 60px 60px 60px 172px;
   }
 
   .history-col-cached {
@@ -174,7 +174,7 @@ body {
 @media (min-width: 1280px) {
   .history-grid {
     grid-template-areas: "select status url scope match updated snapshots cached sources failed actions";
-    grid-template-columns: 28px 72px minmax(0, 1fr) 52px 52px 88px 60px 60px 60px 60px 172px;
+    grid-template-columns: 28px 104px minmax(0, 1fr) 52px 52px 88px 60px 60px 60px 60px 172px;
   }
 
   .history-col-failed {

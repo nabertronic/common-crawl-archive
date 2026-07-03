@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { HistoryApp } from "@/components/history-app";
 import type { CollectionCheckResult, CommonCrawlCapture, CommonCrawlCollection } from "@/lib/common-crawl";
@@ -11,6 +11,14 @@ const collection: CommonCrawlCollection = {
   cdxApi: "https://index.commoncrawl.org/CC-MAIN-2026-21-index",
   from: "2026-05-08T07:40:46",
   to: "2026-05-21T22:06:58"
+};
+
+const newerCollection: CommonCrawlCollection = {
+  id: "CC-MAIN-2026-26",
+  name: "June 2026 Index",
+  cdxApi: "https://index.commoncrawl.org/CC-MAIN-2026-26-index",
+  from: "2026-06-20T00:00:00",
+  to: "2026-06-30T00:00:00"
 };
 
 const capture: CommonCrawlCapture = {
@@ -62,6 +70,7 @@ const baseRecords: StoredSearch[] = [
 ];
 
 let storedRecords: StoredSearch[] = baseRecords;
+let fetchedCollections: CommonCrawlCollection[] = [collection];
 
 vi.mock("@/lib/capture-store", async () => {
   const actual = await vi.importActual<typeof import("@/lib/capture-store")>("@/lib/capture-store");
@@ -78,7 +87,7 @@ vi.mock("@/lib/common-crawl", async () => {
   const actual = await vi.importActual<typeof import("@/lib/common-crawl")>("@/lib/common-crawl");
   return {
     ...actual,
-    fetchCollections: vi.fn(async () => [collection])
+    fetchCollections: vi.fn(async () => fetchedCollections)
   };
 });
 
@@ -96,6 +105,7 @@ function dispatchPageShow(persisted: boolean) {
 describe("HistoryApp", () => {
   beforeEach(() => {
     storedRecords = baseRecords;
+    fetchedCollections = [collection];
     window.history.pushState({}, "", "/history");
   });
 
@@ -126,6 +136,21 @@ describe("HistoryApp", () => {
     expect(screen.getByText("beta.example")).toBeInTheDocument();
   });
 
+  it("uses a right-aligned menu for start and settings navigation", async () => {
+    render(<HistoryApp />);
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: /scan history/i })).toBeInTheDocument());
+
+    expect(screen.queryByRole("link", { name: /open settings/i })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /open menu/i }));
+
+    const menuItems = screen.getAllByRole("menuitem");
+    expect(menuItems.map((item) => item.textContent)).toEqual(["New Scan", "Settings"]);
+    expect(menuItems[0]).toHaveAttribute("href", "/");
+    expect(menuItems[1]).toHaveAttribute("href", "/settings");
+  });
+
   it("shows narrower scans even when a broader complete scan exists", async () => {
     storedRecords = [
       ...baseRecords,
@@ -134,7 +159,7 @@ describe("HistoryApp", () => {
         url: "https://blog.example.com/",
         matchType: "exact",
         mock: false,
-        captures: [],
+        captures: [capture],
         scanScope: "recent",
         collections: [collection],
         results: [{ ...checkedResult, captures: [] }],
@@ -158,5 +183,61 @@ describe("HistoryApp", () => {
     await waitFor(() => expect(screen.getByText("blog.example.com")).toBeInTheDocument());
     expect(screen.getByText("example.com")).toBeInTheDocument();
     expect(screen.getByText("Scans").parentElement).toHaveTextContent("4");
+  });
+
+  it("renders global export and delete actions only once in the top toolbar", async () => {
+    render(<HistoryApp />);
+
+    await waitFor(() => expect(screen.getByText("alpha.example")).toBeInTheDocument());
+
+    expect(screen.getAllByText("Export all")).toHaveLength(1);
+    expect(screen.getAllByText("Clear history")).toHaveLength(1);
+    expect(screen.getAllByText("Export selected")).toHaveLength(1);
+    expect(screen.getAllByText("Delete selected")).toHaveLength(1);
+  });
+
+  it("keeps recent scans stable while marking full scans with new collections", async () => {
+    fetchedCollections = [newerCollection, collection];
+    storedRecords = [
+      {
+        key: "live:exact:https://recent.example/:scan:recent",
+        url: "https://recent.example/",
+        matchType: "exact",
+        mock: false,
+        captures: [capture],
+        scanScope: "recent",
+        collections: [collection],
+        collectionIds: [collection.id],
+        results: [{ ...checkedResult, captures: [] }],
+        updatedAt: 3
+      },
+      {
+        key: "live:exact:https://full.example/:scan:all",
+        url: "https://full.example/",
+        matchType: "exact",
+        mock: false,
+        captures: [capture],
+        scanScope: "all",
+        collections: [collection],
+        collectionIds: [collection.id],
+        results: [{ ...checkedResult, captures: [] }],
+        updatedAt: 4
+      }
+    ];
+
+    render(<HistoryApp />);
+
+    await waitFor(() => expect(screen.getByText("recent.example")).toBeInTheDocument());
+
+    expect(screen.getByText("full.example")).toBeInTheDocument();
+    expect(screen.getAllByText("complete")).toHaveLength(2);
+    expect(screen.queryByText("new 1")).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/Open this scan and search again/)).toBeInTheDocument();
+    expect(screen.getByText("New Collection Available")).toBeInTheDocument();
+    const fullOpenLink = screen
+      .getAllByRole("link", { name: /^open$/i })
+      .find((link) => link.getAttribute("href")?.includes("full.example"));
+    expect(fullOpenLink).toHaveAttribute("href", expect.stringContaining("action=missing"));
+    expect(fullOpenLink).toHaveAttribute("href", expect.stringContaining("saved=live%3Aexact%3Ahttps%3A%2F%2Ffull.example%2F%3Ascan%3Aall"));
   });
 });

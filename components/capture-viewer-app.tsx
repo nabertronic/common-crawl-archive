@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Check, Copy, Database, Download, FileCode2, Loader2, Settings } from "lucide-react";
-import Link from "next/link";
+import { AlertTriangle, Check, Copy, Download, FileCode2, Loader2, ShieldAlert } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   LARGE_CAPTURE_LIMIT_BYTES,
@@ -13,6 +12,7 @@ import {
 import { loadCaptureRecord, sanitizeHtmlForPreview, type ParsedWarcRecord } from "@/lib/warc";
 import { cn, formatBytes } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { HtmlPrivacyWarningDialog } from "@/components/html-privacy-warning-dialog";
 import { createMockWarcRecord, isMockCaptureFilename } from "@/lib/mock-data";
 import { buildTabTitle, extractHtmlTitle } from "@/lib/app-meta";
 import { CaptureNavBar } from "@/components/capture-navbar";
@@ -20,13 +20,15 @@ import {
   coverageCaptures,
   findOrCreateLegacySession,
   getCoverage,
+  getSettings,
   getScanSession,
   getSearch,
   legacyScanSearchKeys,
   scanSearchKey,
   searchKey,
   subscribeToSearch,
-  subscribeToSearchChanges
+  subscribeToSearchChanges,
+  updateSettings
 } from "@/lib/capture-store";
 import { createViewerHref, parseViewerRoute, viewerBackHref } from "@/lib/navigation-state";
 
@@ -86,7 +88,11 @@ export function CaptureViewerApp() {
   const [state, setState] = useState<ViewerState>({ kind: "loading" });
   const [activeTab, setActiveTab] = useState<"preview" | "source" | "headers">("preview");
   const [copied, setCopied] = useState(false);
+  const [pendingHtmlAction, setPendingHtmlAction] = useState<"copy" | "download" | null>(null);
+  const [showHtmlPrivacyWarning, setShowHtmlPrivacyWarning] = useState(true);
+  const [largeCaptureLimitBytes, setLargeCaptureLimitBytes] = useState(LARGE_CAPTURE_LIMIT_BYTES);
   const [captures, setCaptures] = useState<CommonCrawlCapture[]>([]);
+  const [allowLargeLoad, setAllowLargeLoad] = useState(false);
   const numericLength = Number(length);
 
   const currentIndex = useMemo(() => {
@@ -120,6 +126,28 @@ export function CaptureViewerApp() {
   }, [copied]);
 
   useEffect(() => {
+    void getSettings()
+      .then((settings) => {
+        setShowHtmlPrivacyWarning(settings.showHtmlPrivacyWarning);
+        setLargeCaptureLimitBytes(settings.largeCaptureLimitBytes);
+      })
+      .catch(() => setShowHtmlPrivacyWarning(true));
+    const unsubscribe = subscribeToSearchChanges(() => {
+      void getSettings()
+        .then((settings) => {
+          setShowHtmlPrivacyWarning(settings.showHtmlPrivacyWarning);
+          setLargeCaptureLimitBytes(settings.largeCaptureLimitBytes);
+        })
+        .catch(() => setShowHtmlPrivacyWarning(true));
+    });
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    setAllowLargeLoad(false);
+  }, [filename, offset, length, timestamp]);
+
+  useEffect(() => {
     setState({ kind: "loading" });
     const controller = new AbortController();
     if (!filename || !offset || !length) {
@@ -134,12 +162,12 @@ export function CaptureViewerApp() {
       });
       return;
     }
-    if (Number.isFinite(numericLength) && numericLength > LARGE_CAPTURE_LIMIT_BYTES) {
+    if (!allowLargeLoad && Number.isFinite(numericLength) && numericLength > largeCaptureLimitBytes) {
       setState({ kind: "too-large", length: numericLength });
       return;
     }
 
-    void loadCaptureRecord({ capture: routeCapture, signal: controller.signal })
+    void loadCaptureRecord({ capture: routeCapture, allowLarge: allowLargeLoad, signal: controller.signal })
       .then(({ record, source }) => setState({ kind: "loaded", record, source }))
       .catch((error) => {
         if (controller.signal.aborted) return;
@@ -147,7 +175,7 @@ export function CaptureViewerApp() {
       });
 
     return () => controller.abort();
-  }, [collection, filename, length, numericLength, offset, routeCapture, timestamp, url]);
+  }, [allowLargeLoad, collection, filename, largeCaptureLimitBytes, length, numericLength, offset, routeCapture, timestamp, url]);
 
   useEffect(() => {
     if (scanId) {
@@ -239,6 +267,45 @@ export function CaptureViewerApp() {
     [state]
   );
 
+  const copyHtml = useCallback(() => {
+    if (state.kind !== "loaded") return;
+    void (async () => {
+      try {
+        await navigator.clipboard.writeText(state.record.html);
+        setCopied(true);
+      } catch {
+        // ignore — clipboard may be unavailable
+      }
+    })();
+  }, [state]);
+
+  const downloadHtml = useCallback(() => {
+    if (state.kind !== "loaded") return;
+    const blob = new Blob([state.record.html], { type: "text/html;charset=utf-8" });
+    const downloadUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = downloadUrl;
+    anchor.download = `${timestamp || "capture"}.html`;
+    anchor.click();
+    URL.revokeObjectURL(downloadUrl);
+  }, [state, timestamp]);
+
+  const confirmPendingHtmlAction = useCallback(() => {
+    const action = pendingHtmlAction;
+    setPendingHtmlAction(null);
+    if (action === "copy") copyHtml();
+    if (action === "download") downloadHtml();
+  }, [copyHtml, downloadHtml, pendingHtmlAction]);
+
+  const requestHtmlAction = useCallback((action: "copy" | "download") => {
+    if (showHtmlPrivacyWarning) {
+      setPendingHtmlAction(action);
+      return;
+    }
+    if (action === "copy") copyHtml();
+    if (action === "download") downloadHtml();
+  }, [copyHtml, downloadHtml, showHtmlPrivacyWarning]);
+
   useEffect(() => {
     const htmlTitle = state.kind === "loaded" ? extractHtmlTitle(state.record.html) : "";
     document.title = buildTabTitle(htmlTitle);
@@ -262,7 +329,9 @@ export function CaptureViewerApp() {
               <Loader2 className="mx-auto mb-3 animate-spin text-amber-200" size={30} />
               <p className="font-semibold">Loading capture...</p>
               <p className="mt-1 text-sm text-zinc-500">
-                Checking local cache before requesting Common Crawl.
+                {allowLargeLoad
+                  ? "Loading the full WARC range from Common Crawl."
+                  : "Checking local cache before requesting Common Crawl."}
               </p>
               <p className="mt-1 text-xs text-zinc-600">{isMockCaptureFilename(filename) ? filename : warcRecordUrl(filename)}</p>
             </div>
@@ -271,10 +340,7 @@ export function CaptureViewerApp() {
 
         {state.kind === "too-large" ? (
           <div className="p-4">
-            <Notice
-              title="Capture exceeds the MVP viewer limit"
-              message={`This compressed WARC record is ${formatBytes(state.length)}. The MVP viewer limit is ${formatBytes(LARGE_CAPTURE_LIMIT_BYTES)}.`}
-            />
+            <LargeCaptureNotice length={state.length} limitBytes={largeCaptureLimitBytes} onLoadAnyway={() => setAllowLargeLoad(true)} />
           </div>
         ) : null}
 
@@ -300,30 +366,11 @@ export function CaptureViewerApp() {
                 ))}
               </div>
               <div className="flex gap-2">
-                <div className="hidden items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-400 sm:flex">
-                  <Database size={13} className={state.source === "cache" ? "text-emerald-300" : "text-amber-200"} />
-                  {state.source === "cache" ? "Local cache" : "Common Crawl"}
-                </div>
-                <Link
-                  href="/settings"
-                  aria-label="Open settings"
-                  title="Open settings"
-                  className="grid h-8 w-8 place-items-center rounded-md border border-zinc-800 bg-zinc-950 text-zinc-400 transition hover:border-amber-300/60 hover:text-amber-100"
-                >
-                  <Settings size={14} />
-                </Link>
                 <Button
                   variant="secondary"
                   size="sm"
                   aria-live="polite"
-                  onClick={async () => {
-                    try {
-                      await navigator.clipboard.writeText(state.record.html);
-                      setCopied(true);
-                    } catch {
-                      // ignore — clipboard may be unavailable
-                    }
-                  }}
+                  onClick={() => requestHtmlAction("copy")}
                   className={cn(
                     "relative overflow-hidden transition-colors",
                     copied && "border-emerald-400/60 bg-emerald-400/15 text-emerald-100"
@@ -340,15 +387,7 @@ export function CaptureViewerApp() {
                 <Button
                   variant="secondary"
                   size="sm"
-                  onClick={() => {
-                    const blob = new Blob([state.record.html], { type: "text/html;charset=utf-8" });
-                    const downloadUrl = URL.createObjectURL(blob);
-                    const anchor = document.createElement("a");
-                    anchor.href = downloadUrl;
-                    anchor.download = `${timestamp || "capture"}.html`;
-                    anchor.click();
-                    URL.revokeObjectURL(downloadUrl);
-                  }}
+                  onClick={() => requestHtmlAction("download")}
                 >
                   <Download size={14} />
                   Download HTML
@@ -378,6 +417,18 @@ export function CaptureViewerApp() {
           </section>
         ) : null}
       </div>
+      <HtmlPrivacyWarningDialog
+        open={pendingHtmlAction !== null}
+        actionLabel={pendingHtmlAction === "copy" ? "Copy HTML" : "Download HTML"}
+        onCancel={() => setPendingHtmlAction(null)}
+        onContinue={({ dontShowAgain }) => {
+          if (dontShowAgain) {
+            setShowHtmlPrivacyWarning(false);
+            void updateSettings({ showHtmlPrivacyWarning: false }).catch(() => undefined);
+          }
+          confirmPendingHtmlAction();
+        }}
+      />
     </main>
   );
 }
@@ -391,6 +442,33 @@ function Notice({ title, message }: { title: string; message: string }) {
           <h2 className="font-bold text-zinc-100">{title}</h2>
           <p className="mt-1 text-sm text-zinc-400">{message}</p>
         </div>
+      </div>
+    </section>
+  );
+}
+
+function LargeCaptureNotice({ length, limitBytes, onLoadAnyway }: { length: number; limitBytes: number; onLoadAnyway: () => void }) {
+  return (
+    <section className="archive-panel rounded-md p-6">
+      <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex gap-3">
+          <ShieldAlert className="mt-1 shrink-0 text-amber-200" size={24} />
+          <div>
+            <h2 className="font-bold text-zinc-100">Capture is unusually large</h2>
+            <p className="mt-1 max-w-2xl text-sm text-zinc-400">
+              This compressed WARC record is {formatBytes(length)}. The viewer normally stops at{" "}
+              {formatBytes(limitBytes)} to avoid long waits, high memory use, or a stalled tab.
+            </p>
+            <p className="mt-3 max-w-2xl text-xs leading-5 text-zinc-500">
+              Loading it anyway fetches and decompresses the full range in this browser. Keep the tab open and expect
+              slower rendering if the archived HTML is very large.
+            </p>
+          </div>
+        </div>
+        <Button type="button" variant="primary" onClick={onLoadAnyway} className="shrink-0 justify-center">
+          <Download size={16} />
+          Load anyway
+        </Button>
       </div>
     </section>
   );

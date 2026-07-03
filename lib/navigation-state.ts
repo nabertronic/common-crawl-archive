@@ -15,6 +15,8 @@ export type SearchRouteState =
       matchType: MatchType;
       mock: boolean;
       scope: ScanScope;
+      dateFrom?: string;
+      dateTo?: string;
       history: boolean;
       action?: string;
       year?: string;
@@ -47,13 +49,17 @@ export function createLegacySearchHref(input: {
   matchType: MatchType;
   mock?: boolean;
   scope: ScanScope;
+  dateFrom?: string;
+  dateTo?: string;
   action?: string | false;
   history?: boolean;
 }) {
   const params = new URLSearchParams();
   if (input.mock) params.set("mock", "1");
   params.set("match", input.matchType);
-  if (input.scope === "all") params.set("scope", "all");
+  if (input.scope === "all" || input.scope === "custom") params.set("scope", input.scope);
+  if (input.dateFrom) params.set("from", input.dateFrom);
+  if (input.dateTo) params.set("to", input.dateTo);
   if (input.action) params.set("action", input.action);
   else if (input.history) params.set("history", "1");
   params.set("url", input.url);
@@ -81,7 +87,9 @@ export function parseSearchRoute(params: URLSearchParams | { get(name: string): 
     url,
     matchType: normalizeMatchType(params.get("match")),
     mock: params.get("mock") === "1",
-    scope: params.get("scope") === "all" ? "all" : "recent",
+    scope: normalizeScope(params.get("scope"), params.get("from"), params.get("to")),
+    dateFrom: params.get("from") ?? undefined,
+    dateTo: params.get("to") ?? undefined,
     history: params.get("history") === "1",
     action,
     year: params.get("year") ?? undefined,
@@ -103,6 +111,8 @@ export function parseViewerRoute(params: URLSearchParams | { get(name: string): 
     match: params.get("back_match"),
     mock: params.get("back_mock"),
     scope: params.get("back_scope"),
+    dateFrom: params.get("back_from"),
+    dateTo: params.get("back_to"),
     history: params.get("back_history"),
     year: params.get("back_year"),
     collection: params.get("back_collection"),
@@ -126,7 +136,9 @@ function appendLegacyBackContext(params: URLSearchParams, context: ResultsBackCo
   if (context.url) params.set("back_url", context.url);
   if (context.match) params.set("back_match", context.match);
   if (context.mock) params.set("back_mock", context.mock);
-  if (context.scope === "all") params.set("back_scope", context.scope);
+  if (context.scope === "all" || context.scope === "custom") params.set("back_scope", context.scope);
+  if (context.dateFrom) params.set("back_from", context.dateFrom);
+  if (context.dateTo) params.set("back_to", context.dateTo);
   if (context.history === "1") params.set("back_history", context.history);
   if (context.year && context.year !== "all") params.set("back_year", context.year);
   if (context.collection && context.collection !== "all") params.set("back_collection", context.collection);
@@ -141,6 +153,12 @@ function appendLegacyBackContext(params: URLSearchParams, context: ResultsBackCo
 function normalizeMatchType(value: string | null): MatchType {
   if (value === "host" || value === "domain" || value === "exact") return value;
   return "exact";
+}
+
+function normalizeScope(scope: string | null, dateFrom: string | null, dateTo: string | null): ScanScope {
+  if (scope === "all") return "all";
+  if (scope === "custom" || dateFrom || dateTo) return "custom";
+  return "recent";
 }
 
 function normalizePage(value: string | null): number | undefined {

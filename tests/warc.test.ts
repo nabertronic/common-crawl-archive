@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vitest";
-import { parseHeaderBlock, parseWarcRecord, sanitizeHtmlForPreview } from "@/lib/warc";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { LARGE_CAPTURE_LIMIT_BYTES } from "@/lib/common-crawl";
+import { fetchAndParseWarcRecord, parseHeaderBlock, parseWarcRecord, sanitizeHtmlForPreview } from "@/lib/warc";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("WARC parser", () => {
   it("parses header blocks", () => {
@@ -68,5 +73,72 @@ describe("WARC parser", () => {
     expect(html.toLowerCase()).not.toContain("<iframe");
     expect(html.toLowerCase()).not.toContain("<object");
     expect(html.toLowerCase()).not.toContain("<embed");
+  });
+
+  it("blocks oversized WARC records by default before making a network request", async () => {
+    const fetchMock = vi.fn<typeof globalThis.fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchAndParseWarcRecord({
+        filename: "crawl-data/example.warc.gz",
+        offset: "0",
+        length: String(LARGE_CAPTURE_LIMIT_BYTES + 1)
+      })
+    ).rejects.toThrow("viewer safety limit");
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("uses a caller-provided WARC safety limit", async () => {
+    const fetchMock = vi.fn<typeof globalThis.fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchAndParseWarcRecord({
+        filename: "crawl-data/example.warc.gz",
+        offset: "0",
+        length: "2048",
+        largeCaptureLimitBytes: 1024
+      })
+    ).rejects.toThrow("viewer safety limit");
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("requests records that fit a caller-provided WARC safety limit", async () => {
+    const fetchMock = vi.fn<typeof globalThis.fetch>(async () => new Response("missing", { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchAndParseWarcRecord({
+        filename: "crawl-data/example.warc.gz",
+        offset: "10",
+        length: "2048",
+        largeCaptureLimitBytes: 4096
+      })
+    ).rejects.toThrow("WARC range request returned HTTP 404");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("requests oversized WARC records when the caller explicitly allows them", async () => {
+    const fetchMock = vi.fn<typeof globalThis.fetch>(async () => new Response("missing", { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchAndParseWarcRecord({
+        filename: "crawl-data/example.warc.gz",
+        offset: "10",
+        length: String(LARGE_CAPTURE_LIMIT_BYTES + 1),
+        allowLarge: true
+      })
+    ).rejects.toThrow("WARC range request returned HTTP 404");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const init = fetchMock.mock.calls[0][1];
+    expect(init).toBeDefined();
+    if (!init) throw new Error("Expected WARC request init");
+    expect(new Headers(init.headers).get("Range")).toBe(`bytes=10-${10 + LARGE_CAPTURE_LIMIT_BYTES}`);
   });
 });

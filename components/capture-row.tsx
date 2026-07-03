@@ -187,7 +187,9 @@ function buildFollowSearchHref(targetUrl: string, context: ResultsBackContext) {
     url: targetUrl,
     matchType: context.match === "host" || context.match === "domain" ? context.match : "exact",
     mock: context.mock === "1",
-    scope: context.scope === "all" ? "all" : "recent"
+    scope: context.scope === "all" ? "all" : context.scope === "custom" ? "custom" : "recent",
+    dateFrom: context.dateFrom ?? undefined,
+    dateTo: context.dateTo ?? undefined
   });
 }
 

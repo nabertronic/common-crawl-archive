@@ -9,7 +9,8 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "refresh:opt-out-registry": "node scripts/refresh-opt-out-registry-snapshot.mjs"
   },
   "dependencies": {
     "@tailwindcss/postcss": "^4.2.4",

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("node:dns/promises", () => {
   const lookup = vi.fn(async (hostname: string) => {
@@ -17,6 +17,7 @@ vi.mock("node:https", () => {
 });
 
 import { GET } from "@/app/api/robots/route";
+import { resetRobotsRateLimitForTests } from "@/lib/robots-rate-limit";
 
 type Listener = (...args: unknown[]) => void;
 
@@ -49,6 +50,11 @@ function fakeResponse(body: string, status = 200, headers: Record<string, string
 }
 
 describe("robots API route", () => {
+  beforeEach(() => {
+    resetRobotsRateLimitForTests();
+    httpsRequestMock.mockReset();
+  });
+
   it("returns the evaluated CCBot robots status", async () => {
     fakeResponse("User-agent: CCBot\nDisallow: /private\n");
 
@@ -98,5 +104,26 @@ describe("robots API route", () => {
 
     expect(httpsRequestMock).not.toHaveBeenCalled();
     expect(body).toMatchObject({ status: "unavailable" });
+  });
+
+  it("rate limits repeated robots checks by client", async () => {
+    fakeResponse("User-agent: CCBot\nAllow: /\n");
+    const request = () =>
+      new Request("https://app.example/api/robots?url=https%3A%2F%2Fexample.com%2F", {
+        headers: { "x-forwarded-for": "203.0.113.10" }
+      });
+
+    for (let index = 0; index < 30; index += 1) {
+      expect((await GET(request())).status).toBe(200);
+    }
+    const limited = await GET(request());
+    const body = await limited.json();
+
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("Retry-After")).toBeTruthy();
+    expect(body).toMatchObject({
+      status: "unavailable",
+      error: "Too many robots checks. Try again shortly."
+    });
   });
 });
