@@ -5,7 +5,8 @@ import { APP_NAME } from "@/lib/app-meta";
 
 export const metadata: Metadata = {
   title: APP_NAME,
-  description: "Client-side Common Crawl capture search and WARC viewer."
+  description:
+    "Search 100+ Common Crawl collections — 300B+ pages archived since 2008 — to find past versions of any URL. A fallback web archive for when the Wayback Machine comes up empty. Runs entirely in your browser."
 };
 
 export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

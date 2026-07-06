@@ -362,6 +362,39 @@ body {
     0 0 28px rgba(250, 204, 21, 0.14);
 }
 
+/* Scroll-triggered reveal for below-fold landing sections. */
+.scroll-reveal {
+  opacity: 0;
+  transform: translateY(18px);
+  transition:
+    opacity 640ms cubic-bezier(0.2, 0.7, 0.2, 1),
+    transform 640ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+.scroll-reveal.is-visible {
+  opacity: 1;
+  transform: none;
+}
+
+/* Gentle bob for the hero scroll hint. */
+@keyframes hint-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(6px);
+  }
+}
+
+.scroll-hint {
+  animation: hint-bob 2.4s ease-in-out infinite;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .landing-atmosphere::before,
   .landing-scanlines {
@@ -381,5 +414,16 @@ body {
   }
   .terminal-caret {
     animation: none;
+  }
+  .scroll-reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+  .scroll-hint {
+    animation: none;
+  }
+  html {
+    scroll-behavior: auto;
   }
 }

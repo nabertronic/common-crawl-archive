@@ -30,13 +30,16 @@ import {
   isLikelyCommonCrawlAvailabilityIssue,
   isLikelyRateLimitError,
   queryCollection,
+  resultCoversWindow,
   searchUrlCoversTarget,
+  shouldPersistScanLogEntry,
   type CollectionAttemptLog,
   type CollectionCheckResult,
   type CommonCrawlCapture,
   type CommonCrawlCollection,
   type MatchType,
   type ResultsBackContext,
+  type ScanDateWindow,
   type ScanLogEntry,
   type ScanLogEvent,
   type SearchProgress,
@@ -53,6 +56,7 @@ import { BrandLockup } from "@/components/brand";
 import { CaptureRow, CaptureRowHeader, type SortOption } from "@/components/capture-row";
 import { CalendarView } from "@/components/calendar-view";
 import { HtmlPrivacyWarningDialog } from "@/components/html-privacy-warning-dialog";
+import { LandingSections } from "@/components/landing-sections";
 import { TopRightMenu } from "@/components/top-right-menu";
 import { createMockSearchDataset, createMockWarcRecord, isMockCaptureFilename } from "@/lib/mock-data";
 import { APP_NAME, buildTabTitle, stripUrlForTitle } from "@/lib/app-meta";
@@ -126,6 +130,10 @@ type SearchState =
 type RobotsUiState =
   | { status: "checking"; robotsUrl?: string; checkedAt?: number }
   | RobotsCheckResult;
+
+function blockedRobotsApprovalStorageKey(targetId: string) {
+  return `crawlback:blocked-robots-approved:${targetId}`;
+}
 
 export type ArchiveSearchInitialParams = {
   url?: string;
@@ -494,7 +502,7 @@ function scanStartEventForMode(mode: RunSearchMode) {
     return scanLogEvent("scan-restarted", "Scan restarted manually.", "amber");
   }
   if (mode === "missing") {
-    return scanLogEvent("scan-restarted", "Scan restarted manually.", "amber");
+    return scanLogEvent("scan-restarted", "Checking additional archive sources.", "amber");
   }
   if (mode === "auto-retry") {
     return scanLogEvent("scan-restarted", "Scan restarted.", "amber");
@@ -503,7 +511,9 @@ function scanStartEventForMode(mode: RunSearchMode) {
 }
 
 function scanScopeEvent(scope: ScanScope, dateFrom?: string, dateTo?: string) {
-  if (scope === "all") return undefined;
+  if (scope === "all") {
+    return scanLogEvent("scope-selected", "Full scan selected: checking the entire archive.", "amber");
+  }
   return scanLogEvent(
     "scope-selected",
     scope === "custom"
@@ -521,13 +531,31 @@ function scanCompletionEvent(input: { checked: number; failed: number; captures:
   );
 }
 
+function storedCoverageLoadedEvent(input: { checked: number; total: number; failed: number; captures: number }) {
+  return scanLogEvent(
+    "stored-coverage-loaded",
+    `Loaded stored progress · ${input.checked}/${input.total} sources · ${input.captures} snapshot${input.captures === 1 ? "" : "s"} · ${input.failed} failed.`
+  );
+}
+
 function filterScanLogForCollections(entries: ScanLogEntry[], activeCollections: CommonCrawlCollection[]) {
   const activeIds = new Set(activeCollections.map((collection) => collection.id));
   return entries.filter((entry) => !isCollectionScanLogEntry(entry) || activeIds.has(entry.collection.id));
 }
 
+function isDeduplicatedScanLogEvent(entry: ScanLogEntry) {
+  return !isCollectionScanLogEntry(entry) && (
+    entry.event === "opt-out-checked" ||
+    entry.event === "scope-selected" ||
+    entry.event === "stored-coverage-loaded"
+  );
+}
+
 function scanLogEntryKey(entry: ScanLogEntry) {
   if (!isCollectionScanLogEntry(entry)) {
+    if (isDeduplicatedScanLogEvent(entry)) {
+      return `event:${entry.event}:${entry.message}`;
+    }
     return `event:${entry.event}:${entry.checkedAt ?? ""}:${entry.message}`;
   }
   return `collection:${entry.collection.id}:${entry.checkedAt ?? ""}:${entry.status}:${entry.errorKind ?? ""}:${entry.httpStatus ?? ""}`;
@@ -536,6 +564,11 @@ function scanLogEntryKey(entry: ScanLogEntry) {
 function mergeScanLogSnapshot(snapshot: ScanLogEntry[], current: ScanLogEntry[]) {
   const keys = new Set(snapshot.map(scanLogEntryKey));
   return [...snapshot, ...current.filter((entry) => !keys.has(scanLogEntryKey(entry)))];
+}
+
+function hasScanLogEntry(entries: ScanLogEntry[], candidate: ScanLogEntry) {
+  const candidateKey = scanLogEntryKey(candidate);
+  return entries.some((entry) => scanLogEntryKey(entry) === candidateKey);
 }
 
 // Rebuild per-collection scan-log entries from cached captures for records that
@@ -602,7 +635,10 @@ function validStoredResults(results: CollectionCheckResult[] | undefined, collec
 function validStoredScanLogResults(record: StoredSearch, collections: CommonCrawlCollection[]) {
   const entries = record.scanLogResults ?? record.results ?? [];
   const validIds = new Set(collections.map((collection) => collection.id));
-  return entries.filter((entry) => !isCollectionScanLogEntry(entry) || validIds.has(entry.collection.id));
+  return entries.filter((entry) =>
+    shouldPersistScanLogEntry(entry) &&
+    (!isCollectionScanLogEntry(entry) || validIds.has(entry.collection.id))
+  );
 }
 
 function resultCollectionIds(results: CollectionCheckResult[], status?: CollectionCheckResult["status"]) {
@@ -916,7 +952,7 @@ function filterStoredSearchForRequest(
           blockedCaptures: entry.blockedCaptures?.filter((blocked) => filterCapture(blocked.capture))
         }, scope, dateFrom, dateTo)
       : entry
-    )
+    ).filter(shouldPersistScanLogEntry)
   };
 }
 
@@ -1057,7 +1093,7 @@ function scanLogRowClass(withDate: boolean) {
 function LandingStatsFooter() {
   return (
     <div
-      className="reveal-fade pointer-events-none fixed inset-x-0 top-0 z-10 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 px-4 pt-7 text-[11px] uppercase tracking-[0.22em] text-zinc-500"
+      className="reveal-fade pointer-events-none absolute inset-x-0 top-0 z-10 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 px-4 pt-7 text-[11px] uppercase tracking-[0.22em] text-zinc-500"
       style={{ animationDelay: "560ms" }}
     >
       <span>
@@ -1183,6 +1219,7 @@ export function ArchiveSearchApp({
   const filterResetMountedRef = useRef(false);
   const targetUrlInputRef = useRef<HTMLInputElement | null>(null);
   const loggedAutoRetryAtRef = useRef<number | undefined>(undefined);
+  const scanLogRef = useRef<ScanLogEntry[]>([]);
   const autoStartSignature = [
     initialMockMode ? "mock" : "live",
     initialUrl,
@@ -1209,13 +1246,24 @@ export function ArchiveSearchApp({
     setTargetUrl((currentUrl) => (currentUrl.trim() ? currentUrl : restoredUrl));
   }, []);
 
-  const hasBlockedRobotsApproval = useCallback((scanId: string) => {
-    return Boolean(scanId) && blockedRobotsApprovedScanIdsRef.current.has(scanId);
+  const hasBlockedRobotsApproval = useCallback((session: Pick<ScanSession, "scanId" | "targetId">) => {
+    if (session.scanId && blockedRobotsApprovedScanIdsRef.current.has(session.scanId)) return true;
+    if (!session.targetId || typeof window === "undefined") return false;
+    try {
+      return window.localStorage.getItem(blockedRobotsApprovalStorageKey(session.targetId)) === "1";
+    } catch {
+      return false;
+    }
   }, []);
 
-  const rememberBlockedRobotsApproval = useCallback((scanId: string) => {
-    if (!scanId) return;
-    blockedRobotsApprovedScanIdsRef.current.add(scanId);
+  const rememberBlockedRobotsApproval = useCallback((session: Pick<ScanSession, "scanId" | "targetId">) => {
+    if (session.scanId) blockedRobotsApprovedScanIdsRef.current.add(session.scanId);
+    if (!session.targetId || typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(blockedRobotsApprovalStorageKey(session.targetId), "1");
+    } catch {
+      // Best-effort persistence only.
+    }
   }, []);
 
   const applyRouteResultParams = useCallback(() => {
@@ -1302,6 +1350,7 @@ export function ArchiveSearchApp({
     setPage(1);
     setCheckedCollectionIds(new Set());
     setScanLog([]);
+    scanLogRef.current = [];
     setScanLogOpen(false);
     setAdvancedOpen(false);
     setScanStartedAt(undefined);
@@ -1351,6 +1400,10 @@ export function ArchiveSearchApp({
     () => filteredCaptures.slice((currentPage - 1) * pageSize, currentPage * pageSize),
     [filteredCaptures, currentPage, pageSize]
   );
+
+  useEffect(() => {
+    scanLogRef.current = scanLog;
+  }, [scanLog]);
 
   useEffect(() => {
     if (!filterResetMountedRef.current) {
@@ -1468,12 +1521,26 @@ export function ArchiveSearchApp({
     const activeStartedAt = coverage?.activeScanStartedAt;
     const storedDuration = coverage?.durationMs ?? 0;
     const displayedDuration = coverageDurationMs(coverage) || scanLogDurationMs(logResults);
+    const cachedRobotsStatus = readCachedRobotsStatus(session.url);
+    const restoredLog =
+      checkedIds.size > 0 || storedCaptures.length > 0 || failed.length > 0
+        ? [
+            ...logResults,
+            storedCoverageLoadedEvent({
+              checked: checkedIds.size,
+              total: activeCollections.length,
+              failed: failed.length,
+              captures: storedCaptures.length
+            })
+          ]
+        : logResults;
 
     setCollections(loadedCollections);
     setCaptures(storedCaptures);
     setFailedResults(failed);
     setCheckedCollectionIds(checkedIds);
-    setScanLog(logResults);
+    setScanLog(restoredLog);
+    scanLogRef.current = restoredLog;
     setLiveFailedResults([]);
     // The scan log always starts collapsed when restoring a stored scan; its
     // open/closed state is intentionally not remembered across visits.
@@ -1489,6 +1556,7 @@ export function ArchiveSearchApp({
     setError("");
     setState(restoredState);
     setIsStoredView(results.length > 0);
+    if (cachedRobotsStatus) setRobotsStatus(cachedRobotsStatus);
     setBlockedRobotsConfirmation(null);
     setScanStartedAt(activeStartedAt ?? coverage?.updatedAt);
     setStoredDurationMs(storedDuration);
@@ -1574,6 +1642,7 @@ export function ArchiveSearchApp({
     setLiveFailedResults([]);
     setCheckedCollectionIds(checkedIds);
     setScanLog(mock.scanLog);
+    scanLogRef.current = mock.scanLog;
     // The scan log only opens when the user expands it.
     setScanLogOpen(false);
     setError("");
@@ -1683,7 +1752,7 @@ export function ArchiveSearchApp({
     // Continuations of a stored scan (missing collections, retries, resume)
     // start without re-confirming blocked robots; the confirmation only gates
     // starting a brand-new scan.
-    if (precheckedRobotsStatus?.status === "blocked" && !reuseStoredPrerequisites && !hasBlockedRobotsApproval(session.scanId)) {
+    if (precheckedRobotsStatus?.status === "blocked" && !reuseStoredPrerequisites && !hasBlockedRobotsApproval(session)) {
       setBlockedRobotsConfirmation({
         session,
         mode,
@@ -1729,6 +1798,16 @@ export function ArchiveSearchApp({
     const activeDateFrom = session.dateFrom;
     const activeDateTo = session.dateTo;
 
+    // For a custom date range, constrain each CDX query server-side so Common
+    // Crawl only returns captures inside the window. A stored result is only
+    // reusable when its coverage window is broad enough for the current request.
+    const requestedWindow: ScanDateWindow | undefined =
+      activeScope === "custom" && hasValidCustomDateRange(activeDateFrom ?? "", activeDateTo ?? "")
+        ? { from: activeDateFrom!, to: activeDateTo! }
+        : undefined;
+    const coversRequestedWindow = (result: CollectionCheckResult) =>
+      result.status === "checked" && resultCoversWindow(result.window, requestedWindow);
+
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -1737,7 +1816,7 @@ export function ArchiveSearchApp({
     setBlockedRobotsConfirmation(null);
     setIsStoredView(false);
     setLiveFailedResults([]);
-    if (options.allowBlockedRobots) rememberBlockedRobotsApproval(session.scanId);
+    if (options.allowBlockedRobots) rememberBlockedRobotsApproval(session);
     // Stored coverage proves this scan was already started deliberately, so a
     // continuation (missing collections, retries, resume) runs without asking
     // for blocked-robots confirmation again.
@@ -1758,7 +1837,7 @@ export function ArchiveSearchApp({
       !options.allowBlockedRobots &&
       !isStoredContinuation &&
       effectiveRobotsStatus?.status === "blocked" &&
-      !hasBlockedRobotsApproval(session.scanId)
+      !hasBlockedRobotsApproval(session)
     ) {
       setBlockedRobotsConfirmation({
         session,
@@ -1811,25 +1890,27 @@ export function ArchiveSearchApp({
       setFailedResults([]);
       setCheckedCollectionIds(new Set());
       setScanLog([]);
+      scanLogRef.current = [];
       setProgress({ checked: 0, total: 0, hits: 0, failed: 0, activeCollections: [] });
     }
 
     const appendRunLogEvent = (entry: ScanLogEvent) => {
-      setScanLog((current) => [...current, entry]);
+      if (hasScanLogEntry(scanLogRef.current, entry)) return;
+      scanLogRef.current = [...scanLogRef.current, entry];
+      setScanLog(scanLogRef.current);
       void appendCoverageScanLogEntry(session, entry);
     };
     const appendCollectionAttempt = (collection: CommonCrawlCollection, attemptLog: CollectionAttemptLog) => {
       const entry = resultFromAttemptLog(collection, attemptLog);
-      setScanLog((current) => [...current, entry]);
+      scanLogRef.current = [...scanLogRef.current, entry];
+      setScanLog(scanLogRef.current);
       void appendCoverageScanLogEntry(session, entry);
     };
     appendRunLogEvent(scanStartEventForMode(mode));
-    if (isStoredContinuation && effectiveRobotsStatus?.status === "blocked") {
-      appendRunLogEvent(
-        scanLogEvent("robots-checked", "CCBot robots.txt blocked — continuing stored scan without confirmation.", "amber")
-      );
-    }
-    const scopeEvent = scanScopeEvent(activeScope, activeDateFrom, activeDateTo);
+    const scopeEvent =
+      mode === "fresh" || mode === "missing"
+        ? scanScopeEvent(activeScope, activeDateFrom, activeDateTo)
+        : undefined;
     if (scopeEvent) appendRunLogEvent(scopeEvent);
     if (!options.precheckedRobotsStatus) {
       void checkRobotsForUrl(url, controller.signal, appendRunLogEvent);
@@ -1905,7 +1986,8 @@ export function ArchiveSearchApp({
         setFailedResults(storedFailedResults);
         setLiveFailedResults([]);
         setCheckedCollectionIds(storedCheckedIds);
-        setScanLog((current) => mergeScanLogSnapshot(reconstructedScanLog, current));
+        scanLogRef.current = mergeScanLogSnapshot(reconstructedScanLog, scanLogRef.current);
+        setScanLog(scanLogRef.current);
         // Restored historical scan (live re-scan blocked) stays collapsed.
         setScanLogOpen(false);
         setProgress({
@@ -1973,7 +2055,13 @@ export function ArchiveSearchApp({
       let currentFailedResults = currentResults.filter((result) => result.status === "not-checked");
       const failedIds = new Set(currentFailedResults.map((result) => result.collection.id));
       const attemptedIds = resultCollectionIds(currentResults);
-      let searchSet = activeCollections.filter((collection) => !attemptedIds.has(collection.id) || failedIds.has(collection.id));
+      // A collection is "covered" only if its stored checked result spans the
+      // requested window; windowed results do not satisfy a broader request, so
+      // those collections stay in the search set and are re-queried.
+      const coveredIds = new Set(
+        currentResults.filter(coversRequestedWindow).map((result) => result.collection.id)
+      );
+      let searchSet = activeCollections.filter((collection) => !coveredIds.has(collection.id));
 
       if (mode === "missing") {
         const originalIds = new Set(originalCollectionIdsForRun ?? []);
@@ -1984,7 +2072,7 @@ export function ArchiveSearchApp({
       } else if (mode === "retry-failed") {
         searchSet = activeCollections.filter((collection) => failedIds.has(collection.id));
       } else if (mode === "auto-retry") {
-        searchSet = activeCollections.filter((collection) => failedIds.has(collection.id) || !attemptedIds.has(collection.id));
+        searchSet = activeCollections.filter((collection) => !coveredIds.has(collection.id));
       }
 
       setCollections(loadedCollections);
@@ -2004,12 +2092,19 @@ export function ArchiveSearchApp({
         failed: currentFailedResults.length,
         activeCollections: []
       });
-      if (currentScanLog.length > 0 || currentResults.length > 0 || currentCaptures.length > 0) {
+      const hasVisibleStoredCoverageLog = scanLog.some((entry) => "kind" in entry && entry.event === "stored-coverage-loaded");
+      if (
+        mode !== "fresh" &&
+        !hasVisibleStoredCoverageLog &&
+        (currentCheckedIds.size > 0 || currentFailedResults.length > 0 || currentCaptures.length > 0)
+      ) {
         appendRunLogEvent(
-          scanLogEvent(
-            "stored-coverage-loaded",
-            `Loaded stored coverage · ${currentResults.length} collection${currentResults.length === 1 ? "" : "s"} · ${currentCaptures.length} capture${currentCaptures.length === 1 ? "" : "s"}.`
-          )
+          storedCoverageLoadedEvent({
+            checked: currentCheckedIds.size,
+            total: activeCollections.length,
+            failed: currentFailedResults.length,
+            captures: currentCaptures.length
+          })
         );
       }
 
@@ -2036,7 +2131,7 @@ export function ArchiveSearchApp({
 
         coverage = await getCoverage(session.targetId);
         const existing = coverage?.collectionResults[collection.id];
-        if (existing?.status === "checked") {
+        if (existing && coversRequestedWindow(existing)) {
           appendRunLogEvent(scanLogEvent("collection-skipped", `${collection.id} skipped: already checked successfully.`));
           currentResults = filterResultsForScope(
             coverageResults(coverage).filter((result) =>
@@ -2077,10 +2172,22 @@ export function ArchiveSearchApp({
           },
           (delayMs) => appendRunLogEvent(
             scanLogEvent("retry-wait-started", `${collection.id} retry wait started · ${formatSecondsAbbrev(delayMs)}.`, "amber")
-          )
+          ),
+          undefined,
+          undefined,
+          requestedWindow
         );
         if (result.fromCache) {
           appendRunLogEvent(scanLogEvent("cache-hit", `${collection.id} loaded from CDX cache.`));
+        }
+        if (result.truncated) {
+          appendRunLogEvent(
+            scanLogEvent(
+              "collection-truncated",
+              `${collection.id} has more captures than the per-collection limit; showing the newest ${result.captures.length}.`,
+              "amber"
+            )
+          );
         }
         coverage = await upsertCoverageResult(target, result);
         currentResults = filterResultsForScope(
@@ -2373,6 +2480,8 @@ export function ArchiveSearchApp({
     setCustomDateTo(initialDateTo);
     void (async () => {
       const loadedSession = await loadStoredScan(searchUrl, nextMatchType, initialScanScope, initialDateFrom, initialDateTo, initialSavedKey);
+      const loadedCoverage = await getCoverage(loadedSession.targetId);
+      const shouldResumeStoredScan = hasStoredCoverageHistory(loadedCoverage);
       if (initialHistoryMode && !initialAction) return;
 
       if (initialAction === "retry-failed") {
@@ -2381,6 +2490,14 @@ export function ArchiveSearchApp({
       }
       if (initialAction === "missing") {
         await executeRunSearch("missing", { session: loadedSession, reuseStoredPrerequisites: true });
+        return;
+      }
+      if (shouldResumeStoredScan) {
+        await executeRunSearch("resume", {
+          session: loadedSession,
+          precheckedRobotsStatus: readCachedRobotsStatus(searchUrl) ?? robotsStatus,
+          reuseStoredPrerequisites: true
+        });
         return;
       }
       await runSearch("fresh", {
@@ -2449,6 +2566,7 @@ export function ArchiveSearchApp({
   const autoRetryCountdown = nextAutoRetryAt ? formatSecondsAbbrev(nextAutoRetryAt - nowMs) : "";
   const showAutoRetryAction = !isRunning && !isStoredView && hasAutoRetryWork;
   const isWaitingForAutoRetry = canAutoRetryFailed && Boolean(nextAutoRetryAt);
+  const displayedSourceTotal = progress.total || scopedCollections.length || "?";
   const scanNotice = isRunning || isWaitingForAutoRetry
     ? buildScanNotice({
         failedCount: noticeFailedCount,
@@ -2477,8 +2595,14 @@ export function ArchiveSearchApp({
     (robotsStatus ? 1 : 0) +
     (optOutMatch ? 1 : 0);
   const showEmptyOutcome = hasStartedSearch && !hasCaptures && state !== "error";
+  const canOfferFullScan = !isRunning && showEmptyOutcome && (scanScope === "recent" || scanScope === "custom");
+  const fullScanDescription =
+    scanScope === "custom"
+      ? `No snapshots were found in this date range. A full scan checks the entire archive since ${earliestArchiveYear} and may take much longer.`
+      : `No snapshots were found in the last 12 months. A full scan checks the entire archive since ${earliestArchiveYear} and may take much longer.`;
   const appendUiScanLogEvent = (entry: ScanLogEvent) => {
-    setScanLog((current) => [...current, entry]);
+    scanLogRef.current = [...scanLogRef.current, entry];
+    setScanLog(scanLogRef.current);
     const trimmedUrl = targetUrl.trim();
     if (!trimmedUrl) return;
     void ensureScanSession({
@@ -2734,7 +2858,7 @@ export function ArchiveSearchApp({
           scanWindowTo: storedMetadata.scanWindowTo,
           captures,
           results: persistedResults,
-          scanLogResults: scanLog,
+          scanLogResults: scanLog.filter(shouldPersistScanLogEntry),
           durationMs: Math.round(activeDurationMs),
           activeScanStartedAt: isPersistedScanRunning ? scanStartedAt : undefined,
           updatedAt: Date.now()
@@ -2791,14 +2915,20 @@ export function ArchiveSearchApp({
       className={
         hasStartedSearch
           ? "min-h-screen px-4 py-5 text-zinc-100 md:px-8"
-          : "grid min-h-screen place-items-center px-4 py-8 text-zinc-100 md:px-8"
+          : "relative min-h-[100svh] text-zinc-100"
       }
     >
       {hasStartedSearch ? null : <LandingAtmosphere />}
       {hasStartedSearch ? null : <TopRightMenu />}
       {hasStartedSearch ? null : <LandingStatsFooter />}
-      <div className={hasStartedSearch ? "mx-auto flex max-w-7xl flex-col gap-4" : "relative z-10 mx-auto w-full max-w-3xl"}>
-        <header className={hasStartedSearch ? "archive-panel rounded-md p-4" : "p-0"}>
+      <div
+        className={
+          hasStartedSearch
+            ? "mx-auto flex max-w-7xl flex-col gap-4"
+            : "relative z-10 grid min-h-[100svh] w-full place-items-center px-4 py-8 md:px-8"
+        }
+      >
+        <header className={hasStartedSearch ? "archive-panel rounded-md p-4" : "w-full max-w-3xl p-0"}>
           <div className={hasStartedSearch ? "flex flex-col gap-4 lg:flex-row lg:items-end" : "flex flex-col gap-4"}>
             <div className="flex-1">
               <div className={hasStartedSearch ? "mb-3 flex items-center gap-3" : "mb-8 flex flex-col items-center gap-3 text-center"}>
@@ -2916,7 +3046,7 @@ export function ArchiveSearchApp({
                 <div className="flex h-11 w-full divide-x divide-zinc-800 overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/60">
                   <Stat
                     label="Sources"
-                    value={`${successfulCount}/${progress.total || collections.length || "?"}`}
+                    value={`${successfulCount}/${displayedSourceTotal}`}
                   />
                   <Stat label="Snapshots" value={String(captures.length)} tone={captures.length === 0 ? "neutral" : "green"} />
                   <Stat label="Failed" value={String(failedCount)} tone={failedCount > 0 ? "red" : "neutral"} />
@@ -3242,11 +3372,27 @@ export function ArchiveSearchApp({
             isRunning={isRunning}
             canContinue={canContinue}
             canRetryFailed={canRetryFailed}
+            canRunFullScan={canOfferFullScan}
+            fullScanDescription={canOfferFullScan ? fullScanDescription : undefined}
             onContinue={() => void runSearch("resume")}
             onRetryFailed={() => void runSearch("retry-failed")}
+            onRunFullScan={() => void runSearch("missing", { scope: "all", dateFrom: "", dateTo: "" })}
           />
         ) : null}
+        {hasStartedSearch ? null : (
+          <a
+            href="#how-it-works"
+            aria-label="Learn how Crawlback works"
+            className="reveal-fade absolute bottom-6 left-1/2 -translate-x-1/2 text-zinc-600 transition hover:text-amber-200"
+            style={{ animationDelay: "700ms" }}
+          >
+            <span className="scroll-hint block">
+              <ChevronDown size={20} />
+            </span>
+          </a>
+        )}
       </div>
+      {hasStartedSearch ? null : <LandingSections />}
       <HtmlPrivacyWarningDialog
         open={htmlZipWarningOpen}
         actionLabel="Download HTML ZIP"
@@ -3326,15 +3472,21 @@ function EmptyScanOutcome({
   isRunning,
   canContinue,
   canRetryFailed,
+  canRunFullScan,
+  fullScanDescription,
   onContinue,
   onRetryFailed,
+  onRunFullScan,
 }: {
   summary: CuratedScanSummary;
   isRunning: boolean;
   canContinue: boolean;
   canRetryFailed: boolean;
+  canRunFullScan: boolean;
+  fullScanDescription?: string;
   onContinue: () => void;
   onRetryFailed: () => void;
+  onRunFullScan: () => void;
 }) {
   const iconClass =
     summary.phase === "searching"
@@ -3358,6 +3510,17 @@ function EmptyScanOutcome({
         </Button>
       )
       : null;
+  const fullScanAction = !primaryAction && !isRunning && canRunFullScan
+    ? (
+      <div className="mt-5 flex flex-col items-center gap-3">
+        {fullScanDescription ? <p className="max-w-xl text-sm leading-relaxed text-zinc-400">{fullScanDescription}</p> : null}
+        <Button type="button" onClick={onRunFullScan}>
+          <Play size={16} />
+          Run full scan across entire archive
+        </Button>
+      </div>
+    )
+    : null;
 
   return (
     <section className="archive-panel rounded-md p-6">
@@ -3365,6 +3528,7 @@ function EmptyScanOutcome({
         <Icon className={iconClass} size={30} />
         <p className="text-lg font-black uppercase tracking-[0.16em] text-zinc-100">{summary.title}</p>
         {primaryAction ? <div className="mt-5 flex justify-center">{primaryAction}</div> : null}
+        {fullScanAction}
       </div>
     </section>
   );
@@ -3425,15 +3589,19 @@ function scanLogRenderRows(input: {
 }): ScanLogRenderRow[] {
   const rows: ScanLogRenderRow[] = [];
   let sequence = 0;
-  if (input.robotsStatus) {
-    rows.push({ kind: "robots", status: input.robotsStatus, timestamp: input.robotsStatus.checkedAt, sequence: sequence++ });
-  }
   if (input.optOutMatch) {
     rows.push({ kind: "opt-out", checkedAt: input.optOutCheckedAt, cachedCount: input.optOutCachedCount, timestamp: input.optOutCheckedAt, sequence: sequence++ });
   }
+  let lastRobotsEventSequence: number | undefined;
+  let lastRobotsEventTimestamp: number | undefined;
   for (const result of input.results) {
     if (!isCollectionScanLogEntry(result)) {
-      rows.push({ kind: "event", event: result, timestamp: result.checkedAt, sequence: sequence++ });
+      const eventSequence = sequence++;
+      rows.push({ kind: "event", event: result, timestamp: result.checkedAt, sequence: eventSequence });
+      if (result.event === "robots-cached" || result.event === "robots-checked") {
+        lastRobotsEventSequence = eventSequence;
+        lastRobotsEventTimestamp = result.checkedAt;
+      }
       continue;
     }
     const calls = result.attemptLogs?.length
@@ -3455,6 +3623,14 @@ function scanLogRenderRows(input: {
         timestamp: call.checkedAt ?? result.checkedAt,
         sequence: sequence++
       });
+    });
+  }
+  if (input.robotsStatus) {
+    rows.push({
+      kind: "robots",
+      status: input.robotsStatus,
+      timestamp: lastRobotsEventTimestamp ?? input.robotsStatus.checkedAt,
+      sequence: lastRobotsEventSequence == null ? -1 : lastRobotsEventSequence + 0.5
     });
   }
   return rows.sort((left, right) => {

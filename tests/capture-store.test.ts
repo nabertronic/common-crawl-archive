@@ -19,7 +19,7 @@ import {
   targetIdFor,
   type StoredSearch
 } from "@/lib/capture-store";
-import type { CollectionCheckResult, CommonCrawlCapture, CommonCrawlCollection } from "@/lib/common-crawl";
+import type { CollectionCheckResult, CommonCrawlCapture, CommonCrawlCollection, ScanLogEvent } from "@/lib/common-crawl";
 
 describe("capture store keys", () => {
   it("builds stable target ids from url, match type, and mock mode", () => {
@@ -214,6 +214,41 @@ describe("capture store keys", () => {
         .filter((result): result is CollectionCheckResult => !("kind" in result))
         .map((result) => result.status)
     ).toEqual(["not-checked", "checked"]);
+  });
+
+  it("filters restore-only coverage events from persisted scan logs", () => {
+    const collection: CommonCrawlCollection = {
+      id: "CC-MAIN-2026-21",
+      name: "May 2026 Index",
+      cdxApi: "https://index.commoncrawl.org/CC-MAIN-2026-21-index",
+      from: "2026-05-08T07:40:46",
+      to: "2026-05-21T22:06:58"
+    };
+    const result: CollectionCheckResult = {
+      collection,
+      status: "checked",
+      captures: [],
+      checkedAt: 1_000,
+      attempts: 1,
+      runs: 1
+    };
+    const restoreEvent: ScanLogEvent = {
+      kind: "event",
+      event: "stored-coverage-loaded",
+      checkedAt: 2_000,
+      message: "Loaded stored coverage · 1 collection · 0 captures."
+    };
+
+    expect(coverageScanLogResults({
+      targetId: "target:https://example.com/:exact:live",
+      ownerId: "owner_test",
+      url: "https://example.com/",
+      matchType: "exact",
+      mock: false,
+      collectionResults: { [collection.id]: result },
+      scanLogResults: [result, restoreEvent],
+      updatedAt: 3_000
+    })).toEqual([result]);
   });
 
   it("adds the active scan segment to stored coverage duration", () => {

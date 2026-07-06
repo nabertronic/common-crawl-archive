@@ -1,3 +1,4 @@
+import { shouldPersistScanLogEntry } from "./common-crawl";
 import type { CollectionCheckResult, CommonCrawlCapture, CommonCrawlCollection, MatchType, ScanLogEntry } from "./common-crawl";
 import { dedupeCaptures, mergeCollectionResult, mergeCollectionResults } from "./scan-results";
 
@@ -473,6 +474,25 @@ export async function appendCoverageScanLogEntry(
   target: Pick<SearchTarget, "targetId" | "ownerId" | "url" | "matchType" | "mock">,
   entry: ScanLogEntry
 ): Promise<CoverageRecord> {
+  if (!shouldPersistScanLogEntry(entry)) {
+    const existing = await getCoverage(target.targetId);
+    return {
+      targetId: target.targetId,
+      ownerId: existing?.ownerId ?? target.ownerId ?? await activeOwnerId(),
+      url: target.url,
+      matchType: target.matchType,
+      mock: target.mock,
+      collectionResults: existing?.collectionResults ?? {},
+      scanLogResults: existing?.scanLogResults,
+      collectionIds: existing?.collectionIds,
+      collectionListFetchedAt: existing?.collectionListFetchedAt,
+      scanWindowFrom: existing?.scanWindowFrom,
+      scanWindowTo: existing?.scanWindowTo,
+      durationMs: existing?.durationMs,
+      activeScanStartedAt: existing?.activeScanStartedAt,
+      updatedAt: existing?.updatedAt ?? Date.now()
+    };
+  }
   const existing = await getCoverage(target.targetId);
   const next: CoverageRecord = {
     targetId: target.targetId,
@@ -560,10 +580,12 @@ export function coverageResults(record: CoverageRecord | undefined): CollectionC
 
 export function coverageScanLogResults(record: CoverageRecord | undefined): ScanLogEntry[] {
   if (!record?.scanLogResults?.length) return coverageResults(record);
-  return record.scanLogResults.map((result) => ("kind" in result
-    ? { ...result, checkedAt: result.checkedAt ?? record.updatedAt }
-    : { ...result, checkedAt: result.checkedAt ?? record.updatedAt }
-  ));
+  return record.scanLogResults
+    .filter(shouldPersistScanLogEntry)
+    .map((result) => ("kind" in result
+      ? { ...result, checkedAt: result.checkedAt ?? record.updatedAt }
+      : { ...result, checkedAt: result.checkedAt ?? record.updatedAt }
+    ));
 }
 
 export function coverageCaptures(record: CoverageRecord | undefined): CommonCrawlCapture[] {

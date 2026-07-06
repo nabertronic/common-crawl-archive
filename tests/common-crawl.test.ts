@@ -13,6 +13,7 @@ import {
   parseCdxjResponse,
   parseCollections,
   queryCollection,
+  resultCoversWindow,
   searchCollections,
   searchUrlCoversTarget,
   type CommonCrawlCollection
@@ -70,9 +71,25 @@ describe("Common Crawl client", () => {
     expect(url).toContain("url=https%3A%2F%2Fexample.com%2Fa%3Fb%3D1");
     expect(url).toContain("output=json");
     expect(url).toContain("redirect");
-    expect(url).toContain("limit=1000");
+    // No fixed `limit`: it would truncate each page and defeat pagination.
+    expect(url).not.toContain("limit=");
     expect(url).not.toContain("filter=");
     expect(url).not.toContain("matchType");
+    expect(url).not.toContain("page=");
+  });
+
+  it("adds the page parameter when paginating", () => {
+    expect(buildCdxjUrl("https://example.com/", collection, "exact", 0)).toContain("page=0");
+    expect(buildCdxjUrl("https://example.com/", collection, "host", 2)).toContain("page=2");
+  });
+
+  it("constrains the query server-side with padded from/to bounds for a date window", () => {
+    const url = buildCdxjUrl("https://example.com/", collection, "exact", 0, {
+      from: "2024-03-10",
+      to: "2024-03-20"
+    });
+    expect(url).toContain("from=20240310000000");
+    expect(url).toContain("to=20240320235959");
   });
 
   it("preserves full-scan scope in capture viewer back context", () => {
@@ -342,7 +359,6 @@ describe("Common Crawl client", () => {
 
   it("uses exponential retry delays and Retry-After hints for transient failures", async () => {
     const delays: number[] = [];
-    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
     let call = 0;
     vi.stubGlobal(
       "fetch",
@@ -354,32 +370,30 @@ describe("Common Crawl client", () => {
       })
     );
 
-    try {
-      const result = await queryCollection(
-        "https://example.com/retry-after",
-        collection,
-        undefined,
-        1000,
-        2,
-        1,
-        100,
-        "exact",
-        undefined,
-        (delayMs) => delays.push(delayMs)
-      );
+    const result = await queryCollection(
+      "https://example.com/retry-after",
+      collection,
+      undefined,
+      1000,
+      2,
+      1,
+      100,
+      "exact",
+      undefined,
+      (delayMs) => delays.push(delayMs)
+    );
 
-      expect(result.status).toBe("checked");
-      expect(result.attempts).toBe(3);
-      expect(delays).toEqual([1, 3]);
-    } finally {
-      randomSpy.mockRestore();
-    }
+    expect(result.status).toBe("checked");
+    expect(result.attempts).toBe(3);
+    expect(delays).toEqual([1, 3]);
   });
 
   it("uses cached CDX results for repeated checked collection queries", async () => {
-    const fetchMock = vi.fn(
-      async () =>
-        new Response(
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const requested = typeof input === "string" ? input : input.toString();
+      // First page carries the capture; the next page is empty, ending pagination.
+      if (requested.includes("page=0")) {
+        return new Response(
           JSON.stringify({
             timestamp: "20260508112233",
             url: "https://example.com/",
@@ -390,25 +404,31 @@ describe("Common Crawl client", () => {
             length: "90"
           }),
           { status: 200 }
-        )
-    );
+        );
+      }
+      return new Response("", { status: 200 });
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     const first = await queryCollection("https://example.com/cache", collection, undefined, 1000, 0);
+    const callsAfterFirst = fetchMock.mock.calls.length;
     const second = await queryCollection("https://example.com/cache", collection, undefined, 1000, 0);
 
     expect(first.fromCache).toBeUndefined();
+    expect(first.captures).toHaveLength(1);
     expect(second.fromCache).toBe(true);
     expect(second.attempts).toBe(0);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // The cached result is reused without any additional network requests.
+    expect(fetchMock.mock.calls.length).toBe(callsAfterFirst);
   });
 
   it("records captures that exceed the local viewer size limit", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(
-        async () =>
-          new Response(
+      vi.fn(async (input: RequestInfo | URL) => {
+        const requested = typeof input === "string" ? input : input.toString();
+        if (requested.includes("page=0")) {
+          return new Response(
             JSON.stringify({
               timestamp: "20260508112233",
               url: "https://example.com/large",
@@ -419,13 +439,184 @@ describe("Common Crawl client", () => {
               length: String(LARGE_CAPTURE_LIMIT_BYTES + 1)
             }),
             { status: 200 }
-          )
-      )
+          );
+        }
+        return new Response("", { status: 200 });
+      })
     );
 
     const result = await queryCollection("https://example.com/large", collection, undefined, 1000, 0);
     expect(result.blockedCaptures).toHaveLength(1);
     expect(result.blockedCaptures?.[0].sizeBytes).toBe(LARGE_CAPTURE_LIMIT_BYTES + 1);
+  });
+
+  const cdxLine = (timestamp: string, offset: string) =>
+    JSON.stringify({
+      timestamp,
+      url: "https://example.com/",
+      status: "200",
+      mime: "text/html",
+      filename: "crawl-data/test.warc.gz",
+      offset,
+      length: "100"
+    });
+
+  it("walks multiple CDX pages and merges captures until the index is exhausted", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const requested = typeof input === "string" ? input : input.toString();
+      if (requested.includes("page=0")) {
+        return new Response([cdxLine("20260101000000", "10"), cdxLine("20260102000000", "20")].join("\n"), { status: 200 });
+      }
+      if (requested.includes("page=1")) {
+        return new Response(cdxLine("20260103000000", "30"), { status: 200 });
+      }
+      // page 2 is past the last page: pywb answers HTTP 400, ending pagination.
+      return new Response("blocked out of bounds", { status: 400 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await queryCollection("https://example.com/", collection, undefined, 1000, 0);
+
+    expect(result.status).toBe("checked");
+    expect(result.captures).toHaveLength(3);
+    expect(result.captures.map((capture) => capture.timestamp)).toEqual([
+      "20260103000000",
+      "20260102000000",
+      "20260101000000"
+    ]);
+    expect(result.truncated).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps walking pages when a page has captures the retain filter drops", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const requested = typeof input === "string" ? input : input.toString();
+      if (requested.includes("page=0")) {
+        // Non-HTML capture: filtered out, but the page is not empty, so we must
+        // not treat it as the end of results.
+        return new Response(
+          JSON.stringify({
+            timestamp: "20260101000000",
+            url: "https://example.com/image.png",
+            status: "200",
+            mime: "image/png",
+            filename: "crawl-data/test.warc.gz",
+            offset: "10",
+            length: "100"
+          }),
+          { status: 200 }
+        );
+      }
+      if (requested.includes("page=1")) {
+        return new Response(cdxLine("20260102000000", "20"), { status: 200 });
+      }
+      return new Response("", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await queryCollection("https://example.com/", collection, undefined, 1000, 0);
+
+    expect(result.status).toBe("checked");
+    expect(result.captures).toHaveLength(1);
+    expect(result.captures[0].timestamp).toBe("20260102000000");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("stops paginating at the per-collection capture cap and flags truncation", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response([cdxLine("20260101000000", "10"), cdxLine("20260102000000", "20")].join("\n"), { status: 200 })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await queryCollection(
+      "https://example.com/",
+      collection,
+      undefined,
+      1000,
+      0,
+      undefined,
+      undefined,
+      "exact",
+      undefined,
+      undefined,
+      3
+    );
+
+    expect(result.status).toBe("checked");
+    expect(result.truncated).toBe(true);
+    expect(result.captures).toHaveLength(3);
+    // Two pages of two captures reach the cap of three; no third page is fetched.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("sends the date window to the API, records it on the result, and caches per-window", async () => {
+    const requestedUrls: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const requested = typeof input === "string" ? input : input.toString();
+      requestedUrls.push(requested);
+      if (requested.includes("page=0")) return new Response(cdxLine("20240315000000", "10"), { status: 200 });
+      return new Response("", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const window = { from: "2024-03-10", to: "2024-03-20" };
+    const windowed = await queryCollection(
+      "https://example.com/win",
+      collection,
+      undefined,
+      1000,
+      0,
+      undefined,
+      undefined,
+      "exact",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      window
+    );
+
+    expect(windowed.status).toBe("checked");
+    expect(windowed.window).toEqual(window);
+    expect(
+      requestedUrls.some((url) => url.includes("from=20240310000000") && url.includes("to=20240320235959"))
+    ).toBe(true);
+
+    // The same window is served from cache without new network requests.
+    const callsBeforeRepeat = fetchMock.mock.calls.length;
+    const repeat = await queryCollection(
+      "https://example.com/win",
+      collection,
+      undefined,
+      1000,
+      0,
+      undefined,
+      undefined,
+      "exact",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      window
+    );
+    expect(repeat.fromCache).toBe(true);
+    expect(fetchMock.mock.calls.length).toBe(callsBeforeRepeat);
+
+    // A full (unwindowed) query must not reuse the windowed cache entry.
+    const full = await queryCollection("https://example.com/win", collection, undefined, 1000, 0);
+    expect(full.fromCache).toBeUndefined();
+    expect(full.window).toBeUndefined();
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(callsBeforeRepeat);
+  });
+
+  it("decides result reuse from coverage windows", () => {
+    const window = { from: "2024-03-10", to: "2024-03-20" };
+    expect(resultCoversWindow(undefined, window)).toBe(true);
+    expect(resultCoversWindow(undefined, undefined)).toBe(true);
+    expect(resultCoversWindow(window, undefined)).toBe(false);
+    expect(resultCoversWindow({ from: "2024-03-01", to: "2024-03-31" }, window)).toBe(true);
+    expect(resultCoversWindow({ from: "2024-03-12", to: "2024-03-18" }, window)).toBe(false);
+    expect(resultCoversWindow(window, window)).toBe(true);
   });
 
   it("retries transient Common Crawl errors before marking a collection checked", async () => {

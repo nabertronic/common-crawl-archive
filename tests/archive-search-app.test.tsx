@@ -126,8 +126,9 @@ vi.mock("@/lib/common-crawl", async () => {
 });
 
 import { ArchiveSearchApp } from "@/components/archive-search-app";
-import { getCoverage, getScanSession, putSearch } from "@/lib/capture-store";
+import { ensureScanSession, findOrCreateLegacySession, getCoverage, getScanSession, putSearch } from "@/lib/capture-store";
 import { queryCollection } from "@/lib/common-crawl";
+import { robotsCacheKey } from "@/lib/robots-cache";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -145,6 +146,10 @@ function dispatchPageShow(persisted: boolean) {
   const event = new Event("pageshow") as PageTransitionEvent;
   Object.defineProperty(event, "persisted", { value: persisted });
   window.dispatchEvent(event);
+}
+
+function blockedRobotsApprovalStorageKey(targetId: string) {
+  return `crawlback:blocked-robots-approved:${targetId}`;
 }
 
 describe("ArchiveSearchApp", () => {
@@ -392,7 +397,7 @@ describe("ArchiveSearchApp", () => {
     vi.mocked(getScanSession).mockResolvedValue(session);
     vi.mocked(getCoverage).mockResolvedValueOnce(restoredCoverage).mockResolvedValue(refreshedCoverage);
 
-    render(<ArchiveSearchApp initialParams={{ scan: session.scanId }} />);
+    render(<ArchiveSearchApp autoStart initialParams={{ scan: session.scanId }} />);
 
     await waitFor(() => expect(screen.getByLabelText("Scanned URL")).toHaveTextContent("https://example.org/"));
     const scanLogToggle = screen.getByRole("button", { name: /scan log/i });
@@ -406,6 +411,228 @@ describe("ArchiveSearchApp", () => {
     await waitFor(() => expect(screen.getByText(/scan completed/i)).toBeInTheDocument());
     expect(screen.queryByText(staleCollection.id)).not.toBeInTheDocument();
     expect(queryCollection).not.toHaveBeenCalled();
+  });
+
+  it("shows a single stored-progress row when restoring a cached scan", async () => {
+    const [restoredCollection, pendingCollection] = commonCrawlMocks.collections;
+    const restoredResult = {
+      collection: restoredCollection,
+      status: "checked" as const,
+      captures: [],
+      checkedAt: 1_000,
+      httpStatus: 404,
+      attempts: 1,
+      runs: 1
+    };
+    const session = {
+      scanId: "scan_existing",
+      targetId: "target:https://example.org/:exact:live",
+      url: "https://example.org/",
+      matchType: "exact" as const,
+      mock: false,
+      scope: "all" as const,
+      collectionIds: [restoredCollection.id, pendingCollection.id],
+      collectionListFetchedAt: 1,
+      scanWindowFrom: restoredCollection.from,
+      scanWindowTo: pendingCollection.to,
+      createdAt: 1,
+      updatedAt: 1
+    };
+
+    vi.mocked(getScanSession).mockResolvedValue(session);
+    vi.mocked(getCoverage).mockResolvedValue({
+      targetId: session.targetId,
+      url: session.url,
+      matchType: session.matchType,
+      mock: session.mock,
+      collectionResults: { [restoredCollection.id]: restoredResult },
+      scanLogResults: [restoredResult],
+      updatedAt: 1
+    });
+
+    render(<ArchiveSearchApp autoStart initialParams={{ scan: session.scanId }} />);
+
+    await waitFor(() => expect(screen.getByLabelText("Scanned URL")).toHaveTextContent("https://example.org/"));
+
+    fireEvent.click(screen.getByRole("button", { name: /scan log/i }));
+
+    const storedProgressRows = await screen.findAllByText("Loaded stored progress · 1/2 sources · 0 snapshots · 0 failed.");
+    expect(storedProgressRows).toHaveLength(1);
+  });
+
+  it("does not duplicate scope or opt-out rows when restoring and continuing a stored full scan", async () => {
+    const [restoredCollection, pendingCollection] = commonCrawlMocks.collections;
+    const scopeMessage = "Full scan selected: checking the entire archive.";
+    const optOutMessage = "Opt-out registry checked: no match.";
+    const restoredResult = {
+      collection: restoredCollection,
+      status: "checked" as const,
+      captures: [],
+      checkedAt: 1_000,
+      httpStatus: 404,
+      attempts: 1,
+      runs: 1
+    };
+    const session = {
+      scanId: "scan_existing",
+      targetId: "target:https://example.org/:exact:live",
+      url: "https://example.org/",
+      matchType: "exact" as const,
+      mock: false,
+      scope: "all" as const,
+      collectionIds: [restoredCollection.id, pendingCollection.id],
+      collectionListFetchedAt: 1,
+      scanWindowFrom: restoredCollection.from,
+      scanWindowTo: pendingCollection.to,
+      createdAt: 1,
+      updatedAt: 1
+    };
+
+    vi.mocked(getScanSession).mockResolvedValue(session);
+    vi.mocked(getCoverage).mockResolvedValue({
+      targetId: session.targetId,
+      url: session.url,
+      matchType: session.matchType,
+      mock: session.mock,
+      collectionResults: { [restoredCollection.id]: restoredResult },
+      scanLogResults: [
+        { kind: "event", event: "opt-out-checked", checkedAt: 1_100, message: optOutMessage, tone: "neutral" as const },
+        { kind: "event", event: "scope-selected", checkedAt: 1_200, message: scopeMessage, tone: "amber" as const },
+        restoredResult
+      ],
+      updatedAt: 1
+    });
+
+    render(<ArchiveSearchApp autoStart initialParams={{ scan: session.scanId }} />);
+
+    await waitFor(() => expect(screen.getByLabelText("Scanned URL")).toHaveTextContent("https://example.org/"));
+    fireEvent.click(screen.getByRole("button", { name: /scan log/i }));
+    expect(screen.getAllByText(scopeMessage)).toHaveLength(1);
+    expect(screen.getAllByText(optOutMessage)).toHaveLength(1);
+
+    const continueButtons = screen.getAllByRole("button", { name: /continue/i });
+    fireEvent.click(continueButtons[continueButtons.length - 1]);
+
+    await waitFor(() => expect(screen.getByText(/scan completed/i)).toBeInTheDocument());
+    expect(screen.getAllByText(scopeMessage)).toHaveLength(1);
+    expect(screen.getAllByText(optOutMessage)).toHaveLength(1);
+  });
+
+  it("does not show stored-progress for a clean fresh scan", async () => {
+    vi.mocked(getCoverage).mockResolvedValue(undefined);
+
+    render(<ArchiveSearchApp autoStart initialParams={{ url: "example.org", scope: "all" }} />);
+
+    await waitFor(() => expect(screen.getByLabelText("Scanned URL")).toHaveTextContent("https://example.org/"));
+    fireEvent.click(screen.getByRole("button", { name: /scan log/i }));
+
+    expect(screen.queryAllByText(/Loaded stored progress/i)).toHaveLength(0);
+  });
+
+  it("shows the cached robots block row when reopening a blocked stored scan", async () => {
+    vi.mocked(findOrCreateLegacySession).mockResolvedValue({
+      scanId: "scan_legacy",
+      targetId: "target:https://blocked.example/:exact:live",
+      url: "https://blocked.example/",
+      matchType: "exact",
+      mock: false,
+      scope: "all",
+      collectionIds: ["CC-MAIN-2026-21", "CC-MAIN-2026-26"],
+      collectionListFetchedAt: 1,
+      scanWindowFrom: "2026-05-08T07:40:46",
+      scanWindowTo: "2026-06-30T00:00:00",
+      createdAt: 1,
+      updatedAt: 1
+    });
+    vi.mocked(getCoverage).mockResolvedValue({
+      targetId: "target:https://blocked.example/:exact:live",
+      ownerId: "owner_test",
+      url: "https://blocked.example/",
+      matchType: "exact",
+      mock: false,
+      collectionResults: {
+        "CC-MAIN-2026-21": {
+          collection: commonCrawlMocks.collections[0],
+          status: "checked",
+          captures: [],
+          checkedAt: 1,
+          attempts: 1,
+          runs: 1
+        }
+      },
+      collectionIds: ["CC-MAIN-2026-21", "CC-MAIN-2026-26"],
+      collectionListFetchedAt: 1,
+      scanWindowFrom: "2026-05-08T07:40:46",
+      scanWindowTo: "2026-06-30T00:00:00",
+      durationMs: 100,
+      updatedAt: 1
+    });
+    localStorage.setItem(robotsCacheKey("https://blocked.example/"), JSON.stringify({
+      status: "blocked",
+      robotsUrl: "https://blocked.example/robots.txt",
+      userAgent: "CCBot",
+      matchedRule: { directive: "disallow", path: "/" },
+      checkedAt: 2_000
+    }));
+
+    render(<ArchiveSearchApp autoStart initialParams={{ url: "blocked.example", scope: "all" }} />);
+
+    await waitFor(() => expect(screen.getByLabelText("Scanned URL")).toHaveTextContent("https://blocked.example/"));
+    fireEvent.click(screen.getByRole("button", { name: /scan log/i }));
+    await waitFor(() => expect(screen.getByText("CCBot robots.txt")).toBeInTheDocument());
+  });
+
+  it("does not add a second robots continuation row when resuming a blocked stored scan", async () => {
+    vi.mocked(findOrCreateLegacySession).mockResolvedValue({
+      scanId: "scan_legacy",
+      targetId: "target:https://blocked.example/:exact:live",
+      url: "https://blocked.example/",
+      matchType: "exact",
+      mock: false,
+      scope: "all",
+      collectionIds: ["CC-MAIN-2026-21", "CC-MAIN-2026-26"],
+      collectionListFetchedAt: 1,
+      scanWindowFrom: "2026-05-08T07:40:46",
+      scanWindowTo: "2026-06-30T00:00:00",
+      createdAt: 1,
+      updatedAt: 1
+    });
+    vi.mocked(getCoverage).mockResolvedValue({
+      targetId: "target:https://blocked.example/:exact:live",
+      ownerId: "owner_test",
+      url: "https://blocked.example/",
+      matchType: "exact",
+      mock: false,
+      collectionResults: {
+        "CC-MAIN-2026-21": {
+          collection: commonCrawlMocks.collections[0],
+          status: "checked",
+          captures: [],
+          checkedAt: 1,
+          attempts: 1,
+          runs: 1
+        }
+      },
+      collectionIds: ["CC-MAIN-2026-21", "CC-MAIN-2026-26"],
+      collectionListFetchedAt: 1,
+      scanWindowFrom: "2026-05-08T07:40:46",
+      scanWindowTo: "2026-06-30T00:00:00",
+      durationMs: 100,
+      updatedAt: 1
+    });
+    localStorage.setItem(robotsCacheKey("https://blocked.example/"), JSON.stringify({
+      status: "blocked",
+      robotsUrl: "https://blocked.example/robots.txt",
+      userAgent: "CCBot",
+      matchedRule: { directive: "disallow", path: "/" },
+      checkedAt: 2_000
+    }));
+
+    render(<ArchiveSearchApp autoStart initialParams={{ url: "blocked.example", scope: "all" }} />);
+
+    await waitFor(() => expect(screen.getByLabelText("Scanned URL")).toHaveTextContent("https://blocked.example/"));
+    fireEvent.click(screen.getByRole("button", { name: /scan log/i }));
+    expect(screen.queryByText(/continuing stored scan without confirmation/i)).not.toBeInTheDocument();
   });
 
   it("does not rewrite saved history when opening a stored scan", async () => {
@@ -455,9 +682,88 @@ describe("ArchiveSearchApp", () => {
 
     render(<ArchiveSearchApp autoStart initialParams={{ url: "blocked.example", scope: "all", history: "1", action: "missing" }} />);
 
-    await waitFor(() => expect(queryCollection).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("button", { name: /start scan anyway/i })).not.toBeInTheDocument();
+    expect((await screen.findAllByRole("button", { name: /continue/i })).length).toBeGreaterThan(0);
+  });
 
+  it("auto-resumes a stored blocked scan from the search page without asking again", async () => {
+    vi.mocked(findOrCreateLegacySession).mockResolvedValue({
+      scanId: "scan_legacy",
+      targetId: "target:https://blocked.example/:exact:live",
+      url: "https://blocked.example/",
+      matchType: "exact",
+      mock: false,
+      scope: "all",
+      collectionIds: ["CC-MAIN-2026-21", "CC-MAIN-2026-26"],
+      collectionListFetchedAt: 1,
+      scanWindowFrom: "2026-05-08T07:40:46",
+      scanWindowTo: "2026-06-30T00:00:00",
+      createdAt: 1,
+      updatedAt: 1
+    });
+    vi.mocked(getCoverage).mockResolvedValue({
+      targetId: "target:https://blocked.example/:exact:live",
+      ownerId: "owner_test",
+      url: "https://blocked.example/",
+      matchType: "exact",
+      mock: false,
+      collectionResults: {
+        "CC-MAIN-2026-21": {
+          collection: commonCrawlMocks.collections[0],
+          status: "checked",
+          captures: [],
+          checkedAt: 1,
+          attempts: 1,
+          runs: 1
+        }
+      },
+      collectionIds: ["CC-MAIN-2026-21", "CC-MAIN-2026-26"],
+      collectionListFetchedAt: 1,
+      scanWindowFrom: "2026-05-08T07:40:46",
+      scanWindowTo: "2026-06-30T00:00:00",
+      durationMs: 100,
+      updatedAt: 1
+    });
+    localStorage.setItem(robotsCacheKey("https://blocked.example/"), JSON.stringify({
+      status: "blocked",
+      robotsUrl: "https://blocked.example/robots.txt",
+      userAgent: "CCBot",
+      matchedRule: { directive: "disallow", path: "/" },
+      checkedAt: 2_000
+    }));
+
+    render(<ArchiveSearchApp autoStart initialParams={{ url: "blocked.example", scope: "all" }} />);
+
+    await waitFor(() => expect(queryCollection).toHaveBeenCalledTimes(1));
     expect(vi.mocked(queryCollection).mock.calls[0][1].id).toBe("CC-MAIN-2026-26");
+    expect(screen.queryByRole("button", { name: /start scan anyway/i })).not.toBeInTheDocument();
+  });
+
+  it("reuses a previously approved blocked target without asking again", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.includes("/api/robots?")) {
+          return Response.json({
+            status: "blocked",
+            robotsUrl: "https://blocked.example/robots.txt",
+            userAgent: "CCBot",
+            matchedRule: { directive: "disallow", path: "/" },
+            checkedAt: 2_000
+          });
+        }
+        return new Response("", { status: 404 });
+      })
+    );
+    localStorage.setItem(
+      blockedRobotsApprovalStorageKey("target:https://blocked.example/:exact:live"),
+      "1"
+    );
+
+    render(<ArchiveSearchApp autoStart initialParams={{ url: "blocked.example", scope: "all" }} />);
+
+    await waitFor(() => expect(queryCollection).toHaveBeenCalled());
     expect(screen.queryByRole("button", { name: /start scan anyway/i })).not.toBeInTheDocument();
   });
 
@@ -522,7 +828,236 @@ describe("ArchiveSearchApp", () => {
 
     await waitFor(() => expect(screen.getAllByText("No snapshots found").length).toBeGreaterThan(0));
     expect(screen.queryByText(/No HTML snapshots were found/i)).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /search full archive/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /run full scan across entire archive/i })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /start another search/i })).not.toBeInTheDocument();
+  });
+
+  it("starts a full scan from the empty state after a custom or recent scan finds nothing", async () => {
+    render(
+      <ArchiveSearchApp
+        initialParams={{
+          mock: "1",
+          url: "example.org",
+          from: "2030-01-01",
+          to: "2030-12-31"
+        }}
+      />
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /run full scan across entire archive/i })).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /run full scan across entire archive/i }));
+
+    await waitFor(() =>
+      expect(vi.mocked(ensureScanSession)).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          scanId: "scan_test",
+          scope: "all",
+          dateFrom: undefined,
+          dateTo: undefined
+        })
+      )
+    );
+  });
+
+  it("does not offer the full-scan CTA when the active scope is already full scan", async () => {
+    render(
+      <ArchiveSearchApp
+        autoStart
+        initialParams={{
+          url: "example.org",
+          scope: "all"
+        }}
+      />
+    );
+
+    await waitFor(() => expect(screen.getByLabelText("Scanned URL")).toHaveTextContent("https://example.org/"));
+    expect(screen.queryByRole("button", { name: /run full scan across entire archive/i })).not.toBeInTheDocument();
+  });
+
+  // These live-scan tests use the stored-coverage resume path (a non-empty
+  // collectionResults triggers hasStoredCoverageHistory), so the robots status
+  // is read from the seeded cache and no network robots check is needed.
+  it("re-queries a collection whose stored result only covers a narrower window during a full scan", async () => {
+    vi.mocked(findOrCreateLegacySession).mockResolvedValue({
+      scanId: "scan_legacy",
+      targetId: "target:https://windowed.example/:exact:live",
+      url: "https://windowed.example/",
+      matchType: "exact",
+      mock: false,
+      scope: "all",
+      collectionIds: ["CC-MAIN-2026-21", "CC-MAIN-2026-26"],
+      collectionListFetchedAt: 1,
+      scanWindowFrom: "2026-05-08T07:40:46",
+      scanWindowTo: "2026-06-30T00:00:00",
+      createdAt: 1,
+      updatedAt: 1
+    });
+    vi.mocked(getCoverage).mockResolvedValue({
+      targetId: "target:https://windowed.example/:exact:live",
+      ownerId: "owner_test",
+      url: "https://windowed.example/",
+      matchType: "exact",
+      mock: false,
+      collectionResults: {
+        // Stored result only covers a narrow window, so a full-archive scan must
+        // not treat this collection as already covered and must re-query it.
+        "CC-MAIN-2026-21": {
+          collection: commonCrawlMocks.collections[0],
+          status: "checked",
+          captures: [],
+          checkedAt: 1,
+          attempts: 1,
+          runs: 1,
+          window: { from: "2026-05-08", to: "2026-05-10" }
+        }
+      },
+      collectionIds: ["CC-MAIN-2026-21", "CC-MAIN-2026-26"],
+      collectionListFetchedAt: 1,
+      scanWindowFrom: "2026-05-08T07:40:46",
+      scanWindowTo: "2026-06-30T00:00:00",
+      durationMs: 100,
+      updatedAt: 1
+    });
+    localStorage.setItem(robotsCacheKey("https://windowed.example/"), JSON.stringify({
+      status: "allowed",
+      robotsUrl: "https://windowed.example/robots.txt",
+      userAgent: "CCBot",
+      checkedAt: Date.now()
+    }));
+
+    render(<ArchiveSearchApp autoStart initialParams={{ url: "windowed.example", scope: "all" }} />);
+
+    await waitFor(() => expect(queryCollection).toHaveBeenCalledTimes(2));
+    const queriedIds = vi.mocked(queryCollection).mock.calls.map((call) => call[1].id);
+    expect(queriedIds).toContain("CC-MAIN-2026-21");
+    expect(queriedIds).toContain("CC-MAIN-2026-26");
+    // A full-archive scan is not date-constrained: no window reaches the API.
+    for (const call of vi.mocked(queryCollection).mock.calls) {
+      expect(call[12]).toBeUndefined();
+    }
+  });
+
+  it("passes the custom date window to queryCollection so Common Crawl filters server-side", async () => {
+    vi.mocked(findOrCreateLegacySession).mockResolvedValue({
+      scanId: "scan_legacy",
+      targetId: "target:https://custom.example/:exact:live",
+      url: "https://custom.example/",
+      matchType: "exact",
+      mock: false,
+      scope: "custom",
+      dateFrom: "2026-05-01",
+      dateTo: "2026-05-31",
+      collectionIds: ["CC-MAIN-2026-21", "CC-MAIN-2026-26"],
+      collectionListFetchedAt: 1,
+      createdAt: 1,
+      updatedAt: 1
+    });
+    vi.mocked(getCoverage).mockResolvedValue({
+      targetId: "target:https://custom.example/:exact:live",
+      ownerId: "owner_test",
+      url: "https://custom.example/",
+      matchType: "exact",
+      mock: false,
+      // June collection is outside the May window (so it is inactive); it only
+      // exists here to make this a stored-coverage resume. The in-window May
+      // collection is uncovered and must be queried with the date window.
+      collectionResults: {
+        "CC-MAIN-2026-26": {
+          collection: commonCrawlMocks.collections[1],
+          status: "checked",
+          captures: [],
+          checkedAt: 1,
+          attempts: 1,
+          runs: 1
+        }
+      },
+      collectionIds: ["CC-MAIN-2026-21", "CC-MAIN-2026-26"],
+      collectionListFetchedAt: 1,
+      updatedAt: 1
+    });
+    localStorage.setItem(robotsCacheKey("https://custom.example/"), JSON.stringify({
+      status: "allowed",
+      robotsUrl: "https://custom.example/robots.txt",
+      userAgent: "CCBot",
+      checkedAt: Date.now()
+    }));
+
+    render(
+      <ArchiveSearchApp
+        autoStart
+        initialParams={{ url: "custom.example", scope: "custom", from: "2026-05-01", to: "2026-05-31" }}
+      />
+    );
+
+    await waitFor(() => expect(queryCollection).toHaveBeenCalled());
+    const calls = vi.mocked(queryCollection).mock.calls;
+    expect(calls.map((call) => call[1].id)).toContain("CC-MAIN-2026-21");
+    for (const call of calls) {
+      expect(call[12]).toEqual({ from: "2026-05-01", to: "2026-05-31" });
+    }
+  });
+
+  it("logs a truncation notice when a collection has more captures than the limit", async () => {
+    vi.mocked(queryCollection).mockImplementation(async (_targetUrl, collection) => ({
+      collection,
+      status: "checked",
+      captures: [],
+      checkedAt: Date.now(),
+      attempts: 1,
+      runs: 1,
+      truncated: true,
+      attemptLogs: [{ status: "checked", checkedAt: Date.now(), captureCount: 0 }]
+    }));
+    vi.mocked(findOrCreateLegacySession).mockResolvedValue({
+      scanId: "scan_legacy",
+      targetId: "target:https://truncated.example/:exact:live",
+      url: "https://truncated.example/",
+      matchType: "exact",
+      mock: false,
+      scope: "all",
+      collectionIds: ["CC-MAIN-2026-21", "CC-MAIN-2026-26"],
+      collectionListFetchedAt: 1,
+      scanWindowFrom: "2026-05-08T07:40:46",
+      scanWindowTo: "2026-06-30T00:00:00",
+      createdAt: 1,
+      updatedAt: 1
+    });
+    vi.mocked(getCoverage).mockResolvedValue({
+      targetId: "target:https://truncated.example/:exact:live",
+      ownerId: "owner_test",
+      url: "https://truncated.example/",
+      matchType: "exact",
+      mock: false,
+      // CC-MAIN-2026-21 is already fully covered so it is skipped; the remaining
+      // collection is queried and comes back truncated.
+      collectionResults: {
+        "CC-MAIN-2026-21": {
+          collection: commonCrawlMocks.collections[0],
+          status: "checked",
+          captures: [],
+          checkedAt: 1,
+          attempts: 1,
+          runs: 1
+        }
+      },
+      collectionIds: ["CC-MAIN-2026-21", "CC-MAIN-2026-26"],
+      collectionListFetchedAt: 1,
+      updatedAt: 1
+    });
+    localStorage.setItem(robotsCacheKey("https://truncated.example/"), JSON.stringify({
+      status: "allowed",
+      robotsUrl: "https://truncated.example/robots.txt",
+      userAgent: "CCBot",
+      checkedAt: Date.now()
+    }));
+
+    render(<ArchiveSearchApp autoStart initialParams={{ url: "truncated.example", scope: "all" }} />);
+
+    await waitFor(() => expect(queryCollection).toHaveBeenCalled());
+    fireEvent.click(await screen.findByRole("button", { name: /scan log/i }));
+    expect(
+      await screen.findByText(/more captures than the per-collection limit/i)
+    ).toBeInTheDocument();
   });
 });

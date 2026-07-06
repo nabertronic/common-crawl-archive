@@ -247,10 +247,6 @@ export function HistoryApp() {
     () => records.filter((record) => selectedKeySet.has(record.key)),
     [records, selectedKeySet]
   );
-  const selectedRecordsWithNewCollections = useMemo(
-    () => selectedRecords.filter((record) => newCollectionsFor(record, currentCollections).length > 0),
-    [currentCollections, selectedRecords]
-  );
   const activeFilterCount = [
     scopeFilter !== "any",
     outcomeFilter !== "all",
@@ -311,12 +307,6 @@ export function HistoryApp() {
     await refreshRecords();
   }
 
-  function handleCheckNewSelected() {
-    for (const record of selectedRecordsWithNewCollections) {
-      window.open(searchHref(record, "missing"), "_blank", "noopener,noreferrer");
-    }
-  }
-
   async function handleClearHistory() {
     if (records.length === 0) return;
     if (!window.confirm("Delete all saved scan history entries?")) return;
@@ -347,6 +337,10 @@ export function HistoryApp() {
                 <h1 className="text-xl font-black uppercase leading-none tracking-[0.18em] text-zinc-50">
                   Scan history
                 </h1>
+                <p className="mt-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-zinc-500">
+                  <span>Scans</span>
+                  <span className="text-zinc-300" suppressHydrationWarning>{records.length}</span>
+                </p>
               </div>
             </div>
             <div className="flex items-center justify-end gap-3">
@@ -454,17 +448,6 @@ export function HistoryApp() {
               >
                 <Download size={14} />
                 Export selected
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="secondary"
-                disabled={selectedRecordsWithNewCollections.length === 0}
-                onClick={handleCheckNewSelected}
-                suppressHydrationWarning
-              >
-                <RotateCcw size={14} />
-                Check new selected
               </Button>
               {hasActiveFilters ? (
                 <Button

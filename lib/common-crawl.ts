@@ -10,6 +10,13 @@ export const DEFAULT_CIRCUIT_BREAKER_THRESHOLD = 3;
 export const DEFAULT_CIRCUIT_BREAKER_WINDOW_SIZE = 8;
 export const DEFAULT_CIRCUIT_BREAKER_WINDOW_THRESHOLD = 7;
 export const DEFAULT_CDX_LIMIT = 1000;
+// Common Crawl's pywb CDX API paginates block-based results via `page`. We walk
+// pages until the server signals the end (HTTP 400 past the last page, or an
+// empty body) instead of stopping at a single 1000-record response, so hosts and
+// domains with more than one page of captures are fully covered. These caps keep
+// a single collection query bounded for a browser tab.
+export const DEFAULT_MAX_CAPTURES_PER_COLLECTION = 10_000;
+export const DEFAULT_MAX_CDX_PAGES = 100;
 export const DEFAULT_COLLECTION_LOOKBACK_MONTHS = 12;
 export const COLLECTION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 export const CDX_RESULT_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -17,7 +24,9 @@ export const LARGE_CAPTURE_LIMIT_BYTES = 15 * 1024 * 1024;
 
 const COLLECTION_CACHE_KEY = "snapshot-search:common-crawl-collections:v2";
 const LEGACY_COLLECTION_CACHE_KEY = "snapshot-search:common-crawl-collections";
-const CDX_RESULT_CACHE_PREFIX = "snapshot-search:common-crawl-cdx:v2:";
+// Bumped to v3 when pagination landed: v2 results were capped at one 1000-record
+// page and may be incomplete, so they must not be served from cache.
+const CDX_RESULT_CACHE_PREFIX = "snapshot-search:common-crawl-cdx:v3:";
 const CACHE_VERSION = 1;
 const HOST_MIN_INTERVAL_MS: Record<string, number> = {
   "index.commoncrawl.org": DEFAULT_REQUEST_SPACING_MS,
@@ -37,6 +46,24 @@ export type CommonCrawlCollection = {
 export type MatchType = "exact" | "host" | "domain";
 
 export const DEFAULT_MATCH_TYPE: MatchType = "exact";
+
+// Inclusive day range (YYYY-MM-DD) used both to constrain a CDX query server-side
+// (via the API's `from`/`to` params) and to record which window a stored result
+// is known to fully cover. An undefined window means "no date bound" (full crawl).
+export type ScanDateWindow = { from: string; to: string };
+
+// True when a stored result's coverage window is broad enough to satisfy a newly
+// requested window, so the result can be reused instead of re-fetched. A result
+// with no window (full) covers everything; a windowed result cannot satisfy an
+// unbounded (full) request. YYYY-MM-DD strings compare correctly lexicographically.
+export function resultCoversWindow(
+  resultWindow: ScanDateWindow | undefined,
+  requestedWindow: ScanDateWindow | undefined
+): boolean {
+  if (!resultWindow) return true;
+  if (!requestedWindow) return false;
+  return resultWindow.from <= requestedWindow.from && resultWindow.to >= requestedWindow.to;
+}
 
 export type CommonCrawlCapture = {
   collectionId: string;
@@ -67,6 +94,12 @@ export type CollectionCheckResult = {
   fromCache?: boolean;
   blockedCaptures?: BlockedCapture[];
   attemptLogs?: CollectionAttemptLog[];
+  // Set when pagination hit the per-collection capture/page cap and stopped
+  // before exhausting the index, so the capture list is a prefix of what exists.
+  truncated?: boolean;
+  // The date window this result is known to fully cover, when the query was
+  // constrained server-side. Undefined means the whole crawl was queried.
+  window?: ScanDateWindow;
 };
 
 export type CollectionAttemptLog = {
@@ -92,6 +125,7 @@ export type ScanLogEvent = {
     | "auto-retry-skipped"
     | "cache-hit"
     | "collection-skipped"
+    | "collection-truncated"
     | "fresh-scan-cleared"
     | "html-zip-cancelled"
     | "html-zip-completed"
@@ -114,6 +148,10 @@ export type ScanLogEvent = {
 };
 
 export type ScanLogEntry = CollectionCheckResult | ScanLogEvent;
+
+export function shouldPersistScanLogEntry(entry: ScanLogEntry) {
+  return !("kind" in entry && entry.event === "stored-coverage-loaded");
+}
 
 export type BlockedCapture = {
   capture: CommonCrawlCapture;
@@ -379,18 +417,43 @@ function isRetainedCapture(capture: CommonCrawlCapture): boolean {
 export function buildCdxjUrl(
   targetUrl: string,
   collection: CommonCrawlCollection,
-  matchType: MatchType = DEFAULT_MATCH_TYPE
+  matchType: MatchType = DEFAULT_MATCH_TYPE,
+  page?: number,
+  dateWindow?: ScanDateWindow
 ): string {
   const params = new URLSearchParams({
     url: targetUrl,
     output: "json",
-    fl: "timestamp,url,status,mime,digest,filename,offset,length,redirect",
-    limit: String(DEFAULT_CDX_LIMIT)
+    fl: "timestamp,url,status,mime,digest,filename,offset,length,redirect"
   });
   if (matchType !== "exact") {
     params.set("matchType", matchType);
   }
+  // Constrain the query server-side so Common Crawl only returns captures within
+  // the window, instead of fetching everything and filtering in the browser.
+  // `from`/`to` take 14-digit timestamps; pad the day to the full inclusive range.
+  if (dateWindow) {
+    params.set("from", `${dateWindow.from.replace(/-/g, "")}000000`);
+    params.set("to", `${dateWindow.to.replace(/-/g, "")}235959`);
+  }
+  // No fixed `limit`: it caps a single response and would silently drop records
+  // beyond the cap on every page. Pagination walks the full result set via
+  // `page` instead, bounded client-side by maxCaptures/maxPages.
+  if (page !== undefined) {
+    params.set("page", String(page));
+  }
   return `${collection.cdxApi}?${params.toString()}`;
+}
+
+// Counts non-blank lines in a raw CDXJ response so pagination can distinguish an
+// in-range page (has lines, keep going) from the end of results (empty body),
+// independently of how many captures survive the HTML/redirect filter.
+function countCdxLines(text: string): number {
+  let count = 0;
+  for (const line of text.split(/\r?\n/)) {
+    if (line.trim()) count += 1;
+  }
+  return count;
 }
 
 export function filterCollectionsByRecentMonths(
@@ -550,8 +613,7 @@ function retryDelayForAttempt(
 ) {
   const exponentialDelay = retryDelayMs * 2 ** attempt;
   const boundedRetryAfter = retryAfterMs === undefined ? 0 : Math.min(retryAfterMs, maxRetryDelayMs);
-  const baseDelay = Math.min(maxRetryDelayMs, Math.max(exponentialDelay, boundedRetryAfter));
-  return Math.min(maxRetryDelayMs, baseDelay + Math.round(baseDelay * 0.2 * Math.random()));
+  return Math.min(maxRetryDelayMs, Math.max(exponentialDelay, boundedRetryAfter));
 }
 
 function shouldRetryCollectionError(errorKind: CollectionErrorKind) {
@@ -656,15 +718,14 @@ export async function queryCollection(
   maxRetryDelayMs = DEFAULT_MAX_RETRY_DELAY_MS,
   matchType: MatchType = DEFAULT_MATCH_TYPE,
   onAttempt?: (attempt: CollectionAttemptLog) => void,
-  onRetryWait?: (delayMs: number) => void
+  onRetryWait?: (delayMs: number) => void,
+  maxCaptures = DEFAULT_MAX_CAPTURES_PER_COLLECTION,
+  maxPages = DEFAULT_MAX_CDX_PAGES,
+  dateWindow?: ScanDateWindow
 ): Promise<CollectionCheckResult> {
-  const cachedResult = readCachedCdxResult(targetUrl, collection, matchType);
+  const cachedResult = readCachedCdxResult(targetUrl, collection, matchType, dateWindow);
   if (cachedResult) return cachedResult;
 
-  let lastError = "request failed";
-  let lastErrorKind: CollectionErrorKind = "network_no_response";
-  let lastHttpStatus: number | undefined;
-  let retryAfterMs: number | undefined;
   let attempts = 0;
   const attemptLogs: CollectionAttemptLog[] = [];
   const recordAttempt = (attemptLog: CollectionAttemptLog) => {
@@ -672,135 +733,175 @@ export async function queryCollection(
     onAttempt?.(attemptLog);
   };
 
-  for (let attempt = 0; attempt <= retryCount; attempt += 1) {
-    attempts = attempt + 1;
-    const requestSignal = createChildSignal(signal, timeoutMs);
-    try {
-      const response = await commonCrawlFetch(buildCdxjUrl(targetUrl, collection, matchType), {
-        headers: { Accept: "application/json" },
-        signal: requestSignal
-      });
+  // Fetches one CDX page, applying the retry/backoff policy per request. The
+  // outcome tells the pagination loop whether to keep walking pages, stop
+  // cleanly, or surface a hard failure for the whole collection.
+  type PageOutcome =
+    | { kind: "page"; captures: CommonCrawlCapture[]; rawLineCount: number; httpStatus: number; checkedAt: number }
+    | { kind: "end"; httpStatus?: number; checkedAt: number }
+    | { kind: "failed"; error: string; errorKind: CollectionErrorKind; httpStatus?: number; checkedAt: number };
 
-      if (response.status === 404) {
+  const fetchPage = async (page: number): Promise<PageOutcome> => {
+    let lastError = "request failed";
+    let lastErrorKind: CollectionErrorKind = "network_no_response";
+    let lastHttpStatus: number | undefined;
+    let retryAfterMs: number | undefined;
+
+    for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+      attempts += 1;
+      const requestSignal = createChildSignal(signal, timeoutMs);
+      try {
+        const response = await commonCrawlFetch(buildCdxjUrl(targetUrl, collection, matchType, page, dateWindow), {
+          headers: { Accept: "application/json" },
+          signal: requestSignal
+        });
+
+        if (response.status === 404) {
+          // pywb returns 404 with a JSON error body when there are no captures.
+          const checkedAt = Date.now();
+          recordAttempt({ status: "checked", checkedAt, httpStatus: response.status, captureCount: 0 });
+          return { kind: "end", httpStatus: response.status, checkedAt };
+        }
+
+        if (response.status === 400 && page > 0) {
+          // Requesting a page past the last one is how pywb signals the end.
+          return { kind: "end", httpStatus: response.status, checkedAt: Date.now() };
+        }
+
+        if (response.ok) {
+          const text = await response.text();
+          const rawLineCount = countCdxLines(text);
+          const captures = parseCdxjResponse(text, collection);
+          const checkedAt = Date.now();
+          recordAttempt({ status: "checked", checkedAt, httpStatus: response.status, captureCount: captures.length });
+          return { kind: "page", captures, rawLineCount, httpStatus: response.status, checkedAt };
+        }
+
+        lastHttpStatus = response.status;
+        retryAfterMs = parseRetryAfter(response.headers.get("Retry-After"));
+        const described = describeHttpError(response, await readErrorBody(response));
+        lastError = described.error;
+        lastErrorKind = described.errorKind;
         const checkedAt = Date.now();
         recordAttempt({
-          status: "checked",
-          checkedAt,
-          httpStatus: response.status,
-          captureCount: 0
-        });
-        const result: CollectionCheckResult = {
-          collection,
-          status: "checked",
-          captures: [],
-          checkedAt,
-          httpStatus: response.status,
-          attempts,
-          runs: 1,
-          attemptLogs
-        };
-        writeCachedCdxResult(targetUrl, collection, matchType, result);
-        return result;
-      }
-
-      if (response.ok) {
-        const captures = parseCdxjResponse(await response.text(), collection);
-        const checkedAt = Date.now();
-        recordAttempt({
-          status: "checked",
-          checkedAt,
-          httpStatus: response.status,
-          captureCount: captures.length
-        });
-        const result: CollectionCheckResult = {
-          collection,
-          status: "checked",
-          captures,
-          checkedAt,
-          httpStatus: response.status,
-          attempts,
-          runs: 1,
-          blockedCaptures: blockedCapturesFor(captures),
-          attemptLogs
-        };
-        writeCachedCdxResult(targetUrl, collection, matchType, result);
-        return result;
-      }
-
-      lastHttpStatus = response.status;
-      retryAfterMs = parseRetryAfter(response.headers.get("Retry-After"));
-      const described = describeHttpError(response, await readErrorBody(response));
-      lastError = described.error;
-      lastErrorKind = described.errorKind;
-      const checkedAt = Date.now();
-      recordAttempt({
-        status: "not-checked",
-        checkedAt,
-        httpStatus: lastHttpStatus,
-        error: lastError,
-        errorKind: lastErrorKind
-      });
-
-      if (response.status !== 429 && response.status < 500) {
-        return {
-          collection,
           status: "not-checked",
-          captures: [],
           checkedAt,
-          httpStatus: response.status,
+          httpStatus: lastHttpStatus,
           error: lastError,
-          errorKind: lastErrorKind,
-          attempts,
-          runs: 1,
-          attemptLogs
-        };
+          errorKind: lastErrorKind
+        });
+
+        if (response.status !== 429 && response.status < 500) {
+          return { kind: "failed", error: lastError, errorKind: lastErrorKind, httpStatus: response.status, checkedAt };
+        }
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        lastHttpStatus = undefined;
+        retryAfterMs = undefined;
+        const described = describeRequestError(error, requestSignal);
+        lastError = described.error;
+        lastErrorKind = described.errorKind;
+        recordAttempt({
+          status: "not-checked",
+          checkedAt: Date.now(),
+          error: lastError,
+          errorKind: lastErrorKind
+        });
       }
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      lastHttpStatus = undefined;
-      retryAfterMs = undefined;
-      const described = describeRequestError(error, requestSignal);
-      lastError = described.error;
-      lastErrorKind = described.errorKind;
-      recordAttempt({
-        status: "not-checked",
-        checkedAt: Date.now(),
-        error: lastError,
-        errorKind: lastErrorKind
-      });
+
+      if (attempt < retryCount && shouldRetryCollectionError(lastErrorKind)) {
+        const delayMs = retryDelayForAttempt(attempt, retryDelayMs, retryAfterMs, maxRetryDelayMs);
+        onRetryWait?.(delayMs);
+        await wait(delayMs, signal);
+      } else {
+        break;
+      }
     }
 
-    if (attempt < retryCount && shouldRetryCollectionError(lastErrorKind)) {
-      const delayMs = retryDelayForAttempt(attempt, retryDelayMs, retryAfterMs, maxRetryDelayMs);
-      onRetryWait?.(delayMs);
-      await wait(delayMs, signal);
-    } else {
+    return { kind: "failed", error: lastError, errorKind: lastErrorKind, httpStatus: lastHttpStatus, checkedAt: Date.now() };
+  };
+
+  const allCaptures: CommonCrawlCapture[] = [];
+  let lastHttpStatus: number | undefined;
+  let lastCheckedAt = Date.now();
+  let truncated = false;
+
+  for (let page = 0; page < maxPages; page += 1) {
+    const outcome = await fetchPage(page);
+    lastCheckedAt = outcome.checkedAt;
+
+    if (outcome.kind === "failed") {
+      // A page failed after retries. Report the whole collection as not-checked
+      // so it is retried in full rather than cached as a partial result.
+      return {
+        collection,
+        status: "not-checked",
+        captures: [],
+        checkedAt: outcome.checkedAt,
+        httpStatus: outcome.httpStatus,
+        error: outcome.error,
+        errorKind: outcome.errorKind,
+        attempts,
+        runs: 1,
+        attemptLogs
+      };
+    }
+
+    if (outcome.httpStatus !== undefined) lastHttpStatus = outcome.httpStatus;
+
+    if (outcome.kind === "end" || outcome.rawLineCount === 0) {
       break;
+    }
+
+    allCaptures.push(...outcome.captures);
+
+    if (allCaptures.length >= maxCaptures) {
+      truncated = true;
+      break;
+    }
+
+    if (page + 1 >= maxPages) {
+      truncated = true;
     }
   }
 
-  return {
+  const captures = allCaptures
+    .slice(0, maxCaptures)
+    .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  const result: CollectionCheckResult = {
     collection,
-    status: "not-checked",
-    captures: [],
-    checkedAt: Date.now(),
+    status: "checked",
+    captures,
+    checkedAt: lastCheckedAt,
     httpStatus: lastHttpStatus,
-    error: lastError,
-    errorKind: lastErrorKind,
     attempts,
     runs: 1,
-    attemptLogs
+    blockedCaptures: blockedCapturesFor(captures),
+    attemptLogs,
+    ...(truncated ? { truncated: true } : {}),
+    ...(dateWindow ? { window: dateWindow } : {})
   };
+  writeCachedCdxResult(targetUrl, collection, matchType, dateWindow, result);
+  return result;
 }
 
-function cdxCacheKey(targetUrl: string, collection: CommonCrawlCollection, matchType: MatchType): string {
+function cdxCacheKey(
+  targetUrl: string,
+  collection: CommonCrawlCollection,
+  matchType: MatchType,
+  dateWindow?: ScanDateWindow
+): string {
   return `${CDX_RESULT_CACHE_PREFIX}${encodeURIComponent(
     JSON.stringify({
       collectionId: collection.id,
       targetUrl,
       matchType,
       retainedCaptures: "html-200-and-redirects",
-      limit: DEFAULT_CDX_LIMIT
+      paginated: true,
+      maxCaptures: DEFAULT_MAX_CAPTURES_PER_COLLECTION,
+      // A windowed result is not interchangeable with a full one, so the window
+      // is part of the cache identity.
+      window: dateWindow ? `${dateWindow.from}:${dateWindow.to}` : "full"
     })
   )}`;
 }
@@ -808,9 +909,10 @@ function cdxCacheKey(targetUrl: string, collection: CommonCrawlCollection, match
 function readCachedCdxResult(
   targetUrl: string,
   collection: CommonCrawlCollection,
-  matchType: MatchType
+  matchType: MatchType,
+  dateWindow?: ScanDateWindow
 ): CollectionCheckResult | undefined {
-  const record = readJsonStorage<CdxResultCacheRecord>(cdxCacheKey(targetUrl, collection, matchType));
+  const record = readJsonStorage<CdxResultCacheRecord>(cdxCacheKey(targetUrl, collection, matchType, dateWindow));
   if (!record || record.version !== CACHE_VERSION || Date.now() - record.fetchedAt > CDX_RESULT_CACHE_TTL_MS) {
     return undefined;
   }
@@ -831,10 +933,11 @@ function writeCachedCdxResult(
   targetUrl: string,
   collection: CommonCrawlCollection,
   matchType: MatchType,
+  dateWindow: ScanDateWindow | undefined,
   result: CollectionCheckResult
 ): void {
   if (result.status !== "checked") return;
-  writeJsonStorage(cdxCacheKey(targetUrl, collection, matchType), {
+  writeJsonStorage(cdxCacheKey(targetUrl, collection, matchType, dateWindow), {
     version: CACHE_VERSION,
     fetchedAt: Date.now(),
     result
@@ -867,6 +970,7 @@ export async function searchCollections({
   circuitBreakerWindowSize = DEFAULT_CIRCUIT_BREAKER_WINDOW_SIZE,
   circuitBreakerWindowThreshold = DEFAULT_CIRCUIT_BREAKER_WINDOW_THRESHOLD,
   matchType = DEFAULT_MATCH_TYPE,
+  dateWindow,
   onResult,
   onProgress,
   onStop
@@ -884,6 +988,7 @@ export async function searchCollections({
   circuitBreakerWindowSize?: number;
   circuitBreakerWindowThreshold?: number;
   matchType?: MatchType;
+  dateWindow?: ScanDateWindow;
   onResult?: (result: CollectionCheckResult) => void;
   onProgress?: (progress: SearchProgress) => void;
   onStop?: (reason: SearchStopReason) => void;
@@ -922,7 +1027,12 @@ export async function searchCollections({
           retryCount,
           retryDelayMs,
           maxRetryDelayMs,
-          matchType
+          matchType,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          dateWindow
         );
         checked += 1;
         hits += result.captures.length;

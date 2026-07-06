@@ -108,4 +108,21 @@ describe("scan result merging", () => {
 
     expect(mergeCollectionResults([first], [second])[0].captures.map((item) => item.offset)).toEqual(["100", "300"]);
   });
+
+  it("promotes a windowed result to full coverage once a full scan merges in", () => {
+    const windowed = result({ captures: [capture()], window: { from: "2024-03-10", to: "2024-03-20" } });
+    const full = result({ captures: [capture({ offset: "300" })] });
+
+    const merged = mergeCollectionResults([windowed], [full])[0];
+    expect(merged.window).toBeUndefined();
+    expect(merged.captures.map((item) => item.offset)).toEqual(["100", "300"]);
+  });
+
+  it("keeps a windowed coverage claim when only windowed results merge", () => {
+    const first = result({ captures: [capture()], window: { from: "2024-03-10", to: "2024-03-20" } });
+    const second = result({ captures: [capture({ offset: "300" })], window: { from: "2024-03-10", to: "2024-03-20" } });
+
+    const merged = mergeCollectionResults([first], [second])[0];
+    expect(merged.window).toEqual({ from: "2024-03-10", to: "2024-03-20" });
+  });
 });

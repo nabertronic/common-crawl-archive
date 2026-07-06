@@ -28,6 +28,7 @@ export function mergeCollectionResult(
       ...existing,
       captures: dedupeCaptures([...existing.captures, ...next.captures]),
       blockedCaptures: mergeBlockedCaptures(existing.blockedCaptures, next.blockedCaptures),
+      window: mergeCoverageWindow(existing.window, next.window),
       attempts,
       runs,
       checkedAt: next.checkedAt ?? existing.checkedAt,
@@ -40,6 +41,7 @@ export function mergeCollectionResult(
       ...next,
       captures: existing.captures,
       blockedCaptures: mergeBlockedCaptures(existing.blockedCaptures, next.blockedCaptures),
+      window: existing.window,
       attempts,
       runs,
       checkedAt: next.checkedAt ?? existing.checkedAt
@@ -82,6 +84,19 @@ export function mergeCollectionResults(...groups: CollectionCheckResult[][]): Co
     }
   }
   return Array.from(byCollection.values());
+}
+
+// Combines the coverage windows of two merged checked results. If either side
+// queried the full crawl (undefined window), the union covers everything.
+// Otherwise the merged captures are unioned but we conservatively keep the
+// existing window claim so coverage is never over-stated — a differently
+// windowed rescan simply re-fetches (served from the CDX cache).
+function mergeCoverageWindow(
+  existing: CollectionCheckResult["window"],
+  next: CollectionCheckResult["window"]
+): CollectionCheckResult["window"] {
+  if (!existing || !next) return undefined;
+  return existing;
 }
 
 function mergeBlockedCaptures(
