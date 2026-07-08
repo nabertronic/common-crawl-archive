@@ -26,6 +26,10 @@ export function proxy(request: NextRequest) {
     `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isProd ? "" : " 'unsafe-eval'"}`,
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
+    // Compute worker is same-origin bundled code; some bundlers instantiate it
+    // from a blob: URL, which worker-src must permit (it does not inherit the
+    // strict-dynamic script-src, only default-src, which is 'self').
+    "worker-src 'self' blob:",
     "font-src 'self'",
     "connect-src 'self' https://index.commoncrawl.org https://data.commoncrawl.org",
     "frame-src 'self'",

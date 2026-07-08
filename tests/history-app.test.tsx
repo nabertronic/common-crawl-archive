@@ -76,8 +76,9 @@ vi.mock("@/lib/capture-store", async () => {
   const actual = await vi.importActual<typeof import("@/lib/capture-store")>("@/lib/capture-store");
   return {
     ...actual,
-    listSearches: vi.fn(async () => storedRecords),
-    deleteSearch: vi.fn(),
+    listHistorySummaries: vi.fn(async () => storedRecords.map((record) => actual.historySummaryFromStoredSearch(record, "local"))),
+    countCachedCaptureKeys: vi.fn(async () => 0),
+    deleteCachedCaptureKeys: vi.fn(),
     deleteSearches: vi.fn(),
     subscribeToSearchChanges: vi.fn(() => () => {})
   };
@@ -145,10 +146,11 @@ describe("HistoryApp", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /open menu/i }));
 
-    const menuItems = screen.getAllByRole("menuitem");
-    expect(menuItems.map((item) => item.textContent)).toEqual(["New Scan", "Settings"]);
-    expect(menuItems[0]).toHaveAttribute("href", "/");
-    expect(menuItems[1]).toHaveAttribute("href", "/settings");
+    const menu = screen.getByRole("navigation", { name: "App navigation" });
+    const menuLinks = Array.from(menu.querySelectorAll("a"));
+    expect(menuLinks.map((item) => item.textContent)).toEqual(["New Scan", "Settings"]);
+    expect(menuLinks[0]).toHaveAttribute("href", "/");
+    expect(menuLinks[1]).toHaveAttribute("href", "/settings");
   });
 
   it("shows narrower scans even when a broader complete scan exists", async () => {
@@ -182,7 +184,7 @@ describe("HistoryApp", () => {
 
     await waitFor(() => expect(screen.getByText("blog.example.com")).toBeInTheDocument());
     expect(screen.getByText("example.com")).toBeInTheDocument();
-    expect(screen.getByText("Scans").parentElement).toHaveTextContent("4");
+    expect(screen.getByText("1-4 of 4")).toBeInTheDocument();
   });
 
   it("renders global export and delete actions only once in the top toolbar", async () => {

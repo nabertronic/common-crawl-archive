@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { headers } from "next/headers";
 import "./globals.css";
 import { APP_NAME } from "@/lib/app-meta";
+import { DevTools } from "@/components/dev/dev-tools";
 
 export const metadata: Metadata = {
   title: APP_NAME,
@@ -17,7 +18,11 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
   await headers();
   return (
     <html lang="en" suppressHydrationWarning>
-      <body>{children}</body>
+      <body>
+        {children}
+        {/* Dev-only Performance overlay; its chunk is tree-shaken out of prod. */}
+        <DevTools />
+      </body>
     </html>
   );
 }

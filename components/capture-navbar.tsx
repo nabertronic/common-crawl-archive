@@ -11,17 +11,19 @@ type NavBarProps = {
   url: string;
   timestamp: string;
   captures: CommonCrawlCapture[];
+  sortedCaptures?: CommonCrawlCapture[];
   currentIndex: number;
   backHref: string | null;
   onJumpTo: (index: number) => void;
 };
 
 const MONTH_SHORT = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+const MAX_RENDERED_TIMELINE_TICKS = 1_200;
 
-export function CaptureNavBar({ url, timestamp, captures, currentIndex, backHref, onJumpTo }: NavBarProps) {
+export function CaptureNavBar({ url, timestamp, captures, sortedCaptures, currentIndex, backHref, onJumpTo }: NavBarProps) {
   const sorted = useMemo(
-    () => [...captures].sort((a, b) => a.timestamp.localeCompare(b.timestamp)),
-    [captures]
+    () => sortedCaptures ?? [...captures].sort((a, b) => a.timestamp.localeCompare(b.timestamp)),
+    [captures, sortedCaptures]
   );
 
   const indexInSorted = useMemo(() => {
@@ -261,8 +263,9 @@ function CaptureTimeline({
         {yearGroups.map(({ year, captures }) => {
           const isSelected = currentYear === year;
           const yearCount = captures.length;
+          const renderedCaptures = sampleTimelineCaptures(captures, MAX_RENDERED_TIMELINE_TICKS);
           const hasCount = yearCount > 0;
-          const columnWidth = Math.max(MIN_COL_WIDTH, yearCount * (TICK_WIDTH + TICK_GAP) + 6);
+          const columnWidth = Math.max(MIN_COL_WIDTH, renderedCaptures.length * (TICK_WIDTH + TICK_GAP) + 6);
           return (
             <div
               key={year}
@@ -278,7 +281,7 @@ function CaptureTimeline({
                 )}
                 style={{ height: `${BAR_AREA_HEIGHT}px`, gap: `${TICK_GAP}px` }}
               >
-                {captures.map(({ capture, sortedIndex }) => {
+                {renderedCaptures.map(({ capture, sortedIndex }) => {
                   const isCurrent = sortedIndex === currentIndex;
                   const dayKey = capture.timestamp.slice(0, 8);
                   const capturesOnDay = dayCaptureCounts.get(dayKey) ?? 1;
@@ -343,6 +346,18 @@ function CaptureTimeline({
       </div>
     </div>
   );
+}
+
+function sampleTimelineCaptures(
+  captures: { capture: CommonCrawlCapture; sortedIndex: number }[],
+  maxCount: number
+) {
+  if (captures.length <= maxCount) return captures;
+  const stride = Math.ceil(captures.length / maxCount);
+  const sampled = captures.filter((_, index) => index % stride === 0);
+  const last = captures[captures.length - 1];
+  if (last && sampled[sampled.length - 1]?.sortedIndex !== last.sortedIndex) sampled.push(last);
+  return sampled;
 }
 
 function CaptureTickHover({

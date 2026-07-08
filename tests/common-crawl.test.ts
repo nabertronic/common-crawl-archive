@@ -4,15 +4,18 @@ import {
   buildResultsBackHref,
   buildCdxjUrl,
   buildRangeHeader,
+  commonCrawlFetch,
   fetchCollections,
   filterCollectionsByRecentMonths,
   filterCollectionsByDateRange,
+  getCommonCrawlRateLimitSnapshot,
   isLikelyCommonCrawlAvailabilityIssue,
   isLikelyRateLimitError,
   LARGE_CAPTURE_LIMIT_BYTES,
   parseCdxjResponse,
   parseCollections,
   queryCollection,
+  resetCommonCrawlRateLimitState,
   resultCoversWindow,
   searchCollections,
   searchUrlCoversTarget,
@@ -32,6 +35,7 @@ describe("Common Crawl client", () => {
     const storage = new Map<string, string>();
     vi.stubGlobal("localStorage", {
       getItem: vi.fn((key: string) => storage.get(key) ?? null),
+      key: vi.fn((index: number) => Array.from(storage.keys())[index] ?? null),
       setItem: vi.fn((key: string, value: string) => {
         storage.set(key, value);
       }),
@@ -40,8 +44,12 @@ describe("Common Crawl client", () => {
       }),
       clear: vi.fn(() => {
         storage.clear();
-      })
+      }),
+      get length() {
+        return storage.size;
+      }
     });
+    resetCommonCrawlRateLimitState();
   });
 
   it("parses and sorts collections newest first", () => {
@@ -196,6 +204,76 @@ describe("Common Crawl client", () => {
     expect(buildCdxjUrl("https://example.com/", collection, "domain")).toContain("matchType=domain");
   });
 
+  it("queries the exact URL only once because the CDX index is scheme-less", async () => {
+    const requestedTargets: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const requested = typeof input === "string" ? input : input.toString();
+        requestedTargets.push(new URL(requested).searchParams.get("url") ?? "");
+        return new Response("", { status: 404 });
+      })
+    );
+
+    const result = await queryCollection("https://example.com/path", collection, undefined, 1000, 0);
+
+    expect(result.status).toBe("checked");
+    expect(requestedTargets).toEqual(["https://example.com/path"]);
+  });
+
+  it("retains http and https captures returned by a single exact query", async () => {
+    // Common Crawl's CDX index is keyed by a scheme-less SURT, so one query for
+    // the https URL already returns captures crawled under both schemes.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const requested = typeof input === "string" ? input : input.toString();
+        const url = new URL(requested);
+        if (url.searchParams.get("page") !== "0") return new Response("", { status: 200 });
+        const body = [
+          {
+            timestamp: "20260101000000",
+            url: "https://example.com/",
+            status: "200",
+            mime: "text/html",
+            filename: "crawl-data/test.warc.gz",
+            offset: "10",
+            length: "100"
+          },
+          {
+            timestamp: "20260102000000",
+            url: "http://example.com/",
+            status: "200",
+            mime: "text/html",
+            filename: "crawl-data/test.warc.gz",
+            offset: "20",
+            length: "100"
+          }
+        ]
+          .map((record) => JSON.stringify(record))
+          .join("\n");
+        return new Response(body, { status: 200 });
+      })
+    );
+
+    const result = await queryCollection("https://example.com/", collection, undefined, 1000, 0);
+
+    expect(result.status).toBe("checked");
+    expect(result.captures.map((capture) => capture.url)).toEqual([
+      "http://example.com/",
+      "https://example.com/"
+    ]);
+  });
+
+  it("does not duplicate host or domain scans by protocol", async () => {
+    const fetchMock = vi.fn(async () => new Response("", { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await queryCollection("https://example.com/", collection, undefined, 1000, 0, undefined, undefined, "host");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("filters collections that overlap a custom date range", () => {
     const collections = filterCollectionsByDateRange(
       [
@@ -310,6 +388,7 @@ describe("Common Crawl client", () => {
     expect(result.httpStatus).toBe(500);
     expect(result.error).toBe("SlowDown response from Common Crawl");
     expect(result.errorKind).toBe("http_500_slowdown");
+    expect(getCommonCrawlRateLimitSnapshot().pace).toBe("cautious");
   });
 
   it("retries when Common Crawl asks us to slow down", async () => {
@@ -357,6 +436,130 @@ describe("Common Crawl client", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
+  it("records Common Crawl availability signals for pacing diagnostics", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("busy", { status: 503 }))
+      .mockResolvedValueOnce(new Response("", { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await queryCollection("https://example.com/busy", collection, undefined, 1000, 0);
+    const busySnapshot = getCommonCrawlRateLimitSnapshot();
+    expect(busySnapshot.requestCount).toBe(1);
+    expect(busySnapshot.availabilitySignalCount).toBe(1);
+    expect(busySnapshot.consecutiveAvailabilitySignals).toBe(1);
+    expect(busySnapshot.lastStatus).toBe(503);
+    expect(busySnapshot.pace).toBe("cautious");
+
+    await queryCollection("https://example.com/empty", collection, undefined, 1000, 0, undefined, undefined, "host");
+    const recoveredSnapshot = getCommonCrawlRateLimitSnapshot();
+    expect(recoveredSnapshot.requestCount).toBe(2);
+    expect(recoveredSnapshot.availabilitySignalCount).toBe(1);
+    expect(recoveredSnapshot.consecutiveAvailabilitySignals).toBe(0);
+    expect(recoveredSnapshot.lastStatus).toBe(404);
+    expect(recoveredSnapshot.pace).toBe("cautious");
+    expect(recoveredSnapshot.cleanRequestCount).toBe(1);
+  });
+
+  it("recovers one pace step after each ten clean collections until normal", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("rate limited", { status: 429 }))
+      .mockImplementation(async () => new Response("", { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await queryCollection("https://example.com/rate-limited", collection, undefined, 1000, 0);
+    expect(getCommonCrawlRateLimitSnapshot().pace).toBe("cooldown");
+
+    for (let index = 0; index < 10; index += 1) {
+      await queryCollection(`https://example.com/clean-cautious-${index}`, collection, undefined, 1000, 0);
+    }
+    expect(getCommonCrawlRateLimitSnapshot().pace).toBe("cautious");
+
+    for (let index = 0; index < 10; index += 1) {
+      await queryCollection(`https://example.com/clean-normal-${index}`, collection, undefined, 1000, 0);
+    }
+    expect(getCommonCrawlRateLimitSnapshot().pace).toBe("normal");
+  });
+
+  it("does not slow the adaptive pace for gateway timeouts", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("gateway timeout", { status: 504 })));
+
+    await queryCollection("https://example.com/gateway-timeout", collection, undefined, 1000, 0);
+    const snapshot = getCommonCrawlRateLimitSnapshot();
+
+    expect(snapshot.pace).toBe("normal");
+    expect(snapshot.availabilitySignalCount).toBe(0);
+    expect(snapshot.lastStatus).toBe(504);
+  });
+
+  it("retries bad gateway responses without slowing the adaptive pace", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(new Response("bad gateway", { status: 502 }))
+        .mockResolvedValueOnce(new Response("", { status: 404 }))
+    );
+
+    const result = await queryCollection(
+      "https://example.com/bad-gateway",
+      collection,
+      undefined,
+      1000,
+      1,
+      0,
+      undefined,
+      "host"
+    );
+    const snapshot = getCommonCrawlRateLimitSnapshot();
+
+    expect(result.status).toBe("checked");
+    expect(result.attempts).toBe(2);
+    expect(result.attemptLogs?.map((attempt) => attempt.attemptNumber)).toEqual([1, 2]);
+    expect(snapshot.pace).toBe("normal");
+    expect(snapshot.availabilitySignalCount).toBe(0);
+    expect(snapshot.lastStatus).toBe(404);
+  });
+
+  it("slows the adaptive pace for repeated bad gateway responses", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("bad gateway", { status: 502 })));
+
+    await queryCollection("https://example.com/bad-gateway-one", collection, undefined, 1000, 0);
+    const firstSnapshot = getCommonCrawlRateLimitSnapshot();
+    expect(firstSnapshot.badGatewayCount).toBe(1);
+    expect(firstSnapshot.availabilitySignalCount).toBe(0);
+    expect(firstSnapshot.pace).toBe("normal");
+
+    await queryCollection("https://example.com/bad-gateway-two", collection, undefined, 1000, 0);
+    const secondSnapshot = getCommonCrawlRateLimitSnapshot();
+    expect(secondSnapshot.badGatewayCount).toBe(2);
+    expect(secondSnapshot.availabilitySignalCount).toBe(1);
+    expect(secondSnapshot.pace).toBe("cautious");
+  });
+
+  it("applies adaptive pacing to Common Crawl data downloads", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("rate limited", { status: 429 }))
+      .mockImplementation(async () => new Response("partial content", { status: 206 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await commonCrawlFetch("https://data.commoncrawl.org/crawl-data/example.warc.gz");
+    const limited = getCommonCrawlRateLimitSnapshot("data.commoncrawl.org");
+    expect(limited.pace).toBe("cooldown");
+    expect(limited.availabilitySignalCount).toBe(1);
+    expect(limited.lastStatus).toBe(429);
+
+    for (let index = 0; index < 10; index += 1) {
+      await commonCrawlFetch(`https://data.commoncrawl.org/crawl-data/example-${index}.warc.gz`);
+    }
+
+    const recovered = getCommonCrawlRateLimitSnapshot("data.commoncrawl.org");
+    expect(recovered.pace).toBe("cautious");
+    expect(recovered.cleanRequestCount).toBe(0);
+    expect(recovered.lastStatus).toBe(206);
+  });
+
   it("uses exponential retry delays and Retry-After hints for transient failures", async () => {
     const delays: number[] = [];
     let call = 0;
@@ -378,13 +581,14 @@ describe("Common Crawl client", () => {
       2,
       1,
       100,
-      "exact",
+      "host",
       undefined,
       (delayMs) => delays.push(delayMs)
     );
 
     expect(result.status).toBe("checked");
     expect(result.attempts).toBe(3);
+    expect(result.attemptLogs?.map((attempt) => attempt.attemptNumber)).toEqual([1, 2, 3]);
     expect(delays).toEqual([1, 3]);
   });
 
@@ -410,9 +614,27 @@ describe("Common Crawl client", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const first = await queryCollection("https://example.com/cache", collection, undefined, 1000, 0);
+    const first = await queryCollection(
+      "https://example.com/cache",
+      collection,
+      undefined,
+      1000,
+      0,
+      undefined,
+      undefined,
+      "host"
+    );
     const callsAfterFirst = fetchMock.mock.calls.length;
-    const second = await queryCollection("https://example.com/cache", collection, undefined, 1000, 0);
+    const second = await queryCollection(
+      "https://example.com/cache",
+      collection,
+      undefined,
+      1000,
+      0,
+      undefined,
+      undefined,
+      "host"
+    );
 
     expect(first.fromCache).toBeUndefined();
     expect(first.captures).toHaveLength(1);
@@ -445,7 +667,16 @@ describe("Common Crawl client", () => {
       })
     );
 
-    const result = await queryCollection("https://example.com/large", collection, undefined, 1000, 0);
+    const result = await queryCollection(
+      "https://example.com/large",
+      collection,
+      undefined,
+      1000,
+      0,
+      undefined,
+      undefined,
+      "host"
+    );
     expect(result.blockedCaptures).toHaveLength(1);
     expect(result.blockedCaptures?.[0].sizeBytes).toBe(LARGE_CAPTURE_LIMIT_BYTES + 1);
   });
@@ -475,7 +706,7 @@ describe("Common Crawl client", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await queryCollection("https://example.com/", collection, undefined, 1000, 0);
+    const result = await queryCollection("https://example.com/", collection, undefined, 1000, 0, undefined, undefined, "host");
 
     expect(result.status).toBe("checked");
     expect(result.captures).toHaveLength(3);
@@ -514,7 +745,7 @@ describe("Common Crawl client", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await queryCollection("https://example.com/", collection, undefined, 1000, 0);
+    const result = await queryCollection("https://example.com/", collection, undefined, 1000, 0, undefined, undefined, "host");
 
     expect(result.status).toBe("checked");
     expect(result.captures).toHaveLength(1);
@@ -536,7 +767,7 @@ describe("Common Crawl client", () => {
       0,
       undefined,
       undefined,
-      "exact",
+      "host",
       undefined,
       undefined,
       3
@@ -547,6 +778,90 @@ describe("Common Crawl client", () => {
     expect(result.captures).toHaveLength(3);
     // Two pages of two captures reach the cap of three; no third page is fetched.
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("can scan a collection without the per-collection capture cap", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const requested = typeof input === "string" ? input : input.toString();
+      if (requested.includes("page=0")) {
+        return new Response([cdxLine("20260101000000", "10"), cdxLine("20260102000000", "20")].join("\n"), { status: 200 });
+      }
+      if (requested.includes("page=1")) {
+        return new Response([cdxLine("20260103000000", "30"), cdxLine("20260104000000", "40")].join("\n"), { status: 200 });
+      }
+      if (requested.includes("page=2")) {
+        return new Response([cdxLine("20260105000000", "50"), cdxLine("20260106000000", "60")].join("\n"), { status: 200 });
+      }
+      return new Response("blocked out of bounds", { status: 400 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await queryCollection(
+      "https://example.com/unlimited",
+      collection,
+      undefined,
+      1000,
+      0,
+      undefined,
+      undefined,
+      "host",
+      undefined,
+      undefined,
+      null,
+      null
+    );
+
+    expect(result.status).toBe("checked");
+    expect(result.truncated).toBeUndefined();
+    expect(result.captures).toHaveLength(6);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("keeps capped and uncapped CDX cache entries separate", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const requested = typeof input === "string" ? input : input.toString();
+      if (requested.includes("page=0")) {
+        return new Response([cdxLine("20260101000000", "10"), cdxLine("20260102000000", "20")].join("\n"), { status: 200 });
+      }
+      if (requested.includes("page=1")) {
+        return new Response([cdxLine("20260103000000", "30"), cdxLine("20260104000000", "40")].join("\n"), { status: 200 });
+      }
+      return new Response("blocked out of bounds", { status: 400 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const capped = await queryCollection(
+      "https://example.com/cache-limit",
+      collection,
+      undefined,
+      1000,
+      0,
+      undefined,
+      undefined,
+      "host",
+      undefined,
+      undefined,
+      2
+    );
+    const uncapped = await queryCollection(
+      "https://example.com/cache-limit",
+      collection,
+      undefined,
+      1000,
+      0,
+      undefined,
+      undefined,
+      "host",
+      undefined,
+      undefined,
+      null,
+      null
+    );
+
+    expect(capped.captures).toHaveLength(2);
+    expect(uncapped.fromCache).toBeUndefined();
+    expect(uncapped.captures).toHaveLength(4);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it("sends the date window to the API, records it on the result, and caches per-window", async () => {
@@ -568,7 +883,7 @@ describe("Common Crawl client", () => {
       0,
       undefined,
       undefined,
-      "exact",
+      "host",
       undefined,
       undefined,
       undefined,
@@ -592,7 +907,7 @@ describe("Common Crawl client", () => {
       0,
       undefined,
       undefined,
-      "exact",
+      "host",
       undefined,
       undefined,
       undefined,
@@ -603,7 +918,7 @@ describe("Common Crawl client", () => {
     expect(fetchMock.mock.calls.length).toBe(callsBeforeRepeat);
 
     // A full (unwindowed) query must not reuse the windowed cache entry.
-    const full = await queryCollection("https://example.com/win", collection, undefined, 1000, 0);
+    const full = await queryCollection("https://example.com/win", collection, undefined, 1000, 0, undefined, undefined, "host");
     expect(full.fromCache).toBeUndefined();
     expect(full.window).toBeUndefined();
     expect(fetchMock.mock.calls.length).toBeGreaterThan(callsBeforeRepeat);
@@ -636,7 +951,9 @@ describe("Common Crawl client", () => {
       undefined,
       1000,
       1,
-      0
+      0,
+      undefined,
+      "host"
     );
 
     expect(result.status).toBe("checked");
@@ -658,6 +975,36 @@ describe("Common Crawl client", () => {
     expect(result.httpStatus).toBeUndefined();
     expect(result.error).toBe("browser/network request failed before an HTTP response");
     expect(result.errorKind).toBe("network_no_response");
+  });
+
+  it("slows the adaptive pace to cooldown after browser network failures", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("Failed to fetch");
+      })
+    );
+
+    await queryCollection("https://example.com/network-one", collection, undefined, 1000, 0);
+    const firstSnapshot = getCommonCrawlRateLimitSnapshot();
+    expect(firstSnapshot.networkErrorCount).toBe(1);
+    expect(firstSnapshot.availabilitySignalCount).toBe(1);
+    expect(firstSnapshot.consecutiveAvailabilitySignals).toBe(1);
+    expect(firstSnapshot.pace).toBe("cooldown");
+
+    await queryCollection("https://example.com/network-two", collection, undefined, 1000, 0);
+    const secondSnapshot = getCommonCrawlRateLimitSnapshot();
+    expect(secondSnapshot.networkErrorCount).toBe(2);
+    expect(secondSnapshot.availabilitySignalCount).toBe(2);
+    expect(secondSnapshot.consecutiveAvailabilitySignals).toBe(2);
+    expect(secondSnapshot.pace).toBe("cooldown");
+
+    const persisted = JSON.parse(
+      globalThis.localStorage.getItem("snapshot-search:common-crawl-host-rate:v1:index.commoncrawl.org") ?? "{}"
+    ) as { pace?: unknown; consecutiveAvailabilitySignals?: unknown; networkErrorCount?: unknown };
+    expect(persisted.pace).toBe("cooldown");
+    expect(persisted.consecutiveAvailabilitySignals).toBe(2);
+    expect(persisted.networkErrorCount).toBe(2);
   });
 
   it("classifies rate-limit style errors", () => {
@@ -814,6 +1161,7 @@ describe("Common Crawl client", () => {
     const results = await searchCollections({
       targetUrl: "https://example.com/",
       collections,
+      matchType: "host",
       timeoutMs: 1000,
       retryCount: 0,
       retryDelayMs: 0,
@@ -848,6 +1196,7 @@ describe("Common Crawl client", () => {
     const results = await searchCollections({
       targetUrl: "https://example.com/",
       collections,
+      matchType: "host",
       timeoutMs: 1000,
       retryCount: 0,
       retryDelayMs: 0,

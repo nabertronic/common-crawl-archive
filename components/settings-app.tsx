@@ -37,6 +37,7 @@ import {
   type CacheStats
 } from "@/lib/capture-store";
 import { getCollectionCacheInfo, refreshCollections, type CollectionCacheInfo } from "@/lib/common-crawl";
+import { markPerformance, measureAsync } from "@/lib/performance";
 
 const SORT_OPTIONS = [
   ["timestamp-desc", "Date (newest first)"],
@@ -67,7 +68,7 @@ const SECTIONS = [
   { id: "results-defaults", label: "Results" },
   { id: "viewer", label: "Viewer" },
   { id: "storage", label: "Storage" },
-  { id: "export", label: "Export" },
+  { id: "export", label: "Export defaults" },
   { id: "danger-zone", label: "Danger zone" }
 ] as const;
 
@@ -81,6 +82,7 @@ export function SettingsApp() {
   const [activeSection, setActiveSection] = useState<SectionId>(SECTIONS[0].id);
   const [flash, setFlash] = useState<{ id: number; text: string } | null>(null);
   const flashCounter = useRef(0);
+  const saveSequence = useRef(0);
 
   function showFlash(text: string) {
     flashCounter.current += 1;
@@ -94,16 +96,18 @@ export function SettingsApp() {
   }, [flash]);
 
   async function refresh() {
-    const [loadedSettings, loadedStats] = await Promise.all([
-      getSettings(),
-      getCacheStats()
-    ]);
+    const [loadedSettings, loadedStats] = await measureAsync("settings-refresh", () => Promise.all([
+        getSettings(),
+        getCacheStats()
+      ])
+    );
     setSettings(loadedSettings);
     setStats(loadedStats);
     setCollectionInfo(getCollectionCacheInfo());
   }
 
   useEffect(() => {
+    markPerformance("page-hydrated:settings");
     void refresh();
     const unsubscribe = subscribeToSearchChanges(() => void refresh());
     return unsubscribe;
@@ -150,9 +154,24 @@ export function SettingsApp() {
   }, []);
 
   async function saveSettings(input: Parameters<typeof updateSettings>[0], message = "Saved.") {
-    await updateSettings(input);
-    showFlash(message);
-    await refresh();
+    if (!settings) return;
+    const previous = settings;
+    const sequence = saveSequence.current + 1;
+    saveSequence.current = sequence;
+    setSettings({
+      ...previous,
+      ...input
+    });
+    try {
+      const next = await updateSettings(input);
+      if (saveSequence.current !== sequence) return;
+      setSettings(next);
+      showFlash(message);
+    } catch (error) {
+      if (saveSequence.current !== sequence) return;
+      setSettings(previous);
+      showFlash(error instanceof Error ? error.message : "Could not save settings.");
+    }
   }
 
   async function toggleExportColumn(column: AppCaptureColumnKey) {
@@ -271,7 +290,7 @@ export function SettingsApp() {
 
           <div className="flex min-w-0 flex-col gap-4 pb-[45vh]">
             <Panel id="scan-settings" icon={<Search size={16} />} title="Scan settings">
-              <SettingRow label="Match mode" description="How the URL is matched against the index.">
+              <SettingRow label="Default match mode" description="How the URL is matched against the index.">
                 <SelectField
                   ariaLabel="Default match mode"
                   value={settings?.defaultMatchType ?? "exact"}
@@ -283,7 +302,7 @@ export function SettingsApp() {
                   ]}
                 />
               </SettingRow>
-              <SettingRow label="Scan window" description="Which collections a new scan covers.">
+              <SettingRow label="Default scan window" description="Which collections a new scan covers.">
                 <SelectField
                   ariaLabel="Default scan window"
                   value={settings?.defaultScanScope ?? "recent"}
@@ -309,27 +328,47 @@ export function SettingsApp() {
                   />
                 </div>
               ) : null}
-              <div className="py-3">
+              <SettingRow
+                label="Robots.txt check"
+                description="Contact the target site's robots.txt once before new scans to check CCBot crawl permissions."
+              >
+                <Switch
+                  ariaLabel="Check target robots.txt before scans"
+                  checked={settings?.robotsTxtChecksEnabled ?? true}
+                  onChange={(checked) =>
+                    void saveSettings(
+                      { robotsTxtChecksEnabled: checked },
+                      checked ? "Robots.txt checks enabled." : "Robots.txt checks disabled."
+                    )
+                  }
+                />
+              </SettingRow>
+              <div className="grid gap-3 py-3">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-zinc-100">Common Crawl list</p>
+                    <p className="mt-0.5 text-xs leading-5 text-zinc-500">
+                      Re-fetch the list of available crawl collections used for new scans.
+                    </p>
+                  </div>
+                  <div className="shrink-0">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      disabled={refreshingCollections}
+                      onClick={() => void handleRefreshCollections()}
+                    >
+                      <RefreshCw size={14} className={refreshingCollections ? "animate-spin" : ""} />
+                      Refresh
+                    </Button>
+                  </div>
+                </div>
                 <div className="grid grid-cols-2 divide-x divide-zinc-800 overflow-hidden rounded-md border border-zinc-800 bg-zinc-950">
                   <Stat label="Collections" value={String(collectionInfo.count)} />
                   <Stat label="Fetched" value={collectionInfo.fetchedAt ? shortDateTime(collectionInfo.fetchedAt) : "Never"} />
                 </div>
               </div>
-              <SettingRow
-                label="Common Crawl list"
-                description="Re-fetch the list of available crawl collections used for new scans."
-              >
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="secondary"
-                  disabled={refreshingCollections}
-                  onClick={() => void handleRefreshCollections()}
-                >
-                  <RefreshCw size={14} className={refreshingCollections ? "animate-spin" : ""} />
-                  Refresh
-                </Button>
-              </SettingRow>
             </Panel>
 
             <Panel id="results-defaults" icon={<Table2 size={16} />} title="Results defaults">
@@ -456,7 +495,7 @@ export function SettingsApp() {
             <Panel
               id="export"
               icon={<FileText size={16} />}
-              title="Export"
+              title="Export defaults"
               description="Columns included in exported CSV files."
             >
               <div className="flex flex-wrap gap-2 py-3">
@@ -556,7 +595,7 @@ function Panel({
         <h2 className={`text-sm font-bold uppercase tracking-[0.14em] ${danger ? "text-red-200" : "text-zinc-100"}`}>
           {title}
         </h2>
-        {description ? <p className="ml-auto hidden text-xs text-zinc-500 sm:block">{description}</p> : null}
+        {description ? <p className="ml-auto hidden text-xs text-zinc-400 sm:block">{description}</p> : null}
       </header>
       <div className={`divide-y px-4 ${danger ? "divide-red-500/10" : "divide-zinc-800/70"}`}>{children}</div>
     </section>
@@ -576,7 +615,7 @@ function SettingRow({
     <div className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
       <div className="min-w-0">
         <p className="text-sm font-semibold text-zinc-100">{label}</p>
-        {description ? <p className="mt-0.5 text-xs leading-5 text-zinc-500">{description}</p> : null}
+        {description ? <p className="mt-0.5 text-xs leading-5 text-zinc-400">{description}</p> : null}
       </div>
       <div className="shrink-0">{children}</div>
     </div>
@@ -617,6 +656,7 @@ function NumberField({
   max,
   step,
   unit,
+  disabled = false,
   onCommit
 }: {
   ariaLabel: string;
@@ -625,6 +665,7 @@ function NumberField({
   max: number;
   step: number;
   unit: string;
+  disabled?: boolean;
   onCommit: (value: number) => void;
 }) {
   const [draft, setDraft] = useState(String(value));
@@ -652,15 +693,18 @@ function NumberField({
         min={min}
         max={max}
         step={step}
+        disabled={disabled}
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
         onBlur={commit}
         onKeyDown={(event) => {
           if (event.key === "Enter") event.currentTarget.blur();
         }}
-        className="h-10 w-full pr-14 text-right font-mono tabular-nums sm:w-36"
+        className={`h-10 w-full pr-14 text-right font-mono tabular-nums sm:w-36 ${
+          disabled ? "cursor-not-allowed opacity-50" : ""
+        }`}
       />
-      <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">
+      <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-400">
         {unit}
       </span>
     </div>
@@ -699,7 +743,7 @@ function Switch({
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="grid gap-1 px-3 py-2">
-      <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">{label}</span>
+      <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-400">{label}</span>
       <span className="truncate font-mono text-sm font-bold text-zinc-100" title={value}>{value}</span>
     </div>
   );

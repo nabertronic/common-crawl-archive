@@ -1,11 +1,13 @@
+import { markPerformance, measurePerformance } from "@/lib/performance";
+
 export const COLLECTIONS_URL = "https://index.commoncrawl.org/collinfo.json";
 export const DATA_BASE_URL = "https://data.commoncrawl.org/";
 export const DEFAULT_CONCURRENCY = 1;
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
-export const DEFAULT_REQUEST_SPACING_MS = 5_000;
+export const DEFAULT_REQUEST_SPACING_MS = 1_100;
 export const DEFAULT_RETRY_COUNT = 1;
-export const DEFAULT_RETRY_DELAY_MS = 15_000;
-export const DEFAULT_MAX_RETRY_DELAY_MS = 120_000;
+export const DEFAULT_RETRY_DELAY_MS = 10_000;
+export const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
 export const DEFAULT_CIRCUIT_BREAKER_THRESHOLD = 3;
 export const DEFAULT_CIRCUIT_BREAKER_WINDOW_SIZE = 8;
 export const DEFAULT_CIRCUIT_BREAKER_WINDOW_THRESHOLD = 7;
@@ -24,16 +26,70 @@ export const LARGE_CAPTURE_LIMIT_BYTES = 15 * 1024 * 1024;
 
 const COLLECTION_CACHE_KEY = "snapshot-search:common-crawl-collections:v2";
 const LEGACY_COLLECTION_CACHE_KEY = "snapshot-search:common-crawl-collections";
-// Bumped to v3 when pagination landed: v2 results were capped at one 1000-record
-// page and may be incomplete, so they must not be served from cache.
-const CDX_RESULT_CACHE_PREFIX = "snapshot-search:common-crawl-cdx:v3:";
+const HOST_RATE_STATE_PREFIX = "snapshot-search:common-crawl-host-rate:v1:";
+const HOST_RATE_STATE_TTL_MS = 15 * 60 * 1000;
+const BAD_GATEWAY_SIGNAL_WINDOW_MS = 2 * 60 * 1000;
+// Bumped to v6 when the redundant http/https protocol-variant query was removed:
+// v5 entries could hold each capture twice, so they must not be reused.
+const CDX_RESULT_CACHE_PREFIX = "snapshot-search:common-crawl-cdx:v6:";
 const CACHE_VERSION = 1;
 const HOST_MIN_INTERVAL_MS: Record<string, number> = {
   "index.commoncrawl.org": DEFAULT_REQUEST_SPACING_MS,
   "data.commoncrawl.org": 1_000
 };
+const CLEAN_REQUESTS_PER_RECOVERY_STEP = 10;
+const HOST_PACE_INTERVAL_MS = {
+  normal: DEFAULT_REQUEST_SPACING_MS,
+  cautious: 2_500,
+  cooldown: 5_000
+} as const;
 
-const hostStates = new Map<string, { chain: Promise<void>; nextFetchAt: number }>();
+type HostRateState = {
+  chain: Promise<void>;
+  nextFetchAt: number;
+  pace: CommonCrawlPaceLevel;
+  cleanRequestCount: number;
+  consecutiveAvailabilitySignals: number;
+  requestCount: number;
+  availabilitySignalCount: number;
+  networkErrorCount: number;
+  badGatewayCount: number;
+  lastBadGatewayAt?: number;
+  lastStatus?: number;
+  lastSignalAt?: number;
+  lastDelayMs?: number;
+  lastDelayReason?: "minimum-interval" | "shared-tab" | "availability-cooldown";
+};
+
+type SharedHostRateRecord = {
+  version?: unknown;
+  updatedAt?: unknown;
+  nextFetchAt?: unknown;
+  pace?: unknown;
+  cleanRequestCount?: unknown;
+  consecutiveAvailabilitySignals?: unknown;
+  availabilitySignalCount?: unknown;
+  networkErrorCount?: unknown;
+  badGatewayCount?: unknown;
+  lastBadGatewayAt?: unknown;
+  lastStatus?: unknown;
+  lastSignalAt?: unknown;
+};
+
+const hostStates = new Map<string, HostRateState>();
+const rateLimitListeners = new Set<(change: CommonCrawlRateLimitChange) => void>();
+
+export type CommonCrawlPaceLevel = keyof typeof HOST_PACE_INTERVAL_MS;
+
+export type CommonCrawlRateLimitChange = {
+  hostname: string;
+  previousPace: CommonCrawlPaceLevel;
+  pace: CommonCrawlPaceLevel;
+  intervalMs: number;
+  reason: "http_429" | "http_502" | "http_503" | "http_500_slowdown" | "network_error" | "recovered";
+  cleanRequestCount: number;
+  httpStatus?: number;
+};
 
 export type CommonCrawlCollection = {
   id: string;
@@ -104,6 +160,7 @@ export type CollectionCheckResult = {
 
 export type CollectionAttemptLog = {
   status: "checked" | "not-checked";
+  attemptNumber?: number;
   checkedAt?: number;
   httpStatus?: number;
   error?: string;
@@ -132,19 +189,19 @@ export type ScanLogEvent = {
     | "html-zip-failed"
     | "html-zip-started"
     | "opt-out-checked"
+    | "pace-changed"
     | "request-timeout"
     | "retry-wait-started"
     | "robots-cached"
     | "robots-checked"
     | "scan-completed"
-    | "scan-cancelled"
     | "scan-paused"
     | "scan-failed"
     | "scope-selected"
     | "stored-coverage-loaded";
   checkedAt?: number;
   message: string;
-  tone?: "neutral" | "amber" | "red";
+  tone?: "neutral" | "amber" | "red" | "green";
 };
 
 export type ScanLogEntry = CollectionCheckResult | ScanLogEvent;
@@ -166,6 +223,7 @@ export type CollectionErrorKind =
   | "http_429_rate_limit"
   | "http_500_slowdown"
   | "http_500_server_error"
+  | "http_502_bad_gateway"
   | "http_503_unavailable"
   | "http_504_gateway_timeout"
   | "http_other";
@@ -201,6 +259,7 @@ type RawCollection = {
   id?: unknown;
   name?: unknown;
   "cdx-api"?: unknown;
+  cdxApi?: unknown;
   from?: unknown;
   to?: unknown;
 };
@@ -222,10 +281,11 @@ export function parseCollections(value: unknown): CommonCrawlCollection[] {
   return value
     .flatMap((item): CommonCrawlCollection[] => {
       const raw = item as RawCollection;
+      const cdxApi = typeof raw["cdx-api"] === "string" ? raw["cdx-api"] : raw.cdxApi;
       if (
         typeof raw.id !== "string" ||
         typeof raw.name !== "string" ||
-        typeof raw["cdx-api"] !== "string" ||
+        typeof cdxApi !== "string" ||
         typeof raw.from !== "string" ||
         typeof raw.to !== "string"
       ) {
@@ -236,7 +296,7 @@ export function parseCollections(value: unknown): CommonCrawlCollection[] {
         {
           id: raw.id,
           name: raw.name,
-          cdxApi: raw["cdx-api"],
+          cdxApi,
           from: raw.from,
           to: raw.to
         }
@@ -330,6 +390,35 @@ export async function fetchCollections(
   const forceRefresh = !(input instanceof AbortSignal) && Boolean(input?.forceRefresh);
   const freshCached = forceRefresh ? [] : readCollectionCache();
   if (freshCached.length > 0) return freshCached;
+
+  if (typeof window !== "undefined") {
+    try {
+      const response = await fetch(`/api/common-crawl/collections${forceRefresh ? "?refresh=1" : ""}`, {
+        headers: { Accept: "application/json" },
+        signal,
+        cache: "no-store"
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null);
+        const message =
+          payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+            ? payload.error
+            : `Common Crawl source list returned HTTP ${response.status}`;
+        throw new Error(message);
+      }
+      const collections = parseCollections(await response.json());
+      writeCollectionCache(collections);
+      return collections;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      const staleCached = forceRefresh ? [] : readCollectionCache({ allowStale: true });
+      if (staleCached.length > 0) return staleCached;
+      if (error instanceof Error && error.message.startsWith("Common Crawl source list returned")) {
+        throw error;
+      }
+      throw new Error("Could not reach Common Crawl from this network");
+    }
+  }
 
   try {
     const response = await commonCrawlFetch(COLLECTIONS_URL, {
@@ -584,6 +673,9 @@ function describeHttpError(
   if (/SlowDown|Please reduce your request rate/i.test(body)) {
     return { error: "SlowDown response from Common Crawl", errorKind: "http_500_slowdown" };
   }
+  if (response.status === 502) {
+    return { error: "Bad gateway response from Common Crawl", errorKind: "http_502_bad_gateway" };
+  }
   if (response.status === 503) {
     return { error: "Service unavailable response from Common Crawl", errorKind: "http_503_unavailable" };
   }
@@ -622,6 +714,7 @@ function shouldRetryCollectionError(errorKind: CollectionErrorKind) {
     errorKind === "timeout" ||
     errorKind === "http_429_rate_limit" ||
     errorKind === "http_500_slowdown" ||
+    errorKind === "http_502_bad_gateway" ||
     errorKind === "http_503_unavailable" ||
     errorKind === "http_504_gateway_timeout"
   );
@@ -648,23 +741,265 @@ function hostMinimumIntervalMs(hostname: string): number {
   return HOST_MIN_INTERVAL_MS[hostname] ?? 1_000;
 }
 
+function hostPaceIntervalMs(hostname: string, state: HostRateState): number {
+  if (typeof process !== "undefined" && process.env.NODE_ENV === "test") return 0;
+  if (usesAdaptivePace(hostname)) return HOST_PACE_INTERVAL_MS[state.pace];
+  return hostMinimumIntervalMs(hostname);
+}
+
+function isCleanPaceStatus(status: number): boolean {
+  return (status >= 200 && status < 300) || status === 400 || status === 404;
+}
+
+function paceIndex(pace: CommonCrawlPaceLevel): number {
+  return (["normal", "cautious", "cooldown"] satisfies CommonCrawlPaceLevel[]).indexOf(pace);
+}
+
+function fasterPace(pace: CommonCrawlPaceLevel): CommonCrawlPaceLevel {
+  const paces = ["normal", "cautious", "cooldown"] satisfies CommonCrawlPaceLevel[];
+  return paces[Math.max(0, paceIndex(pace) - 1)] ?? "normal";
+}
+
+function isCommonCrawlPaceLevel(value: unknown): value is CommonCrawlPaceLevel {
+  return value === "normal" || value === "cautious" || value === "cooldown";
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function emitRateLimitChange(change: CommonCrawlRateLimitChange): void {
+  for (const listener of rateLimitListeners) {
+    try {
+      listener(change);
+    } catch {
+      // Diagnostics must not break the scan.
+    }
+  }
+}
+
+export function subscribeCommonCrawlRateLimitChanges(listener: (change: CommonCrawlRateLimitChange) => void): () => void {
+  rateLimitListeners.add(listener);
+  return () => {
+    rateLimitListeners.delete(listener);
+  };
+}
+
+function setHostPace(
+  hostname: string,
+  state: HostRateState,
+  pace: CommonCrawlPaceLevel,
+  reason: CommonCrawlRateLimitChange["reason"],
+  httpStatus?: number
+): void {
+  if (!usesAdaptivePace(hostname) || state.pace === pace) return;
+  const previousPace = state.pace;
+  state.pace = pace;
+  state.cleanRequestCount = 0;
+  emitRateLimitChange({
+    hostname,
+    previousPace,
+    pace,
+    intervalMs: hostPaceIntervalMs(hostname, state),
+    reason,
+    cleanRequestCount: state.cleanRequestCount,
+    httpStatus
+  });
+}
+
+function usesAdaptivePace(hostname: string): boolean {
+  return hostname === "index.commoncrawl.org" || hostname === "data.commoncrawl.org";
+}
+
+function noteCleanPaceResponse(hostname: string, state: HostRateState): void {
+  if (!usesAdaptivePace(hostname)) return;
+  state.consecutiveAvailabilitySignals = 0;
+  if (hostname !== "data.commoncrawl.org" || state.pace === "normal") return;
+  state.cleanRequestCount += 1;
+  if (state.cleanRequestCount >= CLEAN_REQUESTS_PER_RECOVERY_STEP) {
+    setHostPace(hostname, state, fasterPace(state.pace), "recovered");
+  }
+}
+
+function noteCleanCollectionPace(hostname: string): void {
+  if (!usesAdaptivePace(hostname)) return;
+  const state = hostStates.get(hostname) ?? freshHostRateState(hostname);
+  if (state.pace === "normal") {
+    state.cleanRequestCount = 0;
+    writeSharedHostRateState(hostname, state);
+    return;
+  }
+  state.cleanRequestCount += 1;
+  if (state.cleanRequestCount >= CLEAN_REQUESTS_PER_RECOVERY_STEP) {
+    setHostPace(hostname, state, fasterPace(state.pace), "recovered");
+  }
+  writeSharedHostRateState(hostname, state);
+  hostStates.set(hostname, state);
+}
+
+function noteRateLimitPaceSignal(
+  hostname: string,
+  state: HostRateState,
+  pace: CommonCrawlPaceLevel,
+  reason: CommonCrawlRateLimitChange["reason"],
+  retryAfterMs?: number,
+  httpStatus?: number
+): void {
+  state.cleanRequestCount = 0;
+  state.consecutiveAvailabilitySignals += 1;
+  state.availabilitySignalCount += 1;
+  state.lastSignalAt = Date.now();
+  setHostPace(hostname, state, pace, reason, httpStatus);
+  const cooldownUntil = Date.now() + Math.max(hostPaceIntervalMs(hostname, state), retryAfterMs ?? 0);
+  state.lastDelayReason = "availability-cooldown";
+  extendSharedHostSlot(hostname, state, cooldownUntil);
+}
+
+function noteNetworkPaceSignal(hostname: string, state: HostRateState): void {
+  if (!usesAdaptivePace(hostname)) return;
+  noteRateLimitPaceSignal(hostname, state, "cooldown", "network_error");
+}
+
+function noteBadGatewayPaceSignal(hostname: string, state: HostRateState): void {
+  if (!usesAdaptivePace(hostname)) return;
+  const now = Date.now();
+  state.badGatewayCount += 1;
+  const clustered = state.lastBadGatewayAt !== undefined && now - state.lastBadGatewayAt <= BAD_GATEWAY_SIGNAL_WINDOW_MS;
+  state.lastBadGatewayAt = now;
+  if (clustered) {
+    noteRateLimitPaceSignal(hostname, state, "cautious", "http_502", undefined, 502);
+  } else {
+    writeSharedHostRateState(hostname, state);
+  }
+}
+
+function sharedHostRateKey(hostname: string): string {
+  return `${HOST_RATE_STATE_PREFIX}${hostname}`;
+}
+
+function readSharedHostRateRecord(hostname: string): Partial<Omit<HostRateState, "chain" | "requestCount">> {
+  const record = readJsonStorage<SharedHostRateRecord>(sharedHostRateKey(hostname));
+  if (!record || record.version !== CACHE_VERSION) return {};
+  const nextFetchAt = finiteNumber(record.nextFetchAt) ?? 0;
+  const updatedAt = finiteNumber(record.updatedAt);
+  if (updatedAt !== undefined && Date.now() - updatedAt > HOST_RATE_STATE_TTL_MS && nextFetchAt <= Date.now()) {
+    return {};
+  }
+  return {
+    nextFetchAt,
+    pace: isCommonCrawlPaceLevel(record.pace) ? record.pace : undefined,
+    cleanRequestCount: finiteNumber(record.cleanRequestCount),
+    consecutiveAvailabilitySignals: finiteNumber(record.consecutiveAvailabilitySignals),
+    availabilitySignalCount: finiteNumber(record.availabilitySignalCount),
+    networkErrorCount: finiteNumber(record.networkErrorCount),
+    badGatewayCount: finiteNumber(record.badGatewayCount),
+    lastBadGatewayAt: finiteNumber(record.lastBadGatewayAt),
+    lastStatus: finiteNumber(record.lastStatus),
+    lastSignalAt: finiteNumber(record.lastSignalAt)
+  };
+}
+
+function readSharedNextFetchAt(hostname: string): number {
+  return readSharedHostRateRecord(hostname).nextFetchAt ?? 0;
+}
+
+function writeSharedHostRateState(hostname: string, state: HostRateState, nextFetchAt = state.nextFetchAt): void {
+  writeJsonStorage(sharedHostRateKey(hostname), {
+    version: CACHE_VERSION,
+    updatedAt: Date.now(),
+    nextFetchAt,
+    pace: state.pace,
+    cleanRequestCount: state.cleanRequestCount,
+    consecutiveAvailabilitySignals: state.consecutiveAvailabilitySignals,
+    availabilitySignalCount: state.availabilitySignalCount,
+    networkErrorCount: state.networkErrorCount,
+    badGatewayCount: state.badGatewayCount,
+    lastBadGatewayAt: state.lastBadGatewayAt,
+    lastStatus: state.lastStatus,
+    lastSignalAt: state.lastSignalAt
+  } satisfies SharedHostRateRecord);
+}
+
+function reserveSharedHostSlot(hostname: string, state: HostRateState): number {
+  const now = Date.now();
+  const minimumIntervalMs = hostPaceIntervalMs(hostname, state);
+  const scheduledAt = Math.max(now, state.nextFetchAt, readSharedNextFetchAt(hostname));
+  const nextFetchAt = scheduledAt + minimumIntervalMs;
+  state.nextFetchAt = nextFetchAt;
+  writeSharedHostRateState(hostname, state, nextFetchAt);
+  return scheduledAt;
+}
+
+function extendSharedHostSlot(hostname: string, state: HostRateState, nextFetchAt: number): void {
+  const sharedNextFetchAt = readSharedNextFetchAt(hostname);
+  const extendedNextFetchAt = Math.max(sharedNextFetchAt, nextFetchAt);
+  state.nextFetchAt = Math.max(state.nextFetchAt, extendedNextFetchAt);
+  writeSharedHostRateState(hostname, state, extendedNextFetchAt);
+}
+
+function freshHostRateState(hostname?: string): HostRateState {
+  const shared = hostname ? readSharedHostRateRecord(hostname) : {};
+  return {
+    chain: Promise.resolve(),
+    nextFetchAt: shared.nextFetchAt ?? 0,
+    pace: shared.pace ?? "normal",
+    cleanRequestCount: shared.cleanRequestCount ?? 0,
+    consecutiveAvailabilitySignals: shared.consecutiveAvailabilitySignals ?? 0,
+    requestCount: 0,
+    availabilitySignalCount: shared.availabilitySignalCount ?? 0,
+    networkErrorCount: shared.networkErrorCount ?? 0,
+    badGatewayCount: shared.badGatewayCount ?? 0,
+    lastBadGatewayAt: shared.lastBadGatewayAt,
+    lastStatus: shared.lastStatus,
+    lastSignalAt: shared.lastSignalAt
+  };
+}
+
 export async function commonCrawlFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const hostname = commonCrawlHost(input);
   const requestInit = withCommonCrawlHeaders(init);
   if (!hostname) return fetch(input, requestInit);
 
-  const state = hostStates.get(hostname) ?? { chain: Promise.resolve(), nextFetchAt: 0 };
+  const state = hostStates.get(hostname) ?? freshHostRateState(hostname);
   const run = state.chain
     .catch(() => {
       // Keep the queue moving after a failed request.
     })
     .then(async () => {
-      const delay = Math.max(0, state.nextFetchAt - Date.now());
+      const scheduledAt = reserveSharedHostSlot(hostname, state);
+      const delay = Math.max(0, scheduledAt - Date.now());
+      state.lastDelayMs = delay;
+      state.lastDelayReason =
+        delay > hostPaceIntervalMs(hostname, state) ? "shared-tab" : delay > 0 ? "minimum-interval" : undefined;
       if (delay > 0) await wait(delay, requestInit.signal ?? undefined);
+      state.requestCount += 1;
       try {
-        return await fetch(input, requestInit);
-      } finally {
-        state.nextFetchAt = Date.now() + hostMinimumIntervalMs(hostname);
+        const response = await fetch(input, requestInit);
+        state.lastStatus = response.status;
+        if (response.status === 429) {
+          const retryAfterMs = parseRetryAfter(response.headers.get("Retry-After"));
+          noteRateLimitPaceSignal(hostname, state, "cooldown", "http_429", retryAfterMs, response.status);
+        } else if (response.status === 503) {
+          const retryAfterMs = parseRetryAfter(response.headers.get("Retry-After"));
+          noteRateLimitPaceSignal(hostname, state, "cautious", "http_503", retryAfterMs, response.status);
+        } else if (response.status === 502) {
+          noteBadGatewayPaceSignal(hostname, state);
+          extendSharedHostSlot(hostname, state, Date.now() + hostPaceIntervalMs(hostname, state));
+        } else if (isCleanPaceStatus(response.status)) {
+          noteCleanPaceResponse(hostname, state);
+          extendSharedHostSlot(hostname, state, Date.now() + hostPaceIntervalMs(hostname, state));
+        } else {
+          extendSharedHostSlot(hostname, state, Date.now() + hostPaceIntervalMs(hostname, state));
+        }
+        return response;
+      } catch (error) {
+        state.networkErrorCount += 1;
+        if (requestInit.signal?.aborted) {
+          extendSharedHostSlot(hostname, state, Date.now() + hostPaceIntervalMs(hostname, state));
+        } else {
+          noteNetworkPaceSignal(hostname, state);
+        }
+        throw error;
       }
     });
 
@@ -674,6 +1009,72 @@ export async function commonCrawlFetch(input: RequestInfo | URL, init?: RequestI
   );
   hostStates.set(hostname, state);
   return run;
+}
+
+export type CommonCrawlRateLimitSnapshot = {
+  hostname: string;
+  minimumIntervalMs: number;
+  pace: CommonCrawlPaceLevel;
+  intervalMs: number;
+  cleanRequestCount: number;
+  localNextFetchAt: number;
+  sharedNextFetchAt: number;
+  consecutiveAvailabilitySignals: number;
+  requestCount: number;
+  availabilitySignalCount: number;
+  networkErrorCount: number;
+  badGatewayCount: number;
+  lastBadGatewayAt?: number;
+  lastStatus?: number;
+  lastSignalAt?: number;
+  lastDelayMs?: number;
+  lastDelayReason?: HostRateState["lastDelayReason"];
+};
+
+export function getCommonCrawlRateLimitSnapshot(hostname = "index.commoncrawl.org"): CommonCrawlRateLimitSnapshot {
+  const state = hostStates.get(hostname) ?? freshHostRateState(hostname);
+  return {
+    hostname,
+    minimumIntervalMs: hostMinimumIntervalMs(hostname),
+    pace: state.pace,
+    intervalMs: hostPaceIntervalMs(hostname, state),
+    cleanRequestCount: state.cleanRequestCount,
+    localNextFetchAt: state.nextFetchAt,
+    sharedNextFetchAt: readSharedNextFetchAt(hostname),
+    consecutiveAvailabilitySignals: state.consecutiveAvailabilitySignals,
+    requestCount: state.requestCount,
+    availabilitySignalCount: state.availabilitySignalCount,
+    networkErrorCount: state.networkErrorCount,
+    badGatewayCount: state.badGatewayCount,
+    lastBadGatewayAt: state.lastBadGatewayAt,
+    lastStatus: state.lastStatus,
+    lastSignalAt: state.lastSignalAt,
+    lastDelayMs: state.lastDelayMs,
+    lastDelayReason: state.lastDelayReason
+  };
+}
+
+export function resetCommonCrawlRateLimitState(): void {
+  hostStates.clear();
+  try {
+    if (typeof globalThis.localStorage === "undefined") return;
+    for (let index = globalThis.localStorage.length - 1; index >= 0; index -= 1) {
+      const key = globalThis.localStorage.key(index);
+      if (key?.startsWith(HOST_RATE_STATE_PREFIX)) {
+        globalThis.localStorage.removeItem(key);
+      }
+    }
+  } catch {
+    // Best-effort test/diagnostic reset.
+  }
+}
+
+function noteCommonCrawlSlowDown(input: RequestInfo | URL): void {
+  const hostname = commonCrawlHost(input);
+  if (!hostname) return;
+  const state = hostStates.get(hostname) ?? freshHostRateState(hostname);
+  noteRateLimitPaceSignal(hostname, state, "cautious", "http_500_slowdown", undefined, 500);
+  hostStates.set(hostname, state);
 }
 
 export function isLikelyRateLimitError(
@@ -701,6 +1102,7 @@ export function isLikelyCommonCrawlAvailabilityIssue(
     errorKind === "network_no_response" ||
     errorKind === "timeout" ||
     errorKind === "http_500_server_error" ||
+    errorKind === "http_502_bad_gateway" ||
     errorKind === "http_504_gateway_timeout" ||
     httpStatus === 500 ||
     httpStatus === 504 ||
@@ -719,18 +1121,25 @@ export async function queryCollection(
   matchType: MatchType = DEFAULT_MATCH_TYPE,
   onAttempt?: (attempt: CollectionAttemptLog) => void,
   onRetryWait?: (delayMs: number) => void,
-  maxCaptures = DEFAULT_MAX_CAPTURES_PER_COLLECTION,
-  maxPages = DEFAULT_MAX_CDX_PAGES,
+  maxCaptures: number | null | undefined = DEFAULT_MAX_CAPTURES_PER_COLLECTION,
+  maxPages: number | null | undefined = DEFAULT_MAX_CDX_PAGES,
   dateWindow?: ScanDateWindow
 ): Promise<CollectionCheckResult> {
-  const cachedResult = readCachedCdxResult(targetUrl, collection, matchType, dateWindow);
+  const captureLimit = normalizeCdxLimit(maxCaptures, DEFAULT_MAX_CAPTURES_PER_COLLECTION);
+  const pageLimit = normalizeCdxLimit(maxPages, DEFAULT_MAX_CDX_PAGES);
+  const cachedResult = readCachedCdxResult(targetUrl, collection, matchType, captureLimit, dateWindow);
   if (cachedResult) return cachedResult;
 
   let attempts = 0;
   const attemptLogs: CollectionAttemptLog[] = [];
-  const recordAttempt = (attemptLog: CollectionAttemptLog) => {
-    attemptLogs.push(attemptLog);
-    onAttempt?.(attemptLog);
+  // Number attempts by their position among *logged* attempts, so the scan log
+  // reads 1, 2, 3… without gaps. The raw request counter (`attempts`) skips
+  // unlogged probes such as the HTTP 400 end-of-pagination signal, so it must
+  // not drive the user-facing numbering.
+  const recordAttempt = (attemptLog: Omit<CollectionAttemptLog, "attemptNumber">) => {
+    const numbered: CollectionAttemptLog = { ...attemptLog, attemptNumber: attemptLogs.length + 1 };
+    attemptLogs.push(numbered);
+    onAttempt?.(numbered);
   };
 
   // Fetches one CDX page, applying the retry/backoff policy per request. The
@@ -750,8 +1159,9 @@ export async function queryCollection(
     for (let attempt = 0; attempt <= retryCount; attempt += 1) {
       attempts += 1;
       const requestSignal = createChildSignal(signal, timeoutMs);
+      const requestUrl = buildCdxjUrl(targetUrl, collection, matchType, page, dateWindow);
       try {
-        const response = await commonCrawlFetch(buildCdxjUrl(targetUrl, collection, matchType, page, dateWindow), {
+        const response = await commonCrawlFetch(requestUrl, {
           headers: { Accept: "application/json" },
           signal: requestSignal
         });
@@ -782,6 +1192,9 @@ export async function queryCollection(
         const described = describeHttpError(response, await readErrorBody(response));
         lastError = described.error;
         lastErrorKind = described.errorKind;
+        if (lastErrorKind === "http_500_slowdown") {
+          noteCommonCrawlSlowDown(requestUrl);
+        }
         const checkedAt = Date.now();
         recordAttempt({
           status: "not-checked",
@@ -826,7 +1239,11 @@ export async function queryCollection(
   let lastCheckedAt = Date.now();
   let truncated = false;
 
-  for (let page = 0; page < maxPages; page += 1) {
+  // Common Crawl's CDX index is keyed by a scheme-less SURT, so a single exact
+  // query already returns captures crawled under both http:// and https://.
+  // Querying protocol variants separately only doubled the requests (and the
+  // capture counts) for an identical result set, so we walk the URL once.
+  for (let page = 0; page < pageLimit; page += 1) {
     const outcome = await fetchPage(page);
     lastCheckedAt = outcome.checkedAt;
 
@@ -836,14 +1253,15 @@ export async function queryCollection(
       return {
         collection,
         status: "not-checked",
-        captures: [],
+        captures: allCaptures.slice().sort((a, b) => b.timestamp.localeCompare(a.timestamp)),
         checkedAt: outcome.checkedAt,
         httpStatus: outcome.httpStatus,
         error: outcome.error,
         errorKind: outcome.errorKind,
         attempts,
         runs: 1,
-        attemptLogs
+        attemptLogs,
+        ...(dateWindow ? { window: dateWindow } : {})
       };
     }
 
@@ -855,18 +1273,18 @@ export async function queryCollection(
 
     allCaptures.push(...outcome.captures);
 
-    if (allCaptures.length >= maxCaptures) {
+    if (allCaptures.length >= captureLimit) {
       truncated = true;
       break;
     }
 
-    if (page + 1 >= maxPages) {
+    if (page + 1 >= pageLimit) {
       truncated = true;
     }
   }
 
   const captures = allCaptures
-    .slice(0, maxCaptures)
+    .slice(0, captureLimit)
     .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   const result: CollectionCheckResult = {
     collection,
@@ -881,14 +1299,30 @@ export async function queryCollection(
     ...(truncated ? { truncated: true } : {}),
     ...(dateWindow ? { window: dateWindow } : {})
   };
-  writeCachedCdxResult(targetUrl, collection, matchType, dateWindow, result);
+  const hadFailedAttempt = attemptLogs.some((attempt) => attempt.status === "not-checked");
+  if (!truncated && !hadFailedAttempt) {
+    noteCleanCollectionPace(commonCrawlHost(collection.cdxApi) ?? "");
+  }
+  writeCachedCdxResult(targetUrl, collection, matchType, captureLimit, dateWindow, result);
   return result;
+}
+
+function normalizeCdxLimit(value: number | null | undefined, fallback: number): number {
+  if (value === null) return Number.POSITIVE_INFINITY;
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return fallback;
+  return Math.max(1, Math.round(numeric));
+}
+
+function cdxLimitCacheValue(value: number): number | "unlimited" {
+  return Number.isFinite(value) ? value : "unlimited";
 }
 
 function cdxCacheKey(
   targetUrl: string,
   collection: CommonCrawlCollection,
   matchType: MatchType,
+  maxCaptures: number,
   dateWindow?: ScanDateWindow
 ): string {
   return `${CDX_RESULT_CACHE_PREFIX}${encodeURIComponent(
@@ -898,7 +1332,7 @@ function cdxCacheKey(
       matchType,
       retainedCaptures: "html-200-and-redirects",
       paginated: true,
-      maxCaptures: DEFAULT_MAX_CAPTURES_PER_COLLECTION,
+      maxCaptures: cdxLimitCacheValue(maxCaptures),
       // A windowed result is not interchangeable with a full one, so the window
       // is part of the cache identity.
       window: dateWindow ? `${dateWindow.from}:${dateWindow.to}` : "full"
@@ -910,9 +1344,10 @@ function readCachedCdxResult(
   targetUrl: string,
   collection: CommonCrawlCollection,
   matchType: MatchType,
+  maxCaptures: number,
   dateWindow?: ScanDateWindow
 ): CollectionCheckResult | undefined {
-  const record = readJsonStorage<CdxResultCacheRecord>(cdxCacheKey(targetUrl, collection, matchType, dateWindow));
+  const record = readJsonStorage<CdxResultCacheRecord>(cdxCacheKey(targetUrl, collection, matchType, maxCaptures, dateWindow));
   if (!record || record.version !== CACHE_VERSION || Date.now() - record.fetchedAt > CDX_RESULT_CACHE_TTL_MS) {
     return undefined;
   }
@@ -933,11 +1368,12 @@ function writeCachedCdxResult(
   targetUrl: string,
   collection: CommonCrawlCollection,
   matchType: MatchType,
+  maxCaptures: number,
   dateWindow: ScanDateWindow | undefined,
   result: CollectionCheckResult
 ): void {
   if (result.status !== "checked") return;
-  writeJsonStorage(cdxCacheKey(targetUrl, collection, matchType, dateWindow), {
+  writeJsonStorage(cdxCacheKey(targetUrl, collection, matchType, maxCaptures, dateWindow), {
     version: CACHE_VERSION,
     fetchedAt: Date.now(),
     result
@@ -970,6 +1406,7 @@ export async function searchCollections({
   circuitBreakerWindowSize = DEFAULT_CIRCUIT_BREAKER_WINDOW_SIZE,
   circuitBreakerWindowThreshold = DEFAULT_CIRCUIT_BREAKER_WINDOW_THRESHOLD,
   matchType = DEFAULT_MATCH_TYPE,
+  maxCaptures = DEFAULT_MAX_CAPTURES_PER_COLLECTION,
   dateWindow,
   onResult,
   onProgress,
@@ -988,6 +1425,7 @@ export async function searchCollections({
   circuitBreakerWindowSize?: number;
   circuitBreakerWindowThreshold?: number;
   matchType?: MatchType;
+  maxCaptures?: number | null;
   dateWindow?: ScanDateWindow;
   onResult?: (result: CollectionCheckResult) => void;
   onProgress?: (progress: SearchProgress) => void;
@@ -1002,6 +1440,8 @@ export async function searchCollections({
   let consecutiveRateLimitSignals = 0;
   const recentAvailabilitySignals: boolean[] = [];
   let stopReason: SearchStopReason = "completed";
+  const scanStartMark = `cdx-scan:start:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+  markPerformance(scanStartMark);
 
   const emit = () => {
     onProgress?.({
@@ -1030,8 +1470,8 @@ export async function searchCollections({
           matchType,
           undefined,
           undefined,
-          undefined,
-          undefined,
+          maxCaptures,
+          maxCaptures === null ? null : undefined,
           dateWindow
         );
         checked += 1;
@@ -1086,6 +1526,12 @@ export async function searchCollections({
   }
   onStop?.(stopReason);
 
+  measurePerformance("cdx-scan", scanStartMark, {
+    collections: collections.length,
+    hits,
+    captures: results.reduce((total, result) => total + (result.captures?.length ?? 0), 0),
+    stopReason
+  });
   return results;
 }
 

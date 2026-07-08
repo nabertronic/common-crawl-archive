@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowUp,
   Ban,
   CalendarDays,
   ChevronDown,
@@ -12,10 +13,10 @@ import {
   Info,
   List,
   Loader2,
+  Pause,
   Play,
   RotateCcw,
   SlidersHorizontal,
-  Square,
   Terminal,
   X
 } from "lucide-react";
@@ -30,11 +31,14 @@ import {
   isLikelyCommonCrawlAvailabilityIssue,
   isLikelyRateLimitError,
   queryCollection,
+  resetCommonCrawlRateLimitState,
   resultCoversWindow,
   searchUrlCoversTarget,
   shouldPersistScanLogEntry,
+  subscribeCommonCrawlRateLimitChanges,
   type CollectionAttemptLog,
   type CollectionCheckResult,
+  type CommonCrawlRateLimitChange,
   type CommonCrawlCapture,
   type CommonCrawlCollection,
   type MatchType,
@@ -54,12 +58,22 @@ import { Input } from "@/components/ui/input";
 import { Tooltip } from "@/components/ui/tooltip";
 import { BrandLockup } from "@/components/brand";
 import { CaptureRow, CaptureRowHeader, type SortOption } from "@/components/capture-row";
-import { CalendarView } from "@/components/calendar-view";
-import { HtmlPrivacyWarningDialog } from "@/components/html-privacy-warning-dialog";
-import { LandingSections } from "@/components/landing-sections";
+import dynamic from "next/dynamic";
+// Code-split components that aren't part of the initial list/search view so they
+// stay out of the first-load JS. SSR is kept (default) so landing HTML and SEO
+// content still server-render; only the client chunk is deferred.
+const CalendarView = dynamic(() => import("@/components/calendar-view").then((mod) => mod.CalendarView));
+const HtmlPrivacyWarningDialog = dynamic(() =>
+  import("@/components/html-privacy-warning-dialog").then((mod) => mod.HtmlPrivacyWarningDialog)
+);
+const LandingSections = dynamic(() => import("@/components/landing-sections").then((mod) => mod.LandingSections));
+const VirtualizedCaptureList = dynamic(() =>
+  import("@/components/virtualized-capture-list").then((mod) => mod.VirtualizedCaptureList)
+);
 import { TopRightMenu } from "@/components/top-right-menu";
 import { createMockSearchDataset, createMockWarcRecord, isMockCaptureFilename } from "@/lib/mock-data";
 import { APP_NAME, buildTabTitle, stripUrlForTitle } from "@/lib/app-meta";
+import { markPerformance, measurePerformance, measureSync } from "@/lib/performance";
 import {
   coverageCaptures,
   coverageDurationMs,
@@ -79,7 +93,7 @@ import {
   getSearch,
   legacyScanSearchKey,
   legacyScanSearchKeys,
-  listSearches,
+  listHistorySummaries,
   putSearch,
   scanSearchKey,
   scanLogDurationMs,
@@ -90,12 +104,15 @@ import {
   updateSettings,
   upsertCoverageResult,
   type AppSettings,
+  type CoverageRecord,
+  type HistorySummaryRecord,
   type ScanSession,
   type StoredSearch
 } from "@/lib/capture-store";
 import { dedupeCaptures, mergeCollectionResults, upsertCollectionResult } from "@/lib/scan-results";
 import { loadCaptureRecord } from "@/lib/warc";
-import { createZipBlob } from "@/lib/zip";
+import { computeCsv, computeZipBytes } from "@/lib/compute-client";
+import { rowsToCsv } from "@/lib/csv";
 import { robotsUrlForTarget, type RobotsCheckResult } from "@/lib/robots";
 import { readCachedRobotsStatus, writeCachedRobotsStatus } from "@/lib/robots-cache";
 import { findOptOutMatch, type OptOutMatch } from "@/lib/opt-out-registry";
@@ -109,6 +126,10 @@ type HtmlZipDownloadState = {
   active: boolean;
   completed: number;
   total: number;
+  failed?: number;
+  part?: number;
+  parts?: number;
+  bytes?: number;
   error?: string;
 };
 
@@ -120,10 +141,10 @@ type BlockedRobotsConfirmation = {
 
 type SearchState =
   | "idle"
+  | "loading-stored-scan"
   | "loading-collections"
   | "running"
   | "paused"
-  | "cancelled"
   | "done"
   | "error";
 
@@ -170,6 +191,7 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
 ];
 
 const AUTO_RETRY_INTERVAL_MS = 15 * 60 * 1000;
+const RESTORABLE_ACTIVE_SCAN_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
 function captureSize(capture: CommonCrawlCapture) {
   const size = Number(capture.length);
@@ -494,6 +516,25 @@ function hasStoredCoverageHistory(coverage: Awaited<ReturnType<typeof getCoverag
   );
 }
 
+function coverageHasPendingSessionWork(
+  coverage: CoverageRecord | undefined,
+  session: Pick<ScanSession, "scope" | "dateFrom" | "dateTo" | "collectionIds">,
+  collections: CommonCrawlCollection[]
+) {
+  if (!coverage) return false;
+  const activeCollections = collectionsForSession(collections, session);
+  if (activeCollections.length === 0) return false;
+  const requestedWindow: ScanDateWindow | undefined =
+    session.scope === "custom" && hasValidCustomDateRange(session.dateFrom ?? "", session.dateTo ?? "")
+      ? { from: session.dateFrom!, to: session.dateTo! }
+      : undefined;
+
+  return activeCollections.some((collection) => {
+    const result = coverage.collectionResults[collection.id];
+    return !result || result.status !== "checked" || !resultCoversWindow(result.window, requestedWindow);
+  });
+}
+
 function scanStartEventForMode(mode: RunSearchMode) {
   if (mode === "retry-failed") {
     return scanLogEvent("scan-restarted", "Scan restarted manually.", "amber");
@@ -510,18 +551,8 @@ function scanStartEventForMode(mode: RunSearchMode) {
   return scanLogEvent("scan-started", "Scan started.");
 }
 
-function scanScopeEvent(scope: ScanScope, dateFrom?: string, dateTo?: string) {
-  if (scope === "all") {
-    return scanLogEvent("scope-selected", "Full scan selected: checking the entire archive.", "amber");
-  }
-  return scanLogEvent(
-    "scope-selected",
-    scope === "custom"
-      ? hasValidCustomDateRange(dateFrom ?? "", dateTo ?? "")
-        ? "Date range enabled."
-        : "Date range enabled."
-      : "Recent scan selected."
-  );
+function shouldResetPaceForMode(mode: RunSearchMode) {
+  return mode !== "auto-retry";
 }
 
 function scanCompletionEvent(input: { checked: number; failed: number; captures: number }) {
@@ -529,6 +560,38 @@ function scanCompletionEvent(input: { checked: number; failed: number; captures:
     "scan-completed",
     `Scan completed · ${input.checked} checked · ${input.failed} failed · ${input.captures} capture${input.captures === 1 ? "" : "s"}.`
   );
+}
+
+function scanIncompleteEvent(input: { checked: number; failed: number; captures: number }) {
+  return scanLogEvent(
+    "scan-paused",
+    `Scan paused · ${input.checked} checked · ${input.failed} failed · ${input.captures} capture${input.captures === 1 ? "" : "s"}.`,
+    "amber"
+  );
+}
+
+function formatPaceInterval(ms: number) {
+  if (ms < 1_000) return `${ms / 1_000} sec`;
+  const seconds = ms / 1_000;
+  return Number.isInteger(seconds) ? `${seconds} sec` : `${seconds.toFixed(1)} sec`;
+}
+
+function paceChangeEvent(change: CommonCrawlRateLimitChange) {
+  const label = `${change.pace} · ${formatPaceInterval(change.intervalMs)}`;
+  if (change.reason === "recovered") {
+    return scanLogEvent("pace-changed", `Pace restored: ${label} after 10 clean collections.`);
+  }
+  const reason =
+    change.reason === "http_429"
+      ? "HTTP 429"
+      : change.reason === "http_502"
+        ? "repeated HTTP 502"
+        : change.reason === "http_503"
+          ? "HTTP 503"
+          : change.reason === "network_error"
+            ? "network failures"
+            : "SlowDown";
+  return scanLogEvent("pace-changed", `Pace slowed: ${label} after ${reason}.`, "amber");
 }
 
 function storedCoverageLoadedEvent(input: { checked: number; total: number; failed: number; captures: number }) {
@@ -541,6 +604,17 @@ function storedCoverageLoadedEvent(input: { checked: number; total: number; fail
 function filterScanLogForCollections(entries: ScanLogEntry[], activeCollections: CommonCrawlCollection[]) {
   const activeIds = new Set(activeCollections.map((collection) => collection.id));
   return entries.filter((entry) => !isCollectionScanLogEntry(entry) || activeIds.has(entry.collection.id));
+}
+
+export function mergePersistedScanLog(
+  storedEntries: ScanLogEntry[],
+  currentEntries: ScanLogEntry[],
+  activeCollections: CommonCrawlCollection[]
+) {
+  return mergeScanLogSnapshot(
+    filterScanLogForCollections(storedEntries, activeCollections),
+    currentEntries.filter(shouldPersistScanLogEntry)
+  );
 }
 
 function isDeduplicatedScanLogEvent(entry: ScanLogEntry) {
@@ -649,8 +723,8 @@ function resultCollectionIds(results: CollectionCheckResult[], status?: Collecti
   );
 }
 
-function escapeCsvCell(value: string) {
-  return `"${value.replaceAll('"', '""')}"`;
+function successfulResultCount(results: CollectionCheckResult[]) {
+  return resultCollectionIds(results, "checked").size;
 }
 
 type ExportScope = "filtered" | "all";
@@ -690,10 +764,10 @@ function selectedExportColumns(columnKeys: CaptureColumnKey[]) {
   return CAPTURE_COLUMNS.filter((column) => columnKeys.includes(column.key));
 }
 
-function buildCaptureExport(
+async function buildCaptureExport(
   captures: CommonCrawlCapture[],
   columnKeys: CaptureColumnKey[]
-): { blob: Blob; filename: string } {
+): Promise<{ blob: Blob; filename: string }> {
   const columns = selectedExportColumns(columnKeys);
   const date = new Date().toISOString().slice(0, 10);
 
@@ -701,15 +775,15 @@ function buildCaptureExport(
     columns.map((column) => column.label),
     ...captures.map((capture) => columns.map((column) => column.value(capture)))
   ];
-  const csv = rows.map((row) => row.map(escapeCsvCell).join(",")).join("\n");
+  const csv = await computeCsv(rows);
   return {
     blob: new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" }),
     filename: `common-crawl-results-${date}.csv`
   };
 }
 
-function downloadCaptureExport(captures: CommonCrawlCapture[], columnKeys: CaptureColumnKey[]) {
-  const { blob, filename } = buildCaptureExport(captures, columnKeys);
+async function downloadCaptureExport(captures: CommonCrawlCapture[], columnKeys: CaptureColumnKey[]) {
+  const { blob, filename } = await buildCaptureExport(captures, columnKeys);
   downloadBlob(blob, filename);
 }
 
@@ -733,6 +807,28 @@ function htmlArchiveFilename(capture: CommonCrawlCapture, index: number) {
 
 // Sorts before the "0001_…" capture files so it is the first entry users see.
 const HTML_ZIP_WARNING_FILENAME = "0000_WARNING_READ-ME-FIRST.txt";
+const HTML_ZIP_MANIFEST_FILENAME = "0001_MANIFEST.csv";
+const HTML_ZIP_FAILED_FILENAME = "0002_FAILED.txt";
+const HTML_ZIP_WARN_CAPTURE_COUNT = 100;
+const HTML_ZIP_BATCH_CAPTURE_LIMIT = 500;
+const HTML_ZIP_BATCH_BYTES = 250 * 1024 * 1024;
+const HTML_ZIP_WARN_ESTIMATED_BYTES = 250 * 1024 * 1024;
+const HTML_ZIP_HARD_CAPTURE_LIMIT = 50_000;
+const HTML_ZIP_HARD_ESTIMATED_BYTES = 10 * 1024 * 1024 * 1024;
+const HTML_ZIP_DOWNLOAD_PAUSE_MS = 350;
+
+type HtmlZipPartEntry = { filename: string; content: string };
+type HtmlZipSuccess = {
+  filename: string;
+  capture: CommonCrawlCapture;
+  source: "cache" | "network" | "mock";
+  sizeBytes: number;
+};
+type HtmlZipFailure = {
+  filename: string;
+  capture: CommonCrawlCapture;
+  error: string;
+};
 
 function htmlZipWarningContent(): string {
   return `================================================================
@@ -837,6 +933,98 @@ Generated by the Common Crawl Archive Viewer.
 `;
 }
 
+function captureLengthBytes(capture: Pick<CommonCrawlCapture, "length">): number {
+  const length = Number(capture.length);
+  return Number.isFinite(length) && length > 0 ? length : 0;
+}
+
+function byteSize(value: string): number {
+  return new Blob([value]).size;
+}
+
+function waitForBrowserDownload(ms: number): Promise<void> {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
+}
+
+function htmlZipPlan(captures: CommonCrawlCapture[]) {
+  const estimatedBytes = captures.reduce((sum, capture) => sum + captureLengthBytes(capture), 0);
+  const estimatedParts = Math.max(
+    1,
+    Math.ceil(captures.length / HTML_ZIP_BATCH_CAPTURE_LIMIT),
+    estimatedBytes > 0 ? Math.ceil(estimatedBytes / HTML_ZIP_BATCH_BYTES) : 1
+  );
+  return {
+    estimatedBytes,
+    estimatedParts,
+    tooLarge:
+      captures.length > HTML_ZIP_HARD_CAPTURE_LIMIT ||
+      estimatedBytes > HTML_ZIP_HARD_ESTIMATED_BYTES,
+    needsConfirmation:
+      captures.length >= HTML_ZIP_WARN_CAPTURE_COUNT ||
+      estimatedBytes >= HTML_ZIP_WARN_ESTIMATED_BYTES ||
+      estimatedParts > 1
+  };
+}
+
+function htmlZipConfirmationMessage(captures: CommonCrawlCapture[], estimatedBytes: number, estimatedParts: number) {
+  return [
+    `Download ${captures.length} raw HTML capture${captures.length === 1 ? "" : "s"} as ZIP?`,
+    "",
+    `Estimated compressed WARC input: ${formatBytes(estimatedBytes)}.`,
+    `The export may be split into about ${estimatedParts} ZIP file${estimatedParts === 1 ? "" : "s"}.`,
+    "",
+    "Crawlback will read existing cached HTML, but newly fetched captures will not be added to the local HTML cache during this bulk export."
+  ].join("\n");
+}
+
+function htmlZipManifestContent(successes: HtmlZipSuccess[], failures: HtmlZipFailure[]): string {
+  const rows = [
+    ["filename", "url", "timestamp", "collection", "status", "source", "html_bytes", "error"],
+    ...successes.map((entry) => [
+      entry.filename,
+      entry.capture.url,
+      entry.capture.timestamp,
+      entry.capture.collectionId,
+      "exported",
+      entry.source,
+      String(entry.sizeBytes),
+      ""
+    ]),
+    ...failures.map((entry) => [
+      entry.filename,
+      entry.capture.url,
+      entry.capture.timestamp,
+      entry.capture.collectionId,
+      "failed",
+      "",
+      "",
+      entry.error
+    ])
+  ];
+  return rowsToCsv(rows);
+}
+
+function htmlZipFailedContent(failures: HtmlZipFailure[]): string {
+  if (failures.length === 0) return "";
+  return [
+    `Failed HTML captures: ${failures.length}`,
+    "",
+    ...failures.map((entry) => [
+      entry.filename,
+      entry.capture.url,
+      `${entry.capture.collectionId} ${entry.capture.timestamp}`,
+      entry.error,
+      ""
+    ].join("\n"))
+  ].join("\n");
+}
+
+function htmlZipFilename(part: number, parts: number) {
+  const date = new Date().toISOString().slice(0, 10);
+  if (parts <= 1) return `common-crawl-html-${date}.zip`;
+  return `common-crawl-html-${date}-part-${String(part).padStart(2, "0")}.zip`;
+}
+
 function downloadBlob(blob: Blob, filename: string) {
   const objectUrl = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -909,9 +1097,9 @@ async function getBroaderStoredScanRecords(
   dateFrom?: string,
   dateTo?: string
 ) {
-  const records = await listSearches();
+  const summaries = await listHistorySummaries();
   const targetScopeRank = scopeCoverageRank(scope);
-  return records.filter((record) => {
+  const matchingSummaries = summaries.filter((record) => {
     if (record.mock !== mock) return false;
     if (record.scanScope !== "recent" && record.scanScope !== "all" && record.scanScope !== "custom") return false;
     if (scopeCoverageRank(record.scanScope) < targetScopeRank) return false;
@@ -920,6 +1108,13 @@ async function getBroaderStoredScanRecords(
     }
     return searchUrlCoversTarget(record.url, record.matchType, url, matchType);
   });
+  const keys = new Set(matchingSummaries.flatMap(storedSearchKeysForSummary));
+  const records = await Promise.all(Array.from(keys).map((key) => getSearch(key)));
+  return records.filter((record): record is StoredSearch => Boolean(record));
+}
+
+function storedSearchKeysForSummary(record: HistorySummaryRecord) {
+  return record.storageKeys?.length ? record.storageKeys : [record.key];
 }
 
 function uniqueStoredSearches(records: StoredSearch[]) {
@@ -1057,6 +1252,58 @@ function formatDuration(ms: number) {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
+export function persistedSearchDurationMs({
+  isRunning,
+  activeDurationMs,
+  storedDurationMs,
+  coverage,
+  persistedScanLog
+}: {
+  isRunning: boolean;
+  activeDurationMs: number;
+  storedDurationMs: number;
+  coverage: CoverageRecord | undefined;
+  persistedScanLog: ScanLogEntry[];
+}) {
+  const storedCoverageDuration = coverage?.durationMs ?? 0;
+  if (isRunning) {
+    return Math.max(Math.round(storedDurationMs), storedCoverageDuration);
+  }
+  const coverageDuration = coverage?.activeScanStartedAt ? storedCoverageDuration : coverageDurationMs(coverage);
+  return Math.max(Math.round(activeDurationMs), coverageDuration, scanLogDurationMs(persistedScanLog));
+}
+
+export function restoredCoverageDurationMs(
+  coverage: CoverageRecord | undefined,
+  scanLog: ScanLogEntry[] = coverageScanLogResults(coverage),
+  now = Date.now()
+) {
+  const storedDuration = coverage?.durationMs ?? 0;
+  const logDuration = scanLogDurationMs(scanLog);
+  if (hasRestorableActiveScan(coverage, scanLog, now)) {
+    return Math.max(coverageDurationMs(coverage, now), logDuration);
+  }
+  if (!coverage?.activeScanStartedAt) return Math.max(coverageDurationMs(coverage), logDuration);
+  return Math.max(storedDuration, logDuration);
+}
+
+function hasRestorableActiveScan(
+  coverage: CoverageRecord | undefined,
+  scanLog: ScanLogEntry[] = coverageScanLogResults(coverage),
+  now = Date.now()
+) {
+  const activeStartedAt = coverage?.activeScanStartedAt;
+  if (typeof activeStartedAt !== "number" || !Number.isFinite(activeStartedAt)) return false;
+  if (activeStartedAt <= 0 || now < activeStartedAt) return false;
+  if (now - activeStartedAt > RESTORABLE_ACTIVE_SCAN_MAX_AGE_MS) return false;
+  return !scanLog.some((entry) =>
+    "kind" in entry &&
+    (entry.event === "scan-completed" || entry.event === "scan-paused" || entry.event === "scan-failed") &&
+    typeof entry.checkedAt === "number" &&
+    entry.checkedAt >= activeStartedAt
+  );
+}
+
 function formatSecondsAbbrev(ms: number) {
   return `${formatDuration(ms)} sec`;
 }
@@ -1093,20 +1340,10 @@ function scanLogRowClass(withDate: boolean) {
 function LandingStatsFooter() {
   return (
     <div
-      className="reveal-fade pointer-events-none absolute inset-x-0 top-0 z-10 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 px-4 pt-7 text-[11px] uppercase tracking-[0.22em] text-zinc-500"
+      className="reveal-fade pointer-events-none absolute inset-x-0 top-0 z-10 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 px-4 pt-7 text-sm tracking-wide text-zinc-300"
       style={{ animationDelay: "560ms" }}
     >
-      <span>
-        <span className="text-zinc-300">300B+</span> pages
-      </span>
-      <span className="text-amber-300/70">·</span>
-      <span>
-        <span className="text-zinc-300">100+</span> crawls
-      </span>
-      <span className="text-amber-300/70">·</span>
-      <span>
-        since <span className="text-zinc-300">2008</span>
-      </span>
+      <span>Find archived versions of web pages.</span>
     </div>
   );
 }
@@ -1150,6 +1387,7 @@ export function ArchiveSearchApp({
   const initialScanId = routeParams.scan;
   const initialSavedKey = routeParams.saved;
   const startsFromSearchRoute = autoStart;
+  const startsFromStoredRoute = startsFromSearchRoute && (initialHistoryMode || Boolean(initialScanId) || Boolean(initialSavedKey));
   const [targetUrl, setTargetUrl] = useState(initialUrl);
   const [matchType, setMatchType] = useState<MatchType>(initialMatchType ?? DEFAULT_MATCH_TYPE);
   const [collections, setCollections] = useState<CommonCrawlCollection[]>([]);
@@ -1163,13 +1401,19 @@ export function ArchiveSearchApp({
     failed: 0,
     activeCollections: []
   });
-  const [state, setState] = useState<SearchState>(startsFromSearchRoute ? "loading-collections" : "idle");
+  const [state, setState] = useState<SearchState>(
+    startsFromStoredRoute ? "loading-stored-scan" : startsFromSearchRoute ? "loading-collections" : "idle"
+  );
   const [error, setError] = useState("");
   const [yearFilter, setYearFilter] = useState(routeParams.year ?? "all");
   const [collectionFilter, setCollectionFilter] = useState(routeParams.collection ?? "all");
   const [mimeFilter, setMimeFilter] = useState(routeParams.mime ?? "all");
   const [statusFilter, setStatusFilter] = useState(routeParams.status ?? "all");
   const [urlFilter, setUrlFilter] = useState(routeParams.filter ?? "");
+  // Feed the heavy filter/sort a low-priority, deferred copy of the text query so
+  // the input stays responsive while React re-filters large capture sets in the
+  // background (React 19 concurrent feature, no dependency).
+  const deferredUrlFilter = useDeferredValue(urlFilter);
   const [sortBy, setSortBy] = useState<SortOption>(initialSortBy);
   const [viewMode, setViewMode] = useState<ViewMode>(initialViewMode);
   const [scanScope, setScanScope] = useState<ScanScope>(initialScanScope);
@@ -1291,6 +1535,7 @@ export function ArchiveSearchApp({
   ]);
 
   useEffect(() => {
+    markPerformance("page-hydrated:search");
     void getSettings()
       .then((settings) => {
         setAppSettings(settings);
@@ -1372,17 +1617,23 @@ export function ArchiveSearchApp({
   }, [appSettings, autoStart, initialUrl]);
 
   const filteredCaptures = useMemo(() => {
-    const query = urlFilter.trim().toLowerCase();
-    const filtered = captures.filter((capture) => {
-      if (yearFilter !== "all" && captureYear(capture.timestamp) !== yearFilter) return false;
-      if (collectionFilter !== "all" && capture.collectionId !== collectionFilter) return false;
-      if (mimeFilter !== "all" && capture.mime !== mimeFilter) return false;
-      if (statusFilter !== "all" && capture.status !== statusFilter) return false;
-      if (query && !capture.url.toLowerCase().includes(query)) return false;
-      return true;
-    });
-    return filtered.sort((a, b) => compareCaptures(a, b, sortBy));
-  }, [captures, collectionFilter, mimeFilter, sortBy, statusFilter, urlFilter, yearFilter]);
+    return measureSync(
+      "search-filter-sort",
+      () => {
+        const query = deferredUrlFilter.trim().toLowerCase();
+        const filtered = captures.filter((capture) => {
+          if (yearFilter !== "all" && captureYear(capture.timestamp) !== yearFilter) return false;
+          if (collectionFilter !== "all" && capture.collectionId !== collectionFilter) return false;
+          if (mimeFilter !== "all" && capture.mime !== mimeFilter) return false;
+          if (statusFilter !== "all" && capture.status !== statusFilter) return false;
+          if (query && !capture.url.toLowerCase().includes(query)) return false;
+          return true;
+        });
+        return filtered.sort((a, b) => compareCaptures(a, b, sortBy));
+      },
+      { total: captures.length }
+    );
+  }, [captures, collectionFilter, deferredUrlFilter, mimeFilter, sortBy, statusFilter, yearFilter]);
 
   const exportCaptures = exportScope === "all" ? captures : filteredCaptures;
   const canExport = exportCaptures.length > 0;
@@ -1393,13 +1644,11 @@ export function ArchiveSearchApp({
     );
   }, []);
 
+  // The list is virtualized (no client-side slicing), but the page bounds are
+  // still derived for URL/session position persistence and the page-clamp effect.
   const pageSize = appSettings?.searchPageSize ?? DEFAULT_SEARCH_PAGE_SIZE;
   const totalPages = Math.max(1, Math.ceil(filteredCaptures.length / pageSize));
   const currentPage = Math.min(page, totalPages);
-  const pagedCaptures = useMemo(
-    () => filteredCaptures.slice((currentPage - 1) * pageSize, currentPage * pageSize),
-    [filteredCaptures, currentPage, pageSize]
-  );
 
   useEffect(() => {
     scanLogRef.current = scanLog;
@@ -1439,12 +1688,17 @@ export function ArchiveSearchApp({
   }, [clearFreshHomeSearchState, syncRestoredTargetUrl]);
 
   const filterOptions = useMemo(
-    () => ({
-      years: unique(captures.map((capture) => captureYear(capture.timestamp))),
-      collections: unique(captures.map((capture) => capture.collectionId)),
-      mimes: unique(captures.map((capture) => capture.mime)),
-      statuses: unique(captures.map((capture) => capture.status))
-    }),
+    () =>
+      measureSync(
+        "filter-options",
+        () => ({
+          years: unique(captures.map((capture) => captureYear(capture.timestamp))),
+          collections: unique(captures.map((capture) => capture.collectionId)),
+          mimes: unique(captures.map((capture) => capture.mime)),
+          statuses: unique(captures.map((capture) => capture.status))
+        }),
+        { total: captures.length }
+      ),
     [captures]
   );
 
@@ -1501,6 +1755,11 @@ export function ArchiveSearchApp({
   }
 
   async function applyCoverageToState(session: ScanSession, loadedCollections = collections) {
+    const restoreMark = `search-stored-scan-restore:start:${session.scanId}`;
+    markPerformance(restoreMark);
+    try {
+    setState("loading-stored-scan");
+    setError("");
     const activeCollections = collectionsForSession(loadedCollections, session);
     const activeIds = new Set(activeCollections.map((collection) => collection.id));
     const coverage = await getCoverage(session.targetId);
@@ -1513,21 +1772,33 @@ export function ArchiveSearchApp({
     const logResults = filterScanLogForCollections(coverageScanLogResults(coverage), activeCollections);
     const checkedIds = resultCollectionIds(results);
     const failed = results.filter((result) => result.status === "not-checked");
+    const successfulResults = successfulResultCount(results);
+    const storedCaptureCount = results.reduce((count, result) => count + result.captures.length, 0);
+    setCollections(loadedCollections);
+    setFailedResults(failed);
+    setCheckedCollectionIds(checkedIds);
+    setProgress({
+      checked: successfulResults,
+      total: activeCollections.length,
+      hits: storedCaptureCount,
+      failed: failed.length,
+      activeCollections: []
+    });
     const storedCaptures = dedupeCaptures(filterCapturesByDateRange(
       coverageCaptures(coverage).filter((capture) => activeIds.has(capture.collectionId)),
       session.dateFrom,
       session.dateTo
     ));
-    const activeStartedAt = coverage?.activeScanStartedAt;
-    const storedDuration = coverage?.durationMs ?? 0;
-    const displayedDuration = coverageDurationMs(coverage) || scanLogDurationMs(logResults);
+    const hasRestoredActiveRun = hasRestorableActiveScan(coverage, logResults);
+    const storedDuration = restoredCoverageDurationMs(coverage, logResults);
+    const displayedDuration = storedDuration || scanLogDurationMs(logResults);
     const cachedRobotsStatus = readCachedRobotsStatus(session.url);
     const restoredLog =
       checkedIds.size > 0 || storedCaptures.length > 0 || failed.length > 0
         ? [
             ...logResults,
             storedCoverageLoadedEvent({
-              checked: checkedIds.size,
+              checked: successfulResults,
               total: activeCollections.length,
               failed: failed.length,
               captures: storedCaptures.length
@@ -1535,7 +1806,6 @@ export function ArchiveSearchApp({
           ]
         : logResults;
 
-    setCollections(loadedCollections);
     setCaptures(storedCaptures);
     setFailedResults(failed);
     setCheckedCollectionIds(checkedIds);
@@ -1546,7 +1816,9 @@ export function ArchiveSearchApp({
     // open/closed state is intentionally not remembered across visits.
     setScanLogOpen(false);
     const restoredState =
-      results.length > 0
+      hasRestoredActiveRun
+        ? "running"
+        : results.length > 0
         ? "done"
         : startsFromSearchRoute && !initialHistoryMode
           ? "loading-collections"
@@ -1555,26 +1827,28 @@ export function ArchiveSearchApp({
             : "idle";
     setError("");
     setState(restoredState);
-    setIsStoredView(results.length > 0);
+    setIsStoredView(results.length > 0 && !hasRestoredActiveRun);
     if (cachedRobotsStatus) setRobotsStatus(cachedRobotsStatus);
     setBlockedRobotsConfirmation(null);
-    setScanStartedAt(activeStartedAt ?? coverage?.updatedAt);
-    setStoredDurationMs(storedDuration);
-    setIsPersistedScanRunning(Boolean(activeStartedAt));
+    setScanStartedAt(hasRestoredActiveRun ? coverage?.activeScanStartedAt : undefined);
+    setStoredDurationMs(hasRestoredActiveRun ? coverage?.durationMs ?? 0 : storedDuration);
+    setIsPersistedScanRunning(hasRestoredActiveRun);
     setElapsedMs(displayedDuration);
     setProgress({
-      checked: checkedIds.size,
+      checked: successfulResults,
       total: activeCollections.length,
       hits: storedCaptures.length,
       failed: failed.length,
       activeCollections: []
     });
+    } finally {
+      measurePerformance("search-stored-scan-restore", restoreMark, { scope: session.scope });
+    }
   }
 
   async function loadSessionById(scanId: string) {
     const session = await getScanSession(scanId);
     if (!session) return false;
-    void checkRobotsForUrl(session.url);
     const loadedCollections = collections.length > 0 ? collections : await fetchCollections();
     applySessionIdentity(session);
     await applyCoverageToState(session, loadedCollections);
@@ -1587,10 +1861,10 @@ export function ArchiveSearchApp({
     activeScope: ScanScope,
     dateFrom = customDateFrom,
     dateTo = customDateTo,
-    savedKey?: string
+    savedKey?: string,
+    prefetchedCollections?: CommonCrawlCollection[]
   ) {
-    void checkRobotsForUrl(url);
-    const loadedCollections = collections.length > 0 ? collections : await fetchCollections();
+    const loadedCollections = prefetchedCollections ?? (collections.length > 0 ? collections : await fetchCollections());
     const legacySession = await findOrCreateLegacySession(url, activeMatchType, false, activeScope, {
       dateFrom,
       dateTo,
@@ -1692,6 +1966,9 @@ export function ArchiveSearchApp({
     if (activeScope === "custom" && !hasValidCustomDateRange(activeDateFrom, activeDateTo)) return;
 
     abortRef.current?.abort();
+    if (shouldResetPaceForMode(mode)) {
+      resetCommonCrawlRateLimitState();
+    }
     const startupController = new AbortController();
     abortRef.current = startupController;
     const session = await ensureScanSession({
@@ -1738,7 +2015,8 @@ export function ArchiveSearchApp({
     setCustomDateFrom(activeScope === "custom" ? activeDateFrom : "");
     setCustomDateTo(activeScope === "custom" ? activeDateTo : "");
 
-    const precheckedRobotsStatus = initialMockMode
+    const robotsChecksEnabled = await shouldCheckRobotsTxt();
+    const precheckedRobotsStatus = initialMockMode || !robotsChecksEnabled
       ? null
       : reuseStoredPrerequisites
         ? (readCachedRobotsStatus(url) ?? robotsStatus)
@@ -1746,7 +2024,7 @@ export function ArchiveSearchApp({
     if (startupController.signal.aborted) {
       setIsPersistedScanRunning(false);
       setProgress((current) => ({ ...current, activeCollections: [] }));
-      setState("cancelled");
+      setState("paused");
       return;
     }
     // Continuations of a stored scan (missing collections, retries, resume)
@@ -1772,14 +2050,14 @@ export function ArchiveSearchApp({
     });
   }
 
-  function cancelScan() {
+  function pauseScan() {
     const controller = abortRef.current;
     if (!controller || controller.signal.aborted) return;
     controller.abort();
     setNextAutoRetryAt(undefined);
     setIsPersistedScanRunning(false);
     setProgress((current) => ({ ...current, activeCollections: [] }));
-    setState("cancelled");
+    setState("paused");
   }
 
   async function executeRunSearch(
@@ -1822,15 +2100,17 @@ export function ArchiveSearchApp({
     // for blocked-robots confirmation again.
     const coverageBeforeRun = await getCoverage(session.targetId);
     const isStoredContinuation = mode !== "fresh" && hasStoredCoverageHistory(coverageBeforeRun);
-    const effectiveRobotsStatus =
-      options.precheckedRobotsStatus ??
-      (options.reuseStoredPrerequisites
-        ? null
-        : (initialMockMode ? null : await checkRobotsForUrl(url, controller.signal, undefined, { preferLive: true })));
+    const robotsChecksEnabled = await shouldCheckRobotsTxt();
+    const effectiveRobotsStatus = !robotsChecksEnabled
+      ? null
+      : options.precheckedRobotsStatus ??
+        (options.reuseStoredPrerequisites
+          ? null
+          : (initialMockMode ? null : await checkRobotsForUrl(url, controller.signal, undefined, { preferLive: true })));
     if (controller.signal.aborted) {
       setIsPersistedScanRunning(false);
       setProgress((current) => ({ ...current, activeCollections: [] }));
-      setState("cancelled");
+      setState("paused");
       return;
     }
     if (
@@ -1854,7 +2134,13 @@ export function ArchiveSearchApp({
     setScanScope(activeScope);
     setPersistedScanScope(activeScope);
     setActiveCollectionIds(session.collectionIds);
-    const baseDurationMs = mode === "fresh" ? 0 : coverageDurationMs(coverageBeforeRun) || storedDurationMs;
+    const baseDurationMs = mode === "fresh"
+      ? 0
+      : Math.max(
+          restoredCoverageDurationMs(coverageBeforeRun),
+          storedDurationMs,
+          scanLogDurationMs(scanLogRef.current)
+        );
     const runStartedAt = Date.now();
     await startCoverageRun(session, runStartedAt, baseDurationMs, {
       collectionIds: session.collectionIds,
@@ -1907,37 +2193,33 @@ export function ArchiveSearchApp({
       void appendCoverageScanLogEntry(session, entry);
     };
     appendRunLogEvent(scanStartEventForMode(mode));
-    const scopeEvent =
-      mode === "fresh" || mode === "missing"
-        ? scanScopeEvent(activeScope, activeDateFrom, activeDateTo)
-        : undefined;
-    if (scopeEvent) appendRunLogEvent(scopeEvent);
-    if (!options.precheckedRobotsStatus) {
+    if (robotsChecksEnabled && !options.precheckedRobotsStatus) {
       void checkRobotsForUrl(url, controller.signal, appendRunLogEvent);
     }
-    let cancellationLogged = false;
-    const appendCancellationLog = () => {
-      if (cancellationLogged) return;
-      cancellationLogged = true;
-      appendRunLogEvent(scanLogEvent("scan-cancelled", "Scan cancelled.", "red"));
+    let pauseLogged = false;
+    const appendPauseLog = () => {
+      if (pauseLogged) return;
+      pauseLogged = true;
+      appendRunLogEvent(scanLogEvent("scan-paused", "Scan paused.", "amber"));
     };
+    let unsubscribeRateLimitChanges: (() => void) | undefined;
 
     try {
       const activeOptOutMatch = options.reuseStoredPrerequisites
         ? null
         : await findOptOutMatch(url, activeMatchType, controller.signal);
       if (controller.signal.aborted) {
-        appendCancellationLog();
+        appendPauseLog();
         await persistRunDuration();
-        setState("cancelled");
+        setState("paused");
         return;
       }
       if (!options.reuseStoredPrerequisites) {
         appendRunLogEvent(
           scanLogEvent(
             "opt-out-checked",
-            activeOptOutMatch ? "Opt-out registry matched this URL." : "Opt-out registry checked: no match.",
-            activeOptOutMatch ? "red" : "neutral"
+            activeOptOutMatch ? "Opt-out registry matched this URL." : "Opt-out registry checked, no match.",
+            activeOptOutMatch ? "red" : "green"
           )
         );
       }
@@ -1991,7 +2273,7 @@ export function ArchiveSearchApp({
         // Restored historical scan (live re-scan blocked) stays collapsed.
         setScanLogOpen(false);
         setProgress({
-          checked: storedCheckedIds.size,
+          checked: successfulResultCount(reconstructedResults),
           total: activeCollections.length,
           hits: storedCaptures.length,
           failed: storedFailedResults.length,
@@ -2069,6 +2351,10 @@ export function ArchiveSearchApp({
           activeScope !== "recent" && originalIds.size > 0
             ? activeCollections.filter((collection) => !originalIds.has(collection.id) && (!attemptedIds.has(collection.id) || failedIds.has(collection.id)))
             : activeCollections.filter((collection) => !attemptedIds.has(collection.id));
+      } else if (mode === "resume") {
+        const pendingCollections = activeCollections.filter((collection) => !coveredIds.has(collection.id) && !failedIds.has(collection.id));
+        const failedCollections = activeCollections.filter((collection) => !coveredIds.has(collection.id) && failedIds.has(collection.id));
+        searchSet = [...pendingCollections, ...failedCollections];
       } else if (mode === "retry-failed") {
         searchSet = activeCollections.filter((collection) => failedIds.has(collection.id));
       } else if (mode === "auto-retry") {
@@ -2100,7 +2386,7 @@ export function ArchiveSearchApp({
       ) {
         appendRunLogEvent(
           storedCoverageLoadedEvent({
-            checked: currentCheckedIds.size,
+            checked: successfulResultCount(currentResults),
             total: activeCollections.length,
             failed: currentFailedResults.length,
             captures: currentCaptures.length
@@ -2112,21 +2398,29 @@ export function ArchiveSearchApp({
         if (mode === "auto-retry") {
           appendRunLogEvent(scanLogEvent("auto-retry-skipped", "Auto retry skipped: no failed or unchecked collections remain.", "amber"));
         }
-        appendRunLogEvent(scanCompletionEvent({
-          checked: currentCheckedIds.size,
+        const finalEventInput = {
+          checked: successfulResultCount(currentResults),
           failed: currentFailedResults.length,
           captures: currentCaptures.length
-        }));
+        };
+        appendRunLogEvent(currentFailedResults.length > 0 ? scanIncompleteEvent(finalEventInput) : scanCompletionEvent(finalEventInput));
         await persistRunDuration();
-        setState("done");
+        setState(currentFailedResults.length > 0 ? "paused" : "done");
         return;
       }
 
       setState("running");
       let consecutiveAvailabilitySignals = 0;
       let stopReason: SearchStopReason = "completed";
+      unsubscribeRateLimitChanges = subscribeCommonCrawlRateLimitChanges((change) => {
+        if (change.hostname === "index.commoncrawl.org") {
+          appendRunLogEvent(paceChangeEvent(change));
+        }
+      });
 
-      for (const collection of searchSet) {
+      let didQueueImmediateFailureRetry = mode === "retry-failed" || mode === "auto-retry";
+      for (let searchIndex = 0; searchIndex < searchSet.length; searchIndex += 1) {
+        const collection = searchSet[searchIndex];
         if (controller.signal.aborted) break;
 
         coverage = await getCoverage(session.targetId);
@@ -2173,21 +2467,12 @@ export function ArchiveSearchApp({
           (delayMs) => appendRunLogEvent(
             scanLogEvent("retry-wait-started", `${collection.id} retry wait started · ${formatSecondsAbbrev(delayMs)}.`, "amber")
           ),
-          undefined,
-          undefined,
+          null,
+          null,
           requestedWindow
         );
         if (result.fromCache) {
           appendRunLogEvent(scanLogEvent("cache-hit", `${collection.id} loaded from CDX cache.`));
-        }
-        if (result.truncated) {
-          appendRunLogEvent(
-            scanLogEvent(
-              "collection-truncated",
-              `${collection.id} has more captures than the per-collection limit; showing the newest ${result.captures.length}.`,
-              "amber"
-            )
-          );
         }
         coverage = await upsertCoverageResult(target, result);
         currentResults = filterResultsForScope(
@@ -2228,13 +2513,33 @@ export function ArchiveSearchApp({
           stopReason = "circuit-breaker";
           break;
         }
+
+        if (
+          !didQueueImmediateFailureRetry &&
+          searchIndex === searchSet.length - 1 &&
+          currentFailedResults.length > 0
+        ) {
+          didQueueImmediateFailureRetry = true;
+          const retryIds = new Set(currentFailedResults.map((failedResult) => failedResult.collection.id));
+          const retryCollections = activeCollections.filter((activeCollection) => retryIds.has(activeCollection.id));
+          if (retryCollections.length > 0) {
+            appendRunLogEvent(scanLogEvent(
+              "scan-restarted",
+              `Retrying ${retryCollections.length} failed source${retryCollections.length === 1 ? "" : "s"} before finishing.`,
+              "amber"
+            ));
+            searchSet = [...searchSet, ...retryCollections];
+          }
+        }
       }
+      unsubscribeRateLimitChanges?.();
+      unsubscribeRateLimitChanges = undefined;
 
       await persistRunDuration();
 
       if (controller.signal.aborted) {
-        appendCancellationLog();
-        setState("cancelled");
+        appendPauseLog();
+        setState("paused");
       } else if (stopReason === "circuit-breaker") {
         appendRunLogEvent(
           scanLogEvent(
@@ -2245,18 +2550,20 @@ export function ArchiveSearchApp({
         );
         setState("paused");
       } else {
-        appendRunLogEvent(scanCompletionEvent({
-          checked: currentCheckedIds.size,
+        const finalEventInput = {
+          checked: successfulResultCount(currentResults),
           failed: currentFailedResults.length,
           captures: currentCaptures.length
-        }));
-        setState("done");
+        };
+        appendRunLogEvent(currentFailedResults.length > 0 ? scanIncompleteEvent(finalEventInput) : scanCompletionEvent(finalEventInput));
+        setState(currentFailedResults.length > 0 ? "paused" : "done");
       }
     } catch (err) {
+      unsubscribeRateLimitChanges?.();
       if (controller.signal.aborted) {
-        appendCancellationLog();
+        appendPauseLog();
         await persistRunDuration();
-        setState("cancelled");
+        setState("paused");
         return;
       }
       setError(formatSearchError(err));
@@ -2272,6 +2579,10 @@ export function ArchiveSearchApp({
     appendLogEvent?: (entry: ScanLogEvent) => void,
     options: { preferLive?: boolean } = {}
   ): Promise<RobotsUiState | null> {
+    if (!(await shouldCheckRobotsTxt())) {
+      setRobotsStatus(null);
+      return null;
+    }
     const target = robotsUrlForTarget(url);
     const cached = options.preferLive ? null : readCachedRobotsStatus(url);
     if (cached) {
@@ -2324,6 +2635,18 @@ export function ArchiveSearchApp({
     return null;
   }
 
+  async function shouldCheckRobotsTxt() {
+    if (appSettings) return appSettings.robotsTxtChecksEnabled;
+    try {
+      const settings = await getSettings();
+      setAppSettings(settings);
+      setShowHtmlPrivacyWarning(settings.showHtmlPrivacyWarning);
+      return settings.robotsTxtChecksEnabled;
+    } catch {
+      return true;
+    }
+  }
+
   async function fetchRobotsStatusViaApi(url: string, signal: AbortSignal): Promise<RobotsCheckResult> {
     const response = await fetch(`/api/robots?${new URLSearchParams({ url }).toString()}`, {
       headers: { Accept: "application/json" },
@@ -2342,6 +2665,25 @@ export function ArchiveSearchApp({
 
   async function downloadHtmlZip(capturesToDownload: CommonCrawlCapture[]) {
     if (capturesToDownload.length === 0 || htmlZipDownload.active) return;
+    const plan = htmlZipPlan(capturesToDownload);
+    if (plan.tooLarge) {
+      const message = `HTML ZIP export is too large for one browser session (${capturesToDownload.length} captures, estimated ${formatBytes(plan.estimatedBytes)}). Narrow the filters and export in smaller batches.`;
+      setHtmlZipDownload({
+        active: false,
+        completed: 0,
+        total: capturesToDownload.length,
+        error: message
+      });
+      appendUiScanLogEvent(scanLogEvent("html-zip-failed", message, "red"));
+      return;
+    }
+    if (
+      plan.needsConfirmation &&
+      !window.confirm(htmlZipConfirmationMessage(capturesToDownload, plan.estimatedBytes, plan.estimatedParts))
+    ) {
+      return;
+    }
+
     const controller = new AbortController();
     htmlZipAbortRef.current = controller;
     appendUiScanLogEvent(
@@ -2353,52 +2695,133 @@ export function ArchiveSearchApp({
     setHtmlZipDownload({
       active: true,
       completed: 0,
-      total: capturesToDownload.length
+      total: capturesToDownload.length,
+      failed: 0,
+      part: 1,
+      parts: plan.estimatedParts,
+      bytes: 0
     });
 
     try {
-      const entries: { filename: string; content: string }[] = [
-        { filename: HTML_ZIP_WARNING_FILENAME, content: htmlZipWarningContent() }
-      ];
+      let part = 1;
+      let parts = plan.estimatedParts;
+      let downloadedParts = 0;
+      let completed = 0;
+      let failedCount = 0;
+      let exportedCount = 0;
+      let exportedBytes = 0;
+      let partCaptureCount = 0;
+      let partBytes = 0;
+      let entries: HtmlZipPartEntry[] = [{ filename: HTML_ZIP_WARNING_FILENAME, content: htmlZipWarningContent() }];
+      let successes: HtmlZipSuccess[] = [];
+      let failures: HtmlZipFailure[] = [];
+
+      const updateZipProgress = () => {
+        setHtmlZipDownload({
+          active: true,
+          completed,
+          total: capturesToDownload.length,
+          failed: failedCount,
+          part,
+          parts,
+          bytes: exportedBytes
+        });
+      };
+
+      const flushPart = async (force = false) => {
+        if (!force && successes.length === 0 && failures.length === 0) return;
+        if (successes.length === 0 && failures.length === 0) return;
+        entries.push({ filename: HTML_ZIP_MANIFEST_FILENAME, content: htmlZipManifestContent(successes, failures) });
+        if (failures.length > 0) {
+          entries.push({ filename: HTML_ZIP_FAILED_FILENAME, content: htmlZipFailedContent(failures) });
+        }
+        parts = Math.max(parts, part);
+        updateZipProgress();
+        const zipBytes = await computeZipBytes(entries);
+        downloadBlob(new Blob([zipBytes], { type: "application/zip" }), htmlZipFilename(part, parts));
+        await waitForBrowserDownload(HTML_ZIP_DOWNLOAD_PAUSE_MS);
+        downloadedParts += 1;
+        part += 1;
+        parts = Math.max(parts, part);
+        partCaptureCount = 0;
+        partBytes = 0;
+        entries = [{ filename: HTML_ZIP_WARNING_FILENAME, content: htmlZipWarningContent() }];
+        successes = [];
+        failures = [];
+        updateZipProgress();
+      };
+
       for (let index = 0; index < capturesToDownload.length; index += 1) {
         if (controller.signal.aborted) throw new DOMException("The operation was aborted.", "AbortError");
         const capture = capturesToDownload[index];
-        const record = isMockCaptureFilename(capture.filename)
-          ? createMockWarcRecord({
-              filename: capture.filename,
-              timestamp: capture.timestamp,
-              url: capture.url,
-              collection: capture.collectionId
-            })
-          : await loadCaptureRecord({
-              capture,
-              signal: controller.signal
-            }).then((loaded) => loaded.record);
-
-        entries.push({
-          filename: htmlArchiveFilename(capture, index),
-          content: record.html
-        });
-        setHtmlZipDownload({
-          active: true,
-          completed: index + 1,
-          total: capturesToDownload.length
-        });
+        const filename = htmlArchiveFilename(capture, index);
+        try {
+          const loaded = isMockCaptureFilename(capture.filename)
+            ? {
+                record: createMockWarcRecord({
+                  filename: capture.filename,
+                  timestamp: capture.timestamp,
+                  url: capture.url,
+                  collection: capture.collectionId
+                }),
+                source: "mock" as const
+              }
+            : await loadCaptureRecord({
+                capture,
+                cacheMode: "read-only",
+                retryCount: 2,
+                signal: controller.signal
+              });
+          const contentBytes = byteSize(loaded.record.html);
+          if (
+            partCaptureCount > 0 &&
+            (partCaptureCount >= HTML_ZIP_BATCH_CAPTURE_LIMIT || partBytes + contentBytes > HTML_ZIP_BATCH_BYTES)
+          ) {
+            await flushPart();
+          }
+          entries.push({ filename, content: loaded.record.html });
+          successes.push({
+            filename,
+            capture,
+            source: loaded.source,
+            sizeBytes: contentBytes
+          });
+          partCaptureCount += 1;
+          partBytes += contentBytes;
+          exportedCount += 1;
+          exportedBytes += contentBytes;
+        } catch (error) {
+          if (controller.signal.aborted) throw error;
+          failedCount += 1;
+          failures.push({
+            filename,
+            capture,
+            error: error instanceof Error ? error.message : "Could not load this capture."
+          });
+          if (partCaptureCount + failures.length >= HTML_ZIP_BATCH_CAPTURE_LIMIT) {
+            await flushPart();
+          }
+        }
+        completed = index + 1;
+        updateZipProgress();
       }
 
-      downloadBlob(
-        createZipBlob(entries),
-        `common-crawl-html-${new Date().toISOString().slice(0, 10)}.zip`
-      );
+      await flushPart(true);
       setHtmlZipDownload({
         active: false,
         completed: capturesToDownload.length,
-        total: capturesToDownload.length
+        total: capturesToDownload.length,
+        failed: failedCount,
+        part: Math.max(1, downloadedParts),
+        parts: Math.max(1, downloadedParts),
+        bytes: exportedBytes,
+        error: failedCount > 0 ? `${failedCount} capture${failedCount === 1 ? "" : "s"} could not be exported. See the ZIP manifest.` : undefined
       });
       appendUiScanLogEvent(
         scanLogEvent(
           "html-zip-completed",
-          `HTML ZIP download completed · ${capturesToDownload.length} capture${capturesToDownload.length === 1 ? "" : "s"}.`
+          `HTML ZIP download completed · ${exportedCount} exported · ${failedCount} failed · ${Math.max(1, downloadedParts)} ZIP file${Math.max(1, downloadedParts) === 1 ? "" : "s"}.`,
+          failedCount > 0 ? "amber" : "neutral"
         )
       );
     } catch (error) {
@@ -2441,6 +2864,18 @@ export function ArchiveSearchApp({
         const session = await getScanSession(initialScanId);
         if (!session || !initialAction) return;
         if (initialAction === "fresh") {
+          resetCommonCrawlRateLimitState();
+          const loadedCollections = collections.length > 0 ? collections : await fetchCollections();
+          const coverage = await getCoverage(session.targetId);
+          if (hasStoredCoverageHistory(coverage)) {
+            if (!coverageHasPendingSessionWork(coverage, session, loadedCollections)) return;
+            await executeRunSearch("resume", {
+              session,
+              precheckedRobotsStatus: readCachedRobotsStatus(session.url) ?? robotsStatus,
+              reuseStoredPrerequisites: true
+            });
+            return;
+          }
           await executeRunSearch("fresh", { session });
         } else if (initialAction === "retry-failed") {
           await runSearch("retry-failed", { url: session.url, matchType: session.matchType, scope: session.scope });
@@ -2479,9 +2914,20 @@ export function ArchiveSearchApp({
     setCustomDateFrom(initialDateFrom);
     setCustomDateTo(initialDateTo);
     void (async () => {
-      const loadedSession = await loadStoredScan(searchUrl, nextMatchType, initialScanScope, initialDateFrom, initialDateTo, initialSavedKey);
+      const loadedCollections = collections.length > 0 ? collections : await fetchCollections();
+      const loadedSession = await loadStoredScan(
+        searchUrl,
+        nextMatchType,
+        initialScanScope,
+        initialDateFrom,
+        initialDateTo,
+        initialSavedKey,
+        loadedCollections
+      );
       const loadedCoverage = await getCoverage(loadedSession.targetId);
-      const shouldResumeStoredScan = hasStoredCoverageHistory(loadedCoverage);
+      const hasStoredCoverage = hasStoredCoverageHistory(loadedCoverage);
+      const shouldResumeStoredScan =
+        hasStoredCoverage && coverageHasPendingSessionWork(loadedCoverage, loadedSession, loadedCollections);
       if (initialHistoryMode && !initialAction) return;
 
       if (initialAction === "retry-failed") {
@@ -2500,6 +2946,7 @@ export function ArchiveSearchApp({
         });
         return;
       }
+      if (hasStoredCoverage) return;
       await runSearch("fresh", {
         url: searchUrl,
         matchType: nextMatchType,
@@ -2548,8 +2995,8 @@ export function ArchiveSearchApp({
     scanScope === "recent" || activeIdSet.size === 0
       ? 0
       : currentScopeCollections.filter((collection) => !activeIdSet.has(collection.id)).length;
-  const canContinue = !isRunning && !optOutMatch && Boolean(targetUrl.trim()) && uncheckedCount > 0 && checkedCollectionIds.size > 0;
-  const canRetryFailed = !isRunning && !optOutMatch && Boolean(targetUrl.trim()) && failedCount > 0;
+  const canContinue = !isRunning && !optOutMatch && Boolean(targetUrl.trim()) && uncheckedCount > 0;
+  const canRetryFailed = !isRunning && !optOutMatch && Boolean(targetUrl.trim()) && failedCount > 0 && uncheckedCount === 0;
   const canCheckNewCollections = !isRunning && !optOutMatch && Boolean(targetUrl.trim()) && newCollectionCount > 0;
   const canStartFresh = !isRunning && targetUrl.trim() && !canContinue && (scanScope !== "custom" || customRangeValid);
   const hasStartedSearch =
@@ -2560,7 +3007,7 @@ export function ArchiveSearchApp({
     failedResults.length > 0;
   const hasCaptures = captures.length > 0;
   const completion = progress.total > 0 ? Math.round((successfulCount / progress.total) * 100) : 0;
-  const hasAutoRetryWork = availabilityIssue && (currentNoticeFailedResults.length > 0 || uncheckedCount > 0);
+  const hasAutoRetryWork = availabilityIssue && uncheckedCount > 0;
   const canScheduleAutoRetry = !isRunning && !isStoredView && Boolean(targetUrl.trim()) && hasAutoRetryWork;
   const canAutoRetryFailed = autoRetryEnabled && canScheduleAutoRetry;
   const autoRetryCountdown = nextAutoRetryAt ? formatSecondsAbbrev(nextAutoRetryAt - nowMs) : "";
@@ -2595,11 +3042,51 @@ export function ArchiveSearchApp({
     (robotsStatus ? 1 : 0) +
     (optOutMatch ? 1 : 0);
   const showEmptyOutcome = hasStartedSearch && !hasCaptures && state !== "error";
-  const canOfferFullScan = !isRunning && showEmptyOutcome && (scanScope === "recent" || scanScope === "custom");
+  const isFinishedScopedScan =
+    hasStartedSearch &&
+    !isRunning &&
+    state !== "error" &&
+    state !== "loading-stored-scan" &&
+    (scanScope === "recent" || scanScope === "custom") &&
+    Boolean(targetUrl.trim()) &&
+    progress.total > 0 &&
+    uncheckedCount === 0 &&
+    failedCount === 0;
+  const canOfferFullScan =
+    !isRunning &&
+    state !== "loading-stored-scan" &&
+    (scanScope === "recent" || scanScope === "custom") &&
+    !optOutMatch &&
+    (showEmptyOutcome || isFinishedScopedScan);
   const fullScanDescription =
-    scanScope === "custom"
+    hasCaptures
+      ? `This ${scanScope === "custom" ? "custom" : "recent"} scan is complete. A full scan checks the entire archive since ${earliestArchiveYear} and may find older snapshots.`
+      : scanScope === "custom"
       ? `No snapshots were found in this date range. A full scan checks the entire archive since ${earliestArchiveYear} and may take much longer.`
       : `No snapshots were found in the last 12 months. A full scan checks the entire archive since ${earliestArchiveYear} and may take much longer.`;
+  // When the scan is blocked and there is nothing to show below yet, the empty
+  // outcome card becomes the home for the blocked explanation and primary action.
+  const pausedBeforeAnyScan =
+    scanSummary?.phase === "paused" && successfulCount === 0;
+  const showBlockedRobotsEmptyOutcome = showEmptyOutcome && showBlockedRobotsNotice;
+  const showBlockedRobotsBanner = showBlockedRobotsNotice && !showEmptyOutcome;
+  const pausedReason = showBlockedRobotsNotice
+    ? "Common Crawl is currently blocked for this URL. That does not necessarily mean it was always blocked: older scans may still have been allowed to check this URL."
+    : scanNotice || undefined;
+  const blockedRobotsAction = blockedRobotsPrompt ? (
+    <Button
+      className="shrink-0 whitespace-nowrap"
+      size="sm"
+      onClick={() => void executeRunSearch(blockedRobotsPrompt.mode, {
+        session: blockedRobotsPrompt.session,
+        precheckedRobotsStatus: blockedRobotsPrompt.robotsStatus,
+        allowBlockedRobots: true
+      })}
+    >
+      <Play size={14} />
+      Start scan anyway
+    </Button>
+  ) : null;
   const appendUiScanLogEvent = (entry: ScanLogEvent) => {
     scanLogRef.current = [...scanLogRef.current, entry];
     setScanLog(scanLogRef.current);
@@ -2658,7 +3145,16 @@ export function ArchiveSearchApp({
       yearFilter
     ]
   );
-  const statusActions = hasStartedSearch ? (
+  const hasStatusActions =
+    (state === "error" && Boolean(targetUrl.trim())) ||
+    (!isRunning && (state === "paused" || isWaitingForAutoRetry)) ||
+    canContinue ||
+    canCheckNewCollections ||
+    canRetryFailed ||
+    canOfferFullScan ||
+    showAutoRetryAction ||
+    isRunning;
+  const statusActionButtons = hasStartedSearch && hasStatusActions ? (
     <div className="flex shrink-0 flex-wrap justify-end gap-2">
       {state === "error" && targetUrl.trim() ? (
         <Button
@@ -2669,12 +3165,6 @@ export function ArchiveSearchApp({
           <RotateCcw size={14} />
           Try again
         </Button>
-      ) : null}
-      {!isRunning && (state === "paused" || state === "cancelled" || isWaitingForAutoRetry) ? (
-        <Badge tone="amber" className="h-8 gap-1.5 px-3">
-          <Clock size={12} />
-          Paused
-        </Badge>
       ) : null}
       {canContinue ? (
         <Button size="sm" variant="secondary" onClick={() => void runSearch("resume")}>
@@ -2694,21 +3184,30 @@ export function ArchiveSearchApp({
           Retry failed ({failedCount})
         </Button>
       ) : null}
+      {canOfferFullScan && !showEmptyOutcome ? (
+        <Button
+          size="sm"
+          variant="secondary"
+          title={fullScanDescription}
+          onClick={() => void runSearch("missing", { scope: "all", dateFrom: "", dateTo: "" })}
+        >
+          <Play size={14} />
+          Run full scan
+        </Button>
+      ) : null}
       {showAutoRetryAction ? (
         <Button
           className="shrink-0 whitespace-nowrap"
           size="sm"
           title="Toggle automatic retry for failed and unchecked sources"
           onClick={() => {
-            setAutoRetryEnabled((value) => {
-              const enabled = !value;
-              appendUiScanLogEvent(
-                enabled
-                  ? scanLogEvent("auto-retry-enabled", "Auto retry started.", "amber")
-                  : scanLogEvent("auto-retry-disabled", "Auto retry stopped.", "amber")
-              );
-              return enabled;
-            });
+            const enabled = !autoRetryEnabled;
+            setAutoRetryEnabled(enabled);
+            appendUiScanLogEvent(
+              enabled
+                ? scanLogEvent("auto-retry-enabled", "Auto retry started.", "amber")
+                : scanLogEvent("auto-retry-disabled", "Auto retry stopped.", "amber")
+            );
           }}
         >
           <Clock size={14} />
@@ -2716,13 +3215,25 @@ export function ArchiveSearchApp({
         </Button>
       ) : null}
       {isRunning ? (
-        <Button variant="danger" size="sm" onClick={cancelScan}>
-          <Square size={14} />
-          Cancel
+        <Button variant="danger" size="sm" onClick={pauseScan}>
+          <Pause size={14} />
+          Pause
         </Button>
       ) : null}
     </div>
   ) : null;
+  const headerStatusActions = hasStartedSearch && hasStatusActions ? (
+    <div className="flex shrink-0 flex-wrap justify-end gap-2">
+      {!isRunning && (state === "paused" || isWaitingForAutoRetry) ? (
+        <Badge tone="amber" className="h-8 gap-1.5 px-3">
+          <Clock size={12} />
+          Paused
+        </Badge>
+      ) : null}
+      {statusActionButtons}
+    </div>
+  ) : null;
+  const emptyOutcomeActions = showBlockedRobotsEmptyOutcome ? blockedRobotsAction : statusActionButtons;
 
   useEffect(() => {
     const urlForTitle = autoStart ? (initialUrl || targetUrl) : "";
@@ -2843,6 +3354,18 @@ export function ArchiveSearchApp({
           storedCollectionIds.has(result.collection.id)
         );
         const persistedResults = mergeCollectionResults(scanLog.filter(isCollectionScanLogEntry), coverageScoped);
+        const persistedScanLog = mergePersistedScanLog(
+          coverageScanLogResults(coverage),
+          scanLog,
+          storedCollections
+        );
+        const persistedDurationMs = persistedSearchDurationMs({
+          isRunning: isPersistedScanRunning,
+          activeDurationMs,
+          storedDurationMs,
+          coverage,
+          persistedScanLog
+        });
         await putSearch({
           key,
           url: trimmedUrl,
@@ -2858,8 +3381,8 @@ export function ArchiveSearchApp({
           scanWindowTo: storedMetadata.scanWindowTo,
           captures,
           results: persistedResults,
-          scanLogResults: scanLog.filter(shouldPersistScanLogEntry),
-          durationMs: Math.round(activeDurationMs),
+          scanLogResults: persistedScanLog,
+          durationMs: persistedDurationMs,
           activeScanStartedAt: isPersistedScanRunning ? scanStartedAt : undefined,
           updatedAt: Date.now()
         });
@@ -2912,6 +3435,7 @@ export function ArchiveSearchApp({
 
   return (
     <main
+      id="top"
       className={
         hasStartedSearch
           ? "min-h-screen px-4 py-5 text-zinc-100 md:px-8"
@@ -2919,7 +3443,7 @@ export function ArchiveSearchApp({
       }
     >
       {hasStartedSearch ? null : <LandingAtmosphere />}
-      {hasStartedSearch ? null : <TopRightMenu />}
+      {hasStartedSearch ? null : <LandingHeroMenu />}
       {hasStartedSearch ? null : <LandingStatsFooter />}
       <div
         className={
@@ -2928,6 +3452,7 @@ export function ArchiveSearchApp({
             : "relative z-10 grid min-h-[100svh] w-full place-items-center px-4 py-8 md:px-8"
         }
       >
+        {hasStartedSearch ? <h1 className="sr-only">Crawlback scan results</h1> : null}
         <header className={hasStartedSearch ? "archive-panel rounded-md p-4" : "w-full max-w-3xl p-0"}>
           <div className={hasStartedSearch ? "flex flex-col gap-4 lg:flex-row lg:items-end" : "flex flex-col gap-4"}>
             <div className="flex-1">
@@ -2953,12 +3478,6 @@ export function ArchiveSearchApp({
                         wordClassName="leading-none decode-in"
                       />
                     </h1>
-                    <p
-                      className="reveal-fade whitespace-nowrap text-sm leading-relaxed text-zinc-400 sm:text-base"
-                      style={{ animationDelay: "200ms" }}
-                    >
-                      Find past versions of web pages across billions of archived records.
-                    </p>
                   </>
                 )}
               </div>
@@ -3041,7 +3560,7 @@ export function ArchiveSearchApp({
               ) : null}
             </div>
             {hasStartedSearch ? (
-              <div className="flex flex-col items-end gap-2 lg:w-[360px]">
+              <div className="flex flex-col items-end gap-2 lg:w-[420px]">
                 <TopRightMenu mode="inline" />
                 <div className="flex h-11 w-full divide-x divide-zinc-800 overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/60">
                   <Stat
@@ -3055,7 +3574,14 @@ export function ArchiveSearchApp({
             ) : null}
           </div>
           {hasStartedSearch ? (
-            <div className="mt-4 h-2 overflow-hidden rounded-sm bg-zinc-900">
+            <div
+              className="mt-4 h-2 overflow-hidden rounded-sm bg-zinc-900"
+              role="progressbar"
+              aria-label="Scan progress"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={completion}
+            >
               <div
                 className="h-full bg-amber-300 transition-all"
                 style={{
@@ -3082,7 +3608,7 @@ export function ArchiveSearchApp({
                 <p>
                   {completion}% · {formatDuration(elapsedMs)}
                 </p>
-                {statusActions}
+                {showEmptyOutcome ? null : headerStatusActions}
               </div>
             </div>
           ) : null}
@@ -3093,24 +3619,12 @@ export function ArchiveSearchApp({
               {scanNotice}
             </p>
           ) : null}
-          {showBlockedRobotsNotice ? (
+          {showBlockedRobotsBanner ? (
             <div className="mt-3 flex flex-col gap-3 rounded-md border border-amber-300/30 bg-amber-300/10 p-3 text-xs leading-5 text-amber-100 sm:flex-row sm:items-center sm:justify-between">
               <p className="max-w-3xl">
-                Common Crawl is currently blocked for this URL. That does not necessarily mean it was always blocked:
-                older scans may still have been allowed to check this URL.
+                {pausedReason}
               </p>
-              <Button
-                className="shrink-0 whitespace-nowrap"
-                size="sm"
-                onClick={() => blockedRobotsPrompt && void executeRunSearch(blockedRobotsPrompt.mode, {
-                  session: blockedRobotsPrompt.session,
-                  precheckedRobotsStatus: blockedRobotsPrompt.robotsStatus,
-                  allowBlockedRobots: true
-                })}
-              >
-                <Play size={14} />
-                Start scan anyway
-              </Button>
+              {blockedRobotsAction}
             </div>
           ) : null}
           {showOptOutNotice ? (
@@ -3197,6 +3711,13 @@ export function ArchiveSearchApp({
                   <div className="mt-2">
                     <p className="text-xs text-amber-200">
                       Downloading HTML {htmlZipDownload.completed}/{htmlZipDownload.total}
+                      {htmlZipDownload.parts && htmlZipDownload.parts > 1
+                        ? ` · ZIP ${htmlZipDownload.part ?? 1}/${htmlZipDownload.parts}`
+                        : ""}
+                    </p>
+                    <p className="mt-1 text-[11px] text-zinc-500">
+                      {htmlZipDownload.bytes ? formatBytes(htmlZipDownload.bytes) : "0 B"} exported
+                      {htmlZipDownload.failed ? ` · ${htmlZipDownload.failed} failed` : ""}
                     </p>
                     <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
                       <div
@@ -3220,7 +3741,7 @@ export function ArchiveSearchApp({
                     size="sm"
                     variant="secondary"
                     disabled={!canExport || htmlZipDownload.active || exportColumns.length === 0}
-                    onClick={() => downloadCaptureExport(exportCaptures, exportColumns)}
+                    onClick={() => void downloadCaptureExport(exportCaptures, exportColumns)}
                     className="justify-center"
                   >
                     <FileText size={14} />
@@ -3343,70 +3864,146 @@ export function ArchiveSearchApp({
               ) : (
                 <>
                   <CaptureRowHeader sort={sortBy} onSortChange={setSortBy} />
-                  <div className="divide-y divide-zinc-800/70">
-                    {pagedCaptures.map((capture) => (
-                      <CaptureRow
-                        key={`${capture.collectionId}:${capture.timestamp}:${capture.filename}:${capture.offset}`}
-                        capture={capture}
-                        backContext={resultsBackContext}
-                        scanId={activeScanId || undefined}
-                      />
-                    ))}
-                  </div>
-                  {totalPages > 1 ? (
-                    <Pagination
-                      page={currentPage}
-                      totalPages={totalPages}
-                      pageSize={pageSize}
-                      totalItems={filteredCaptures.length}
-                      onChange={setPage}
-                    />
-                  ) : null}
+                  {/* Virtualized: renders the whole result set but only mounts
+                      rows near the viewport (no client-side pagination needed). */}
+                  <VirtualizedCaptureList
+                    captures={filteredCaptures}
+                    backContext={resultsBackContext}
+                    scanId={activeScanId || undefined}
+                  />
                 </>
               )}
             </section>
           </section>
         ) : showEmptyOutcome && scanSummary ? (
           <EmptyScanOutcome
-            summary={scanSummary}
+            summary={showBlockedRobotsEmptyOutcome ? { ...scanSummary, description: pausedReason } : scanSummary}
             isRunning={isRunning}
-            canContinue={canContinue}
-            canRetryFailed={canRetryFailed}
-            canRunFullScan={canOfferFullScan}
-            fullScanDescription={canOfferFullScan ? fullScanDescription : undefined}
-            onContinue={() => void runSearch("resume")}
-            onRetryFailed={() => void runSearch("retry-failed")}
+            canContinue={canContinue && !showBlockedRobotsEmptyOutcome}
+            canRetryFailed={canRetryFailed && !showBlockedRobotsEmptyOutcome}
+            canRunFullScan={canOfferFullScan && !showBlockedRobotsEmptyOutcome && !pausedBeforeAnyScan}
+            fullScanDescription={
+              canOfferFullScan && !showBlockedRobotsEmptyOutcome && !pausedBeforeAnyScan ? fullScanDescription : undefined
+            }
             onRunFullScan={() => void runSearch("missing", { scope: "all", dateFrom: "", dateTo: "" })}
+            actions={emptyOutcomeActions}
           />
         ) : null}
         {hasStartedSearch ? null : (
           <a
             href="#how-it-works"
             aria-label="Learn how Crawlback works"
-            className="reveal-fade absolute bottom-6 left-1/2 -translate-x-1/2 text-zinc-600 transition hover:text-amber-200"
+            className="reveal-fade group absolute bottom-6 left-1/2 flex h-14 w-14 -translate-x-1/2 items-center justify-center rounded-full border border-amber-300/55 bg-zinc-950/70 text-amber-200 shadow-[0_0_0_1px_rgba(250,204,21,0.12)] backdrop-blur-sm transition hover:border-amber-200 hover:bg-amber-300/10 hover:text-amber-100 hover:shadow-[0_0_0_1px_rgba(250,204,21,0.22)]"
             style={{ animationDelay: "700ms" }}
           >
             <span className="scroll-hint block">
-              <ChevronDown size={20} />
+              <ChevronDown size={30} strokeWidth={2.6} />
             </span>
           </a>
         )}
       </div>
       {hasStartedSearch ? null : <LandingSections />}
-      <HtmlPrivacyWarningDialog
-        open={htmlZipWarningOpen}
-        actionLabel="Download HTML ZIP"
-        onCancel={() => setHtmlZipWarningOpen(false)}
-        onContinue={({ dontShowAgain }) => {
-          setHtmlZipWarningOpen(false);
-          if (dontShowAgain) {
-            setShowHtmlPrivacyWarning(false);
-            void updateSettings({ showHtmlPrivacyWarning: false }).catch(() => undefined);
-          }
-          void downloadHtmlZip(exportCaptures);
-        }}
-      />
+      {hasStartedSearch ? null : <LandingScrollTop />}
+      {htmlZipWarningOpen ? (
+        <HtmlPrivacyWarningDialog
+          open={htmlZipWarningOpen}
+          actionLabel="Download HTML ZIP"
+          onCancel={() => setHtmlZipWarningOpen(false)}
+          onContinue={({ dontShowAgain }) => {
+            setHtmlZipWarningOpen(false);
+            if (dontShowAgain) {
+              setShowHtmlPrivacyWarning(false);
+              void updateSettings({ showHtmlPrivacyWarning: false }).catch(() => undefined);
+            }
+            void downloadHtmlZip(exportCaptures);
+          }}
+        />
+      ) : null}
     </main>
+  );
+}
+
+function LandingHeroMenu() {
+  const [hidden, setHidden] = useState(false);
+
+  useEffect(() => {
+    let frame = 0;
+    const update = () => {
+      frame = 0;
+      setHidden(window.scrollY > Math.max(220, window.innerHeight * 0.42));
+    };
+    const requestUpdate = () => {
+      if (frame) return;
+      frame = window.requestAnimationFrame(update);
+    };
+
+    update();
+    window.addEventListener("scroll", requestUpdate, { passive: true });
+    window.addEventListener("resize", requestUpdate);
+
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      window.removeEventListener("scroll", requestUpdate);
+      window.removeEventListener("resize", requestUpdate);
+    };
+  }, []);
+
+  return (
+    <div className={hidden ? "landing-hero-menu is-hidden" : "landing-hero-menu"}>
+      <TopRightMenu />
+    </div>
+  );
+}
+
+function LandingScrollTop() {
+  const [scrollState, setScrollState] = useState({
+    progress: "0%",
+    visible: false,
+    nearEnd: false
+  });
+
+  useEffect(() => {
+    let frame = 0;
+
+    const updateScrollState = () => {
+      frame = 0;
+      const maxScroll = document.documentElement.scrollHeight - window.innerHeight;
+      const ratio = maxScroll > 0 ? Math.min(1, Math.max(0, window.scrollY / maxScroll)) : 0;
+
+      setScrollState({
+        progress: `${(ratio * 100).toFixed(2)}%`,
+        visible: window.scrollY > 180,
+        nearEnd: ratio > 0.9
+      });
+    };
+
+    const requestUpdate = () => {
+      if (frame) return;
+      frame = window.requestAnimationFrame(updateScrollState);
+    };
+
+    updateScrollState();
+    window.addEventListener("scroll", requestUpdate, { passive: true });
+    window.addEventListener("resize", requestUpdate);
+
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      window.removeEventListener("scroll", requestUpdate);
+      window.removeEventListener("resize", requestUpdate);
+    };
+  }, []);
+
+  return (
+    <a
+      href="#top"
+      aria-label="Back to top"
+      className={`landing-scroll-top${scrollState.visible ? " is-visible" : ""}${
+        scrollState.nearEnd ? " is-near-end" : ""
+      }`}
+      style={{ "--scroll-progress": scrollState.progress } as CSSProperties}
+    >
+      <ArrowUp size={22} strokeWidth={2.4} aria-hidden />
+    </a>
   );
 }
 
@@ -3420,16 +4017,17 @@ function Stat({ label, value, tone = "neutral" }: { label: string; value: string
       ? "text-red-300"
       : "text-zinc-100";
   return (
-    <div className="flex flex-1 items-center justify-between gap-2 px-3 leading-none">
-      <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">{label}</span>
-      <span className={`font-mono text-sm font-bold tabular-nums ${valueColor}`}>{value}</span>
+    <div className="flex min-w-0 flex-1 items-center justify-between gap-2 px-3 leading-none">
+      <span className="min-w-0 truncate text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">{label}</span>
+      <span className={`shrink-0 font-mono text-sm font-bold tabular-nums ${valueColor}`}>{value}</span>
     </div>
   );
 }
 
 type CuratedScanSummary = {
-  phase: "searching" | "paused" | "empty";
+  phase: "loading" | "searching" | "paused" | "empty";
   title: string;
+  description?: string;
 };
 
 function buildCuratedScanSummary(input: {
@@ -3440,6 +4038,14 @@ function buildCuratedScanSummary(input: {
   failed: number;
   unchecked: number;
 }): CuratedScanSummary {
+  if (input.state === "loading-stored-scan") {
+    return {
+      phase: "loading",
+      title: "Loading",
+      description: "Reading saved scan data from local history. Large histories can take a moment."
+    };
+  }
+
   if (input.state === "loading-collections" || input.state === "running") {
     return {
       phase: "searching",
@@ -3447,7 +4053,7 @@ function buildCuratedScanSummary(input: {
     };
   }
 
-  if (input.state === "paused" || input.state === "cancelled") {
+  if (input.state === "paused") {
     return {
       phase: "paused",
       title: "Scan paused",
@@ -3474,9 +4080,8 @@ function EmptyScanOutcome({
   canRetryFailed,
   canRunFullScan,
   fullScanDescription,
-  onContinue,
-  onRetryFailed,
   onRunFullScan,
+  actions,
 }: {
   summary: CuratedScanSummary;
   isRunning: boolean;
@@ -3484,33 +4089,23 @@ function EmptyScanOutcome({
   canRetryFailed: boolean;
   canRunFullScan: boolean;
   fullScanDescription?: string;
-  onContinue: () => void;
-  onRetryFailed: () => void;
   onRunFullScan: () => void;
+  actions?: ReactNode;
 }) {
   const iconClass =
-    summary.phase === "searching"
+    summary.phase === "loading" || summary.phase === "searching"
       ? "mx-auto mb-3 animate-spin text-amber-200"
       : summary.phase === "paused"
         ? "mx-auto mb-3 text-amber-200"
         : "mx-auto mb-3 text-zinc-600";
-  const Icon = summary.phase === "searching" ? Loader2 : summary.phase === "paused" ? Clock : Ban;
-  const primaryAction = !isRunning && canContinue
-    ? (
-      <Button type="button" onClick={onContinue}>
-        <RotateCcw size={16} />
-        Continue
-      </Button>
-    )
-    : !isRunning && canRetryFailed
-      ? (
-        <Button type="button" onClick={onRetryFailed}>
-          <RotateCcw size={16} />
-          Retry failed
-        </Button>
-      )
-      : null;
-  const fullScanAction = !primaryAction && !isRunning && canRunFullScan
+  const Icon = summary.phase === "loading" || summary.phase === "searching" ? Loader2 : summary.phase === "paused" ? Clock : Ban;
+  const isLoadingStoredScan = summary.phase === "loading";
+  // While this section is on screen it is the single home for the scan's action
+  // buttons: the header banner hands its `statusActions` down here (via `actions`)
+  // so Continue/Retry/etc. aren't rendered twice. The full-scan offer stays local
+  // to this card and only appears when there is nothing to resume or retry.
+  const hasResumeAction = !isLoadingStoredScan && !isRunning && (canContinue || canRetryFailed);
+  const fullScanAction = !isLoadingStoredScan && !hasResumeAction && !isRunning && canRunFullScan
     ? (
       <div className="mt-5 flex flex-col items-center gap-3">
         {fullScanDescription ? <p className="max-w-xl text-sm leading-relaxed text-zinc-400">{fullScanDescription}</p> : null}
@@ -3527,7 +4122,10 @@ function EmptyScanOutcome({
       <div className="mx-auto max-w-2xl text-center">
         <Icon className={iconClass} size={30} />
         <p className="text-lg font-black uppercase tracking-[0.16em] text-zinc-100">{summary.title}</p>
-        {primaryAction ? <div className="mt-5 flex justify-center">{primaryAction}</div> : null}
+        {summary.description ? (
+          <p className="mx-auto mt-3 max-w-4xl text-sm leading-relaxed text-zinc-400">{summary.description}</p>
+        ) : null}
+        {actions ? <div className="mt-5 flex justify-center">{actions}</div> : null}
         {fullScanAction}
       </div>
     </section>
@@ -3571,6 +4169,7 @@ function scanLogTimestampsForResult(result: ScanLogEntry) {
 function scanLogEventTone(event: ScanLogEvent) {
   if (event.tone === "red") return "text-red-200";
   if (event.tone === "amber") return "text-amber-200";
+  if (event.tone === "green") return "text-emerald-300";
   return "text-zinc-400";
 }
 
@@ -3691,13 +4290,18 @@ function buildScanNotice({
       ? "Common Crawl is temporarily limiting requests."
       : "Some Common Crawl checks are failing.";
 
+  const ipSuggestion =
+    hasExplicitRateLimit || !hasSlowDown
+      ? " If retries keep failing, try a different network or VPN — this IP may be rate-limited."
+      : "";
+
   if (isWaitingForAutoRetry) {
-    return `${issueText} The scan is paused to avoid hammering the API. Auto retry will check again automatically.`;
+    return `${issueText} The scan is paused to avoid hammering the API. Auto retry will check again automatically.${ipSuggestion}`;
   }
 
   return hasSlowDown
     ? `${issueText} Some snapshots may still work. Continue later to check failed and remaining items.`
-    : `${issueText} The scan is still running. Continue later if needed.`;
+    : `${issueText} The scan is still running. Continue later if needed.${ipSuggestion}`;
 }
 
 function robotsStatusHeadline(status: RobotsUiState) {
@@ -3843,89 +4447,8 @@ function ScanLogCollectionEntry({
     <div className={scanLogRowClass(withDate)}>
       <p className="whitespace-nowrap font-mono text-[11px] text-zinc-500">{formatLogTimestamp(call.checkedAt ?? result.checkedAt, withDate)}</p>
       <p className="whitespace-nowrap font-semibold text-zinc-200">{result.collection.id}</p>
-      <p className={scanLogCallTone(call)}>{`${attemptLabel(attemptIndex)} · ${scanLogCallMessage(call, result)}`}</p>
+      <p className={scanLogCallTone(call)}>{`${attemptLabel((call.attemptNumber ?? attemptIndex + 1) - 1)} · ${scanLogCallMessage(call, result)}`}</p>
     </div>
-  );
-}
-
-function getPageRange(page: number, totalPages: number): (number | "ellipsis")[] {
-  if (totalPages <= 7) {
-    return Array.from({ length: totalPages }, (_, i) => i + 1);
-  }
-  const pages: (number | "ellipsis")[] = [1];
-  const start = Math.max(2, page - 1);
-  const end = Math.min(totalPages - 1, page + 1);
-  if (start > 2) pages.push("ellipsis");
-  for (let i = start; i <= end; i += 1) pages.push(i);
-  if (end < totalPages - 1) pages.push("ellipsis");
-  pages.push(totalPages);
-  return pages;
-}
-
-function Pagination({
-  page,
-  totalPages,
-  pageSize,
-  totalItems,
-  onChange
-}: {
-  page: number;
-  totalPages: number;
-  pageSize: number;
-  totalItems: number;
-  onChange: (page: number) => void;
-}) {
-  const start = (page - 1) * pageSize + 1;
-  const end = Math.min(page * pageSize, totalItems);
-  const pages = getPageRange(page, totalPages);
-  return (
-    <nav
-      aria-label="Pagination"
-      className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-800 p-4 text-xs text-zinc-400"
-    >
-      <p>
-        {start}–{end} of {totalItems}
-      </p>
-      <div className="flex flex-wrap items-center gap-1">
-        <button
-          type="button"
-          disabled={page <= 1}
-          onClick={() => onChange(page - 1)}
-          className="h-8 rounded-md border border-zinc-700 bg-zinc-950 px-3 font-semibold uppercase tracking-[0.12em] text-zinc-200 transition hover:border-amber-300 hover:text-amber-100 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-zinc-700 disabled:hover:text-zinc-200"
-        >
-          Prev
-        </button>
-        {pages.map((p, index) =>
-          p === "ellipsis" ? (
-            <span key={`ellipsis-${index}`} className="px-2 text-zinc-600">
-              …
-            </span>
-          ) : (
-            <button
-              key={p}
-              type="button"
-              aria-current={p === page ? "page" : undefined}
-              onClick={() => onChange(p)}
-              className={
-                p === page
-                  ? "h-8 min-w-[2rem] rounded-md border border-amber-300 bg-amber-300 px-2 font-bold text-zinc-950"
-                  : "h-8 min-w-[2rem] rounded-md border border-zinc-700 bg-zinc-950 px-2 font-semibold text-zinc-200 transition hover:border-amber-300 hover:text-amber-100"
-              }
-            >
-              {p}
-            </button>
-          )
-        )}
-        <button
-          type="button"
-          disabled={page >= totalPages}
-          onClick={() => onChange(page + 1)}
-          className="h-8 rounded-md border border-zinc-700 bg-zinc-950 px-3 font-semibold uppercase tracking-[0.12em] text-zinc-200 transition hover:border-amber-300 hover:text-amber-100 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-zinc-700 disabled:hover:text-zinc-200"
-        >
-          Next
-        </button>
-      </div>
-    </nav>
   );
 }
 
@@ -4086,7 +4609,7 @@ function AdvancedSettings({
           type="button"
           aria-expanded={open}
           onClick={onToggle}
-          className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.14em] text-zinc-400 transition hover:text-zinc-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300"
+          className="inline-flex items-center gap-1.5 text-xs font-semibold text-zinc-400 transition hover:text-zinc-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300"
         >
           Advanced search
           <ChevronDown
@@ -4098,8 +4621,8 @@ function AdvancedSettings({
       {open ? (
         <div className="mt-3 rounded-md border border-zinc-800 bg-zinc-950/60 p-4">
           <div className="flex flex-col gap-4">
-            <label className="flex flex-col gap-1">
-              <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">
+            <div className="flex flex-col gap-1">
+              <span id="advanced-match-type-label" className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-400">
                 Mode
                 <Tooltip
                   side="top"
@@ -4119,14 +4642,13 @@ function AdvancedSettings({
                     </span>
                   }
                 >
-                  <span
-                    role="button"
-                    tabIndex={0}
+                  <button
+                    type="button"
                     aria-label="What is mode?"
                     className="grid h-4 w-4 place-items-center rounded-full text-zinc-500 transition hover:text-zinc-200 focus:outline-none focus-visible:text-zinc-200"
                   >
                     <Info size={12} />
-                  </span>
+                  </button>
                 </Tooltip>
               </span>
               <select
@@ -4140,9 +4662,9 @@ function AdvancedSettings({
                 <option value="host">host (all paths)</option>
                 <option value="domain">domain + subdomains</option>
               </select>
-            </label>
+            </div>
             <div className="flex flex-col gap-1">
-              <span className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">
+              <span id="advanced-scope-label" className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-400">
                 Scope
                 <Tooltip
                   side="top"
@@ -4162,14 +4684,13 @@ function AdvancedSettings({
                     </span>
                   }
                 >
-                  <span
-                    role="button"
-                    tabIndex={0}
+                  <button
+                    type="button"
                     aria-label="What is scope?"
                     className="grid h-4 w-4 place-items-center rounded-full text-zinc-500 transition hover:text-zinc-200 focus:outline-none focus-visible:text-zinc-200"
                   >
                     <Info size={12} />
-                  </span>
+                  </button>
                 </Tooltip>
               </span>
               <select

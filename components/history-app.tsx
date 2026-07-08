@@ -24,37 +24,35 @@ import { DateControl } from "@/components/ui/date-control";
 import { Input } from "@/components/ui/input";
 import { Tooltip } from "@/components/ui/tooltip";
 import {
-  deleteSearch,
   deleteSearches,
-  deleteCachedCapturesForHistoryRecord,
+  deleteCachedCaptureKeys,
+  countCachedCaptureKeys,
   DEFAULT_HISTORY_PAGE_SIZE,
   getSettings,
-  listSearches,
-  listCachedCaptureRecordsForCaptures,
+  listHistorySummaries,
+  listRecentHistorySummaries,
   normalizeScanUrl,
   scanSearchKey,
   subscribeToSearchChanges,
-  type CachedHtmlCaptureRecord,
   type AppSettings,
-  type StoredSearch
+  type HistorySummaryRecord
 } from "@/lib/capture-store";
 import {
   fetchCollections,
   filterCollectionsByDateRange,
   filterCollectionsByRecentMonths,
-  type CollectionCheckResult,
   type CommonCrawlCollection
 } from "@/lib/common-crawl";
-import { dedupeCaptures, mergeCollectionResults } from "@/lib/scan-results";
+import { markPerformance, measureAsync } from "@/lib/performance";
+import { computeCsv } from "@/lib/compute-client";
 
 type ScanScope = "recent" | "all" | "custom";
 type ScanOutcome = "complete" | "partial" | "empty";
 type SortKey = "status" | "url" | "scope" | "match" | "updated" | "captures" | "sources" | "failed";
 type SortDir = "asc" | "desc";
 
-type HistoryRecord = StoredSearch & {
+type HistoryRecord = HistorySummaryRecord & {
   scanScope: ScanScope;
-  results: CollectionCheckResult[];
   storageKeys?: string[];
 };
 
@@ -102,7 +100,13 @@ export function HistoryApp() {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [page, setPage] = useState(1);
-  const [cacheRecordsByKey, setCacheRecordsByKey] = useState<Record<string, CachedHtmlCaptureRecord[]>>({});
+  const [cachedCountsByKey, setCachedCountsByKey] = useState<Record<string, number>>({});
+  const refreshInFlightRef = useRef(false);
+  const refreshQueuedRef = useRef(false);
+  // Once the full history has loaded, stop applying the fast first-page result
+  // so it can never regress the complete list back to a partial one.
+  const fullHistoryLoadedRef = useRef(false);
+  const refreshTimerRef = useRef<number | null>(null);
   const queryInputRef = useRef<HTMLInputElement | null>(null);
   const scopeFilterRef = useRef<HTMLSelectElement | null>(null);
   const outcomeFilterRef = useRef<HTMLSelectElement | null>(null);
@@ -141,13 +145,12 @@ export function HistoryApp() {
   }, []);
 
   useEffect(() => {
+    markPerformance("page-hydrated:history");
     void refreshRecords().finally(() => setLoading(false));
   }, []);
 
   useEffect(() => {
-    const refresh = () => {
-      void refreshRecords().finally(() => setLoading(false));
-    };
+    const refresh = () => scheduleRefresh();
     const syncOrClear = (restoreFromHistory: boolean) => {
       if (restoreFromHistory) {
         syncRestoredControls();
@@ -167,35 +170,62 @@ export function HistoryApp() {
     return () => {
       window.cancelAnimationFrame(animationFrameId);
       window.clearTimeout(timeoutId);
+      if (refreshTimerRef.current) window.clearTimeout(refreshTimerRef.current);
       window.removeEventListener("pageshow", handlePageShow);
       unsubscribe();
     };
   }, [clearFreshControls, syncRestoredControls]);
 
   async function refreshRecords() {
-    const [searches, collections, settings] = await Promise.all([
-      listSearches(),
-      fetchCollections().catch(() => [] as CommonCrawlCollection[]),
-      getSettings().catch(() => null)
-    ]);
+    // Fast first paint on large histories: render the most-recent page from the
+    // owner_updatedAt index while the full list (needed for filter/sort/search/
+    // export) loads. Guarded so it never overwrites the complete list once loaded.
+    if (!fullHistoryLoadedRef.current) {
+      void listRecentHistorySummaries(DEFAULT_HISTORY_PAGE_SIZE)
+        .then((recent) => {
+          if (!fullHistoryLoadedRef.current && recent.length > 0) {
+            setRecords(mergeHistoryRecords(recent.filter(isHistoryRecord)));
+            setLoading(false);
+          }
+        })
+        .catch(() => undefined);
+    }
+    const [searches, collections, settings] = await measureAsync("history-refresh", () => Promise.all([
+        listHistorySummaries(),
+        fetchCollections().catch(() => [] as CommonCrawlCollection[]),
+        getSettings().catch(() => null)
+      ])
+    );
+    fullHistoryLoadedRef.current = true;
     setRecords(mergeHistoryRecords(searches.filter(isHistoryRecord)));
     setCurrentCollections(collections);
     setAppSettings(settings);
   }
 
-  useEffect(() => {
-    let cancelled = false;
-    async function loadCacheRecords() {
-      const entries = await Promise.all(
-        records.map(async (record) => [record.key, await listCachedCaptureRecordsForCaptures(record.captures)] as const)
-      );
-      if (!cancelled) setCacheRecordsByKey(Object.fromEntries(entries));
+  function scheduleRefresh(delayMs = 350) {
+    if (refreshTimerRef.current) window.clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = window.setTimeout(() => {
+      refreshTimerRef.current = null;
+      void runQueuedRefresh();
+    }, delayMs);
+  }
+
+  async function runQueuedRefresh() {
+    if (refreshInFlightRef.current) {
+      refreshQueuedRef.current = true;
+      return;
     }
-    void loadCacheRecords();
-    return () => {
-      cancelled = true;
-    };
-  }, [records]);
+    refreshInFlightRef.current = true;
+    try {
+      do {
+        refreshQueuedRef.current = false;
+        await refreshRecords();
+      } while (refreshQueuedRef.current);
+    } finally {
+      refreshInFlightRef.current = false;
+      setLoading(false);
+    }
+  }
 
   const filteredRecords = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -239,7 +269,10 @@ export function HistoryApp() {
   const totalPages = Math.max(1, Math.ceil(sortedRecords.length / pageSize));
   const currentPage = Math.min(page, totalPages);
   const pageStart = (currentPage - 1) * pageSize;
-  const visibleRecords = sortedRecords.slice(pageStart, pageStart + pageSize);
+  const visibleRecords = useMemo(
+    () => sortedRecords.slice(pageStart, pageStart + pageSize),
+    [pageSize, pageStart, sortedRecords]
+  );
   const selectedKeySet = useMemo(() => new Set(selectedKeys), [selectedKeys]);
   const allVisibleSelected =
     visibleRecords.length > 0 && visibleRecords.every((record) => selectedKeySet.has(record.key));
@@ -254,6 +287,25 @@ export function HistoryApp() {
     !!dateTo
   ].filter(Boolean).length;
   const hasActiveFilters = activeFilterCount > 0 || query.trim().length > 0;
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadCachedCounts() {
+      const entries = await Promise.all(
+        visibleRecords.map(async (record) => [record.key, await countCachedCaptureKeys(record.captureKeys ?? [])] as const)
+      );
+      if (!cancelled) {
+        setCachedCountsByKey((current) => ({
+          ...current,
+          ...Object.fromEntries(entries)
+        }));
+      }
+    }
+    void loadCachedCounts();
+    return () => {
+      cancelled = true;
+    };
+  }, [visibleRecords]);
 
   function clearFilters() {
     setQuery("");
@@ -281,13 +333,9 @@ export function HistoryApp() {
 
   async function handleDeleteRecord(record: HistoryRecord) {
     if (!window.confirm("Delete this saved scan?")) return;
-    const deleteCache = record.captures.length > 0 && window.confirm("Also delete cached HTML files for this scan?");
-    if (record.storageKeys && record.storageKeys.length > 1) {
-      await deleteSearches(record.storageKeys);
-    } else {
-      await deleteSearch(record.key);
-    }
-    if (deleteCache) await deleteCachedCapturesForHistoryRecord(record);
+    const deleteCache = record.captureCount > 0 && window.confirm("Also delete cached HTML files for this scan?");
+    await deleteSearches(record.storageKeys ?? [record.key]);
+    if (deleteCache) await deleteCachedCaptureKeys(record.captureKeys ?? []);
     await refreshRecords();
   }
 
@@ -301,7 +349,7 @@ export function HistoryApp() {
       .flatMap((record) => record.storageKeys ?? [record.key]);
     await deleteSearches(Array.from(new Set(keys)));
     if (deleteCache) {
-      for (const record of selected) await deleteCachedCapturesForHistoryRecord(record);
+      await deleteCachedCaptureKeys(selected.flatMap((record) => record.captureKeys ?? []));
     }
     setSelectedKeys([]);
     await refreshRecords();
@@ -313,7 +361,7 @@ export function HistoryApp() {
     const deleteCache = window.confirm("Also delete all cached HTML files referenced by history?");
     await deleteSearches(Array.from(new Set(records.flatMap((record) => record.storageKeys ?? [record.key]))));
     if (deleteCache) {
-      for (const record of records) await deleteCachedCapturesForHistoryRecord(record);
+      await deleteCachedCaptureKeys(records.flatMap((record) => record.captureKeys ?? []));
     }
     setSelectedKeys([]);
     await refreshRecords();
@@ -337,10 +385,6 @@ export function HistoryApp() {
                 <h1 className="text-xl font-black uppercase leading-none tracking-[0.18em] text-zinc-50">
                   Scan history
                 </h1>
-                <p className="mt-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-zinc-500">
-                  <span>Scans</span>
-                  <span className="text-zinc-300" suppressHydrationWarning>{records.length}</span>
-                </p>
               </div>
             </div>
             <div className="flex items-center justify-end gap-3">
@@ -443,7 +487,7 @@ export function HistoryApp() {
                 size="sm"
                 variant="secondary"
                 disabled={selectedRecords.length === 0}
-                onClick={() => downloadCsv(selectedRecords, "selected")}
+                onClick={() => void downloadCsv(selectedRecords, "selected")}
                 suppressHydrationWarning
               >
                 <Download size={14} />
@@ -455,7 +499,7 @@ export function HistoryApp() {
                   size="sm"
                   variant="secondary"
                   disabled={sortedRecords.length === 0}
-                  onClick={() => downloadCsv(sortedRecords, "filtered")}
+                  onClick={() => void downloadCsv(sortedRecords, "filtered")}
                   suppressHydrationWarning
                 >
                   <Download size={14} />
@@ -467,7 +511,7 @@ export function HistoryApp() {
                 size="sm"
                 variant="secondary"
                 disabled={records.length === 0}
-                onClick={() => downloadCsv(records, "all")}
+                onClick={() => void downloadCsv(records, "all")}
                 suppressHydrationWarning
               >
                 <Download size={14} />
@@ -543,7 +587,7 @@ export function HistoryApp() {
                       record={record}
                       currentCollections={currentCollections}
                       selected={selectedKeySet.has(record.key)}
-                      cacheRecords={cacheRecordsByKey[record.key] ?? []}
+                      cachedCount={cachedCountsByKey[record.key] ?? 0}
                       onSelectedChange={toggleRecordSelection}
                       onDelete={handleDeleteRecord}
                     />
@@ -591,14 +635,14 @@ function HistoryRow({
   record,
   currentCollections,
   selected,
-  cacheRecords,
+  cachedCount,
   onSelectedChange,
   onDelete
 }: {
   record: HistoryRecord;
   currentCollections: CommonCrawlCollection[];
   selected: boolean;
-  cacheRecords: CachedHtmlCaptureRecord[];
+  cachedCount: number;
   onSelectedChange: (key: string, checked: boolean) => void;
   onDelete: (record: HistoryRecord) => Promise<void>;
 }) {
@@ -611,7 +655,7 @@ function HistoryRow({
   const openHref = searchHref(record, newCount > 0 ? "missing" : undefined);
   const checkNewHref = searchHref(record, "missing");
   const retryFailedHref = searchHref(record, "retry-failed");
-  const hasCache = cacheRecords.length > 0;
+  const hasCache = cachedCount > 0;
 
   const labelClass = "hidden lg:inline";
   const buttonClass = "w-8 px-0 lg:w-auto lg:px-3";
@@ -654,11 +698,11 @@ function HistoryRow({
         {formatDate(record.updatedAt)}
       </time>
       <div className={HISTORY_SNAPSHOTS_COL_CLASS}>
-        <Metric value={String(record.captures.length)} tone={record.captures.length > 0 ? "green" : "neutral"} />
+        <Metric value={String(record.captureCount)} tone={record.captureCount > 0 ? "green" : "neutral"} />
       </div>
       <div className={`${HISTORY_CACHED_COL_CLASS} text-right`}>
         <p className={`font-mono text-sm font-bold tabular-nums ${hasCache ? "text-emerald-200" : "text-zinc-200"}`}>
-          {cacheRecords.length}/{record.captures.length}
+          {cachedCount}/{record.captureCount}
         </p>
       </div>
       <div className={HISTORY_SOURCES_COL_CLASS}>
@@ -817,11 +861,10 @@ function EmptyState({ text }: { text: string }) {
   );
 }
 
-function isHistoryRecord(record: StoredSearch): record is HistoryRecord {
+function isHistoryRecord(record: HistorySummaryRecord): record is HistoryRecord {
   return (
     !record.mock &&
-    (record.scanScope === "recent" || record.scanScope === "all" || record.scanScope === "custom") &&
-    Array.isArray(record.results)
+    (record.scanScope === "recent" || record.scanScope === "all" || record.scanScope === "custom")
   );
 }
 
@@ -850,14 +893,6 @@ function mergeHistoryRecords(records: HistoryRecord[]) {
         : current.scanScope === "custom" || record.scanScope === "custom"
           ? "custom"
           : "recent";
-    const mergedResults =
-      current.scanScope === "all"
-        ? mergeCollectionResults(record.results, current.results)
-        : mergeCollectionResults(current.results, record.results);
-    const mergedScanLogResults = [
-      ...(current.scanLogResults ?? current.results),
-      ...(record.scanLogResults ?? record.results)
-    ];
     const mergedCollections =
       record.scanScope === "all"
         ? record.collections ?? current.collections
@@ -866,16 +901,15 @@ function mergeHistoryRecords(records: HistoryRecord[]) {
     // results; a sparse record (e.g. an interrupted re-scan) may carry a
     // frozen list that already includes newer collections and would hide the
     // "new collections available" hint.
-    const checkedCount = (entry: HistoryRecord) =>
-      entry.results.filter((result) => result.status === "checked").length;
+    const checkedCount = (entry: HistoryRecord) => entry.sourceProcessed - entry.failedCount;
     const coverageAnchor = checkedCount(record) > checkedCount(current) ? record : current;
+    const captureKeys = Array.from(new Set([...(current.captureKeys ?? []), ...(record.captureKeys ?? [])]));
     byScan.set(identity, {
       ...current,
       key: scanSearchKey(record.url, record.matchType, record.mock, mergedScope, {
         dateFrom: record.dateFrom ?? current.dateFrom,
         dateTo: record.dateTo ?? current.dateTo
       }),
-      captures: dedupeCaptures([...current.captures, ...record.captures]),
       scanScope: mergedScope,
       dateFrom: record.dateFrom ?? current.dateFrom,
       dateTo: record.dateTo ?? current.dateTo,
@@ -887,8 +921,13 @@ function mergeHistoryRecords(records: HistoryRecord[]) {
       collectionListFetchedAt: Math.max(current.collectionListFetchedAt ?? 0, record.collectionListFetchedAt ?? 0) || undefined,
       scanWindowFrom: current.scanWindowFrom ?? record.scanWindowFrom,
       scanWindowTo: current.scanWindowTo ?? record.scanWindowTo,
-      results: mergedResults,
-      scanLogResults: mergedScanLogResults,
+      captureCount: Math.max(current.captureCount, record.captureCount, captureKeys.length),
+      captureKeys,
+      sourceTotal: Math.max(current.sourceTotal, record.sourceTotal),
+      sourceProcessed: Math.max(current.sourceProcessed, record.sourceProcessed),
+      failedCount: Math.max(current.failedCount, record.failedCount),
+      durationMs: Math.max(current.durationMs ?? 0, record.durationMs ?? 0) || undefined,
+      activeScanStartedAt: current.activeScanStartedAt ?? record.activeScanStartedAt,
       updatedAt: Math.max(current.updatedAt, record.updatedAt),
       storageKeys: Array.from(new Set([...(current.storageKeys ?? [current.key]), record.key]))
     });
@@ -902,8 +941,6 @@ function activeCollectionsFor(record: HistoryRecord, currentCollections: CommonC
     const ids = new Set(record.collectionIds);
     return currentCollections.filter((collection) => ids.has(collection.id));
   }
-  const resultCollections = record.results.map((result) => result.collection);
-  if (resultCollections.length > 0) return resultCollections;
   if (currentCollections.length > 0) {
     if (record.scanScope === "all") return currentCollections;
     if (record.scanScope === "custom" && record.dateFrom && record.dateTo) {
@@ -911,7 +948,7 @@ function activeCollectionsFor(record: HistoryRecord, currentCollections: CommonC
     }
     return filterCollectionsByRecentMonths(currentCollections);
   }
-  return record.collections ?? record.results.map((result) => result.collection);
+  return record.collections ?? [];
 }
 
 function currentCollectionsFor(record: HistoryRecord, currentCollections: CommonCrawlCollection[]) {
@@ -925,8 +962,7 @@ function currentCollectionsFor(record: HistoryRecord, currentCollections: Common
 function savedCollectionIds(record: HistoryRecord) {
   return new Set([
     ...(record.collectionIds ?? []),
-    ...(record.collections ?? []).map((collection) => collection.id),
-    ...record.results.map((result) => result.collection.id)
+    ...(record.collections ?? []).map((collection) => collection.id)
   ]);
 }
 
@@ -938,15 +974,14 @@ function newCollectionsFor(record: HistoryRecord, currentCollections: CommonCraw
 
 function sourceCounts(record: HistoryRecord, currentCollections: CommonCrawlCollection[]) {
   const activeCollections = activeCollectionsFor(record, currentCollections);
-  const activeIds = new Set(activeCollections.map((collection) => collection.id));
-  const activeResults = record.results.filter((result) => activeIds.has(result.collection.id));
-  const resultIds = new Set(activeResults.map((result) => result.collection.id));
-  const failed = activeResults.filter((result) => result.status === "not-checked").length;
+  const total = activeCollections.length || record.sourceTotal;
+  const processed = Math.min(record.sourceProcessed, total);
+  const failed = Math.min(record.failedCount, processed);
   return {
-    total: activeCollections.length,
-    processed: activeResults.length,
+    total,
+    processed,
     failed,
-    missing: activeCollections.filter((collection) => !resultIds.has(collection.id)).length
+    missing: Math.max(0, total - processed)
   };
 }
 
@@ -957,7 +992,7 @@ function failedCount(record: HistoryRecord, currentCollections: CommonCrawlColle
 function scanOutcome(record: HistoryRecord, currentCollections: CommonCrawlCollection[] = []): ScanOutcome {
   const counts = sourceCounts(record, currentCollections);
   if (counts.failed > 0 || counts.missing > 0) return "partial";
-  if (record.captures.length > 0) return "complete";
+  if (record.captureCount > 0) return "complete";
   return "empty";
 }
 
@@ -984,7 +1019,7 @@ function compareRecords(
       cmp = left.matchType.localeCompare(right.matchType);
       break;
     case "captures":
-      cmp = left.captures.length - right.captures.length;
+      cmp = left.captureCount - right.captureCount;
       break;
     case "sources": {
       const ls = sourceCounts(left, currentCollections);
@@ -1037,7 +1072,7 @@ function formatDateTime(timestamp: number) {
   }).format(timestamp);
 }
 
-function downloadCsv(records: HistoryRecord[], mode: "all" | "filtered" | "selected") {
+async function downloadCsv(records: HistoryRecord[], mode: "all" | "filtered" | "selected") {
   const rows = [
     [
       "exportedAt",
@@ -1062,13 +1097,13 @@ function downloadCsv(records: HistoryRecord[], mode: "all" | "filtered" | "selec
       record.matchType,
       record.scanScope,
       scanOutcome(record),
-      String(record.captures.length),
+      String(record.captureCount),
       String(sourceCounts(record, []).processed),
       String(failedCount(record)),
-      String(record.collections?.length ?? record.results.length)
+      String(record.collectionIds?.length ?? record.collections?.length ?? record.sourceTotal)
     ])
   ];
-  const csv = rows.map((row) => row.map(escapeCsvCell).join(",")).join("\n");
+  const csv = await computeCsv(rows);
   const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
   const objectUrl = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -1078,6 +1113,3 @@ function downloadCsv(records: HistoryRecord[], mode: "all" | "filtered" | "selec
   URL.revokeObjectURL(objectUrl);
 }
 
-function escapeCsvCell(value: string) {
-  return `"${value.replaceAll('"', '""')}"`;
-}

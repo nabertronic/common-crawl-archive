@@ -23,6 +23,8 @@ describe("CSP proxy", () => {
     expect(csp).toContain("connect-src 'self' https://index.commoncrawl.org https://data.commoncrawl.org");
     // Sandboxed srcdoc preview iframe.
     expect(csp).toContain("frame-src 'self'");
+    // Same-origin compute worker (with blob: for bundlers that use it).
+    expect(csp).toContain("worker-src 'self' blob:");
   });
 
   it("uses a nonce with strict-dynamic for scripts", () => {

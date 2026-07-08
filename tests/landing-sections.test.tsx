@@ -9,7 +9,7 @@ describe("LandingSections", () => {
     expect(screen.getByRole("heading", { name: "Three steps to a lost page" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Built on Common Crawl" })).toBeInTheDocument();
     expect(
-      screen.getByRole("heading", { name: "A fallback archive that stays out of your way" })
+      screen.getByRole("heading", { name: "A web archive that stays out of your way" })
     ).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Questions" })).toBeInTheDocument();
   });
@@ -25,13 +25,19 @@ describe("LandingSections", () => {
     expect(screen.getByText(/Common Crawl often holds captures the Wayback Machine is missing/)).toBeVisible();
   });
 
-  it("links to history, settings, and Common Crawl in the footer", () => {
+  it("renders the floating landing navigation and keeps footer minimal", () => {
     render(<LandingSections />);
-    const footer = screen.getByRole("navigation", { name: "Footer" });
-    expect(footer.querySelector('a[href="/history"]')).not.toBeNull();
-    expect(footer.querySelector('a[href="/settings"]')).not.toBeNull();
-    const commonCrawlLink = footer.querySelector('a[href="https://commoncrawl.org"]');
-    expect(commonCrawlLink).toHaveAttribute("target", "_blank");
-    expect(commonCrawlLink).toHaveAttribute("rel", expect.stringContaining("noreferrer"));
+    const nav = screen.getByRole("navigation", { name: "Landing sections" });
+    expect(nav.querySelector('a[href="#top"]')).not.toBeNull();
+    expect(nav.querySelector('a[href="#how-it-works"]')).not.toBeNull();
+    expect(nav.querySelector('a[href="#why-crawlback"]')).not.toBeNull();
+    expect(nav.querySelector('a[href="#data-source"]')).not.toBeNull();
+    expect(nav.querySelector('a[href="#faq"]')).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Open menu" })).toBeInTheDocument();
+
+    const footer = screen.getByRole("contentinfo");
+    expect(footer.querySelector('a[href="/history"]')).toBeNull();
+    expect(footer.querySelector('a[href="/settings"]')).toBeNull();
+    expect(footer.querySelector('a[href="https://commoncrawl.org"]')).toBeNull();
   });
 });

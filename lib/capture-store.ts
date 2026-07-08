@@ -1,19 +1,27 @@
 import { shouldPersistScanLogEntry } from "./common-crawl";
 import type { CollectionCheckResult, CommonCrawlCapture, CommonCrawlCollection, MatchType, ScanLogEntry } from "./common-crawl";
+import { markPerformance, measureAsync, measurePerformance } from "./performance";
 import { dedupeCaptures, mergeCollectionResult, mergeCollectionResults } from "./scan-results";
 
 const DB_NAME = "wayback-fallback";
-const DB_VERSION = 3;
+const DB_VERSION = 6;
 const LEGACY_SEARCH_STORE = "searches";
+const HISTORY_SUMMARY_STORE = "historySummaries";
 const TARGET_STORE = "targets";
 const COVERAGE_STORE = "coverages";
 const SESSION_STORE = "scanSessions";
 const USER_STORE = "users";
 const SETTINGS_STORE = "settings";
 const HTML_CAPTURE_STORE = "htmlCaptures";
+const HTML_CAPTURE_META_STORE = "htmlCaptureMeta";
 const CHANNEL_NAME = "wayback-fallback:searches";
 const DEFAULT_LOCAL_USER_ID = "local";
 const ACTIVE_SETTINGS_ID = "active";
+// Stored in the settings store under a dedicated id so migration progress
+// survives reloads without polluting the AppSettings record (which is rebuilt
+// field-by-field in normalizeSettings and would drop unknown keys).
+const MIGRATIONS_ID = "migrations";
+const OWNER_BACKFILL_BATCH_SIZE = 100;
 export const DEFAULT_HTML_CACHE_LIMIT_BYTES = 500 * 1024 * 1024;
 export const DEFAULT_SEARCH_PAGE_SIZE = 100;
 export const DEFAULT_HISTORY_PAGE_SIZE = 25;
@@ -65,6 +73,31 @@ export type StoredSearch = {
   durationMs?: number;
   activeScanStartedAt?: number;
   updatedAt: number;
+};
+
+export type HistorySummaryRecord = {
+  key: string;
+  ownerId?: string;
+  url: string;
+  matchType: MatchType;
+  mock: boolean;
+  scanScope: ScanScope;
+  dateFrom?: string;
+  dateTo?: string;
+  collections?: CommonCrawlCollection[];
+  collectionIds?: string[];
+  collectionListFetchedAt?: number;
+  scanWindowFrom?: string;
+  scanWindowTo?: string;
+  captureCount: number;
+  captureKeys: string[];
+  sourceTotal: number;
+  sourceProcessed: number;
+  failedCount: number;
+  durationMs?: number;
+  activeScanStartedAt?: number;
+  updatedAt: number;
+  storageKeys?: string[];
 };
 
 export type SearchTarget = {
@@ -136,6 +169,7 @@ export type AppSettings = {
   htmlCacheLimitBytes: number;
   autoPruneEnabled: boolean;
   showHtmlPrivacyWarning: boolean;
+  robotsTxtChecksEnabled: boolean;
   defaultMatchType: MatchType;
   defaultScanScope: ScanScope;
   defaultCustomDateFrom?: string;
@@ -168,6 +202,11 @@ export type CachedHtmlCaptureRecord = {
   createdAt: number;
   lastAccessedAt: number;
 };
+
+export type CachedHtmlCaptureMetaRecord = Pick<
+  CachedHtmlCaptureRecord,
+  "cacheKey" | "ownerId" | "filename" | "offset" | "length" | "url" | "timestamp" | "collectionId" | "mime" | "status" | "sizeBytes" | "createdAt" | "lastAccessedAt"
+>;
 
 export type CacheStats = {
   count: number;
@@ -260,40 +299,92 @@ function newStableId(): string {
   return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
 }
 
+// A single cached connection is shared across all transactions instead of
+// opening/closing the database on every access. Opening IndexedDB is not free,
+// and the previous open-per-call pattern showed up as dozens of `indexeddb-open`
+// marks in a single session. The connection is released back to the cache (not
+// closed) after each transaction; it is only truly closed on version change
+// (another tab upgrading) or an unexpected close, which resets the cache so the
+// next call reopens cleanly.
+let cachedDbPromise: Promise<IDBDatabase> | undefined;
+
+function releaseDb(_db: IDBDatabase): void {
+  // No-op: the connection is pooled in `cachedDbPromise` and stays open for reuse.
+}
+
+function resetDbCache(db: IDBDatabase): void {
+  if (cachedDbPromise) {
+    // Only clear the cache if it still points at this (now-dead) connection.
+    void cachedDbPromise.then((current) => {
+      if (current === db) cachedDbPromise = undefined;
+    });
+  }
+}
+
 function openDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+  if (cachedDbPromise) return cachedDbPromise;
+  cachedDbPromise = new Promise((resolve, reject) => {
     if (typeof indexedDB === "undefined") {
+      cachedDbPromise = undefined;
       reject(new Error("IndexedDB unavailable"));
       return;
     }
+    const startMark = `indexeddb-open:start:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+    markPerformance(startMark);
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
+      const upgradeStart = `indexeddb-upgrade:start:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+      markPerformance(upgradeStart);
       const db = req.result;
-      if (!db.objectStoreNames.contains(LEGACY_SEARCH_STORE)) {
-        db.createObjectStore(LEGACY_SEARCH_STORE, { keyPath: "key" });
-      }
-      if (!db.objectStoreNames.contains(TARGET_STORE)) {
-        db.createObjectStore(TARGET_STORE, { keyPath: "targetId" });
-      }
-      if (!db.objectStoreNames.contains(COVERAGE_STORE)) {
-        db.createObjectStore(COVERAGE_STORE, { keyPath: "targetId" });
-      }
-      if (!db.objectStoreNames.contains(SESSION_STORE)) {
-        db.createObjectStore(SESSION_STORE, { keyPath: "scanId" });
-      }
-      if (!db.objectStoreNames.contains(USER_STORE)) {
-        db.createObjectStore(USER_STORE, { keyPath: "userId" });
-      }
-      if (!db.objectStoreNames.contains(SETTINGS_STORE)) {
-        db.createObjectStore(SETTINGS_STORE, { keyPath: "id" });
-      }
-      if (!db.objectStoreNames.contains(HTML_CAPTURE_STORE)) {
-        db.createObjectStore(HTML_CAPTURE_STORE, { keyPath: "cacheKey" });
-      }
+      const upgradeTx = req.transaction;
+      // Return the store whether it already exists (upgrade) or must be created
+      // (fresh DB), so indexes can be attached in the same versionchange tx.
+      const ensureStore = (name: string, options: IDBObjectStoreParameters): IDBObjectStore | undefined => {
+        if (db.objectStoreNames.contains(name)) return upgradeTx?.objectStore(name);
+        return db.createObjectStore(name, options);
+      };
+      const ensureIndex = (store: IDBObjectStore | undefined, name: string, keyPath: string | string[]) => {
+        if (store && !store.indexNames.contains(name)) store.createIndex(name, keyPath);
+      };
+
+      // Only stores that are read via getAll() get an ownerId index; the rest are
+      // always accessed by primary key, where an index would just cost writes.
+      const searchStore = ensureStore(LEGACY_SEARCH_STORE, { keyPath: "key" });
+      ensureIndex(searchStore, "ownerId", "ownerId");
+      const summaryStore = ensureStore(HISTORY_SUMMARY_STORE, { keyPath: "key" });
+      ensureIndex(summaryStore, "ownerId", "ownerId");
+      ensureIndex(summaryStore, "owner_updatedAt", ["ownerId", "updatedAt"]);
+
+      ensureStore(TARGET_STORE, { keyPath: "targetId" });
+      ensureStore(COVERAGE_STORE, { keyPath: "targetId" });
+      ensureStore(SESSION_STORE, { keyPath: "scanId" });
+      ensureStore(USER_STORE, { keyPath: "userId" });
+      ensureStore(SETTINGS_STORE, { keyPath: "id" });
+      ensureStore(HTML_CAPTURE_STORE, { keyPath: "cacheKey" });
+      ensureStore(HTML_CAPTURE_META_STORE, { keyPath: "cacheKey" });
+      measurePerformance("indexeddb-upgrade", upgradeStart, { version: DB_VERSION });
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error ?? new Error("IndexedDB open failed"));
+    req.onsuccess = () => {
+      measurePerformance("indexeddb-open", startMark, { version: DB_VERSION });
+      const db = req.result;
+      // Close on cross-tab upgrade so we never block another tab's versionchange,
+      // and drop closed connections from the cache so the next call reopens.
+      db.onversionchange = () => {
+        db.close();
+        resetDbCache(db);
+      };
+      db.onclose = () => {
+        resetDbCache(db);
+      };
+      resolve(db);
+    };
+    req.onerror = () => {
+      measurePerformance("indexeddb-open", startMark, { version: DB_VERSION });
+      cachedDbPromise = undefined;
+      reject(req.error ?? new Error("IndexedDB open failed"));
+    };
   });
+  return cachedDbPromise;
 }
 
 async function withStore<T>(
@@ -318,15 +409,195 @@ async function withStore<T>(
       tx.onabort = () => reject(tx.error);
     });
   } finally {
-    db.close();
+    releaseDb(db);
+  }
+}
+
+// Read only the records belonging to `ownerId` by walking the ownerId index,
+// instead of getAll()+filter over every owner's records. Falls back to a full
+// scan if the index is somehow missing (e.g. a partially-applied upgrade).
+async function listByOwnerIndex<T extends { ownerId?: string }>(
+  storeName: string,
+  ownerId: string
+): Promise<T[]> {
+  const db = await openDB();
+  try {
+    return await new Promise<T[]>((resolve, reject) => {
+      const tx = db.transaction(storeName, "readonly");
+      const store = tx.objectStore(storeName);
+      if (!store.indexNames.contains("ownerId")) {
+        const req = store.getAll();
+        req.onsuccess = () => {
+          const all = (req.result ?? []) as T[];
+          resolve(all.filter((record) => (record.ownerId ?? DEFAULT_LOCAL_USER_ID) === ownerId));
+        };
+        req.onerror = () => reject(req.error);
+        return;
+      }
+      const req = store.index("ownerId").getAll(IDBKeyRange.only(ownerId)) as IDBRequest<T[]>;
+      req.onsuccess = () => resolve(req.result ?? []);
+      req.onerror = () => reject(req.error);
+    });
+  } finally {
+    releaseDb(db);
+  }
+}
+
+function yieldToIdle(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof requestIdleCallback === "function") {
+      requestIdleCallback(() => resolve(), { timeout: 200 });
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+}
+
+/**
+ * Walk a store's primary keys in batches, applying `mutate` to each record.
+ * `mutate` returns the updated record to persist, or undefined to skip it. Each
+ * batch runs in its own short transaction and the loop yields to idle time
+ * between batches, so a large migration never blocks the first paint.
+ */
+async function migrateStoreInBatches<T>(
+  storeName: string,
+  mutate: (record: T) => T | undefined,
+  batchSize = OWNER_BACKFILL_BATCH_SIZE
+): Promise<void> {
+  const db = await openDB();
+  try {
+    let lastKey: IDBValidKey | undefined;
+    for (;;) {
+      const batch = await new Promise<{ count: number; lastKey?: IDBValidKey }>((resolve, reject) => {
+        const tx = db.transaction(storeName, "readwrite");
+        const store = tx.objectStore(storeName);
+        const range = lastKey === undefined ? null : IDBKeyRange.lowerBound(lastKey, true);
+        const req = store.openCursor(range);
+        let count = 0;
+        let cursorKey: IDBValidKey | undefined = lastKey;
+        req.onsuccess = () => {
+          const cursor = req.result;
+          if (cursor && count < batchSize) {
+            const updated = mutate(cursor.value as T);
+            if (updated !== undefined) cursor.update(updated);
+            cursorKey = cursor.primaryKey;
+            count += 1;
+            cursor.continue();
+          } else {
+            resolve({ count, lastKey: cursorKey });
+          }
+        };
+        req.onerror = () => reject(req.error);
+        tx.onabort = () => reject(tx.error);
+      });
+      lastKey = batch.lastKey;
+      if (batch.count < batchSize) break;
+      await yieldToIdle();
+    }
+  } finally {
+    releaseDb(db);
+  }
+}
+
+type MigrationRecord = { id: string; ownerBackfillDone?: boolean };
+
+async function readMigrations(): Promise<MigrationRecord | undefined> {
+  try {
+    return await withStore<MigrationRecord>(SETTINGS_STORE, "readonly", (store) => store.get(MIGRATIONS_ID));
+  } catch {
+    return undefined;
+  }
+}
+
+async function writeMigrations(record: MigrationRecord): Promise<void> {
+  await withStore(SETTINGS_STORE, "readwrite", (store) => {
+    store.put({ ...record, id: MIGRATIONS_ID });
+  });
+}
+
+// Legacy records saved before ownerId existed carry no owner. The ownerId index
+// keys on that field, so those records would silently drop out of index reads.
+// Stamp the active owner onto them once, chunked, before any index read. Guarded
+// by a marker so it runs at most once and yields between batches.
+/**
+ * Backfill transform: stamp `ownerId` onto a record that lacks one, or return
+ * undefined to leave records that already have an owner untouched (so the batch
+ * migration skips the write). Pure and exported for testing.
+ */
+export function stampMissingOwner<T extends { ownerId?: string }>(record: T, ownerId: string): T | undefined {
+  return record && !record.ownerId ? { ...record, ownerId } : undefined;
+}
+
+let ownerBackfillPromise: Promise<void> | undefined;
+async function ensureOwnerBackfill(ownerId: string): Promise<void> {
+  if (ownerBackfillPromise) return ownerBackfillPromise;
+  ownerBackfillPromise = (async () => {
+    const migrations = await readMigrations();
+    if (migrations?.ownerBackfillDone) return;
+    const stamp = (record: { ownerId?: string }) => stampMissingOwner(record, ownerId);
+    await migrateStoreInBatches(LEGACY_SEARCH_STORE, stamp);
+    await migrateStoreInBatches(HISTORY_SUMMARY_STORE, stamp);
+    await writeMigrations({ ...(migrations ?? { id: MIGRATIONS_ID }), ownerBackfillDone: true });
+  })().catch(() => {
+    // Let a failed run retry on the next call rather than wedging reads.
+    ownerBackfillPromise = undefined;
+  });
+  return ownerBackfillPromise;
+}
+
+async function mutateCoverageRecord<T>(
+  targetId: string,
+  task: (existing: CoverageRecord | undefined, ownerId: string) => { record?: CoverageRecord; result: T }
+): Promise<T> {
+  const ownerId = await activeOwnerId();
+  const db = await openDB();
+  let shouldNotify = false;
+  try {
+    const result = await new Promise<T>((resolve, reject) => {
+      const tx = db.transaction(COVERAGE_STORE, "readwrite");
+      const store = tx.objectStore(COVERAGE_STORE);
+      const request = store.get(targetId);
+      let resultValue: T;
+
+      request.onsuccess = () => {
+        try {
+          const existing = withOwner(request.result as CoverageRecord | undefined, ownerId);
+          const mutation = task(existing, ownerId);
+          resultValue = mutation.result;
+          if (mutation.record) {
+            store.put({ ...mutation.record, ownerId: mutation.record.ownerId ?? ownerId });
+            shouldNotify = true;
+          }
+        } catch (error) {
+          try {
+            tx.abort();
+          } catch {
+            // Transaction may already be aborting.
+          }
+          reject(error);
+        }
+      };
+      request.onerror = () => reject(request.error);
+      tx.oncomplete = () => resolve(resultValue);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+    if (shouldNotify) notifyUpdated(targetId);
+    return result;
+  } finally {
+    releaseDb(db);
   }
 }
 
 export async function putSearch(record: StoredSearch): Promise<void> {
   try {
     const ownerId = await activeOwnerId();
+    const ownedRecord = { ...record, ownerId: record.ownerId ?? ownerId };
     await withStore(LEGACY_SEARCH_STORE, "readwrite", (store) => {
-      store.put({ ...record, ownerId: record.ownerId ?? ownerId });
+      store.put(ownedRecord);
+    });
+    await withStore(HISTORY_SUMMARY_STORE, "readwrite", (store) => {
+      store.put(historySummaryFromStoredSearch(ownedRecord, ownerId));
     });
     notifyUpdated(record.key);
   } catch {
@@ -345,17 +616,101 @@ export async function getSearch(key: string): Promise<StoredSearch | undefined> 
 export async function listSearches(): Promise<StoredSearch[]> {
   try {
     const ownerId = await activeOwnerId();
-    return ((await withStore<StoredSearch[]>(LEGACY_SEARCH_STORE, "readonly", (store) => store.getAll())) ?? [])
+    await ensureOwnerBackfill(ownerId);
+    return (await listByOwnerIndex<StoredSearch>(LEGACY_SEARCH_STORE, ownerId))
       .map((record) => withOwner(record, ownerId))
-      .filter((record): record is StoredSearch => record !== undefined && record.ownerId === ownerId);
+      .filter((record): record is StoredSearch => record !== undefined);
   } catch {
     return [];
   }
 }
 
+export async function listHistorySummaries(): Promise<HistorySummaryRecord[]> {
+  return measureAsync("history-summary-load", async () => {
+    const ownerId = await activeOwnerId();
+    await ensureOwnerBackfill(ownerId);
+    const summaries = (await listByOwnerIndex<HistorySummaryRecord>(HISTORY_SUMMARY_STORE, ownerId))
+      .map((record) => withOwner(record, ownerId))
+      .filter((record): record is HistorySummaryRecord => record !== undefined);
+    if (summaries.length > 0) return summaries;
+
+    const searches = await listSearches();
+    if (searches.length === 0) return [];
+    const migrated = searches.map((record) => historySummaryFromStoredSearch(record, ownerId));
+    await withStore(HISTORY_SUMMARY_STORE, "readwrite", (store) => {
+      for (const summary of migrated) store.put(summary);
+    });
+    return migrated;
+  }).catch(() => {
+    return [];
+  });
+}
+
+/**
+ * Read the `limit` most-recently-updated history summaries for the active owner
+ * via the `owner_updatedAt` compound index (newest first), without materializing
+ * the whole store. Used for a fast first paint on large histories; the full list
+ * is loaded separately for client-side filter/sort/search/export. Falls back to a
+ * full read + sort + slice if the index is unavailable.
+ */
+export async function listRecentHistorySummaries(limit: number): Promise<HistorySummaryRecord[]> {
+  return measureAsync(
+    "history-summary-load-recent",
+    async () => {
+      const ownerId = await activeOwnerId();
+      await ensureOwnerBackfill(ownerId);
+      const db = await openDB();
+      try {
+        return await new Promise<HistorySummaryRecord[]>((resolve, reject) => {
+          const tx = db.transaction(HISTORY_SUMMARY_STORE, "readonly");
+          const store = tx.objectStore(HISTORY_SUMMARY_STORE);
+          if (!store.indexNames.contains("owner_updatedAt")) {
+            const req = store.getAll();
+            req.onsuccess = () => {
+              const page = ((req.result ?? []) as HistorySummaryRecord[])
+                .filter((record) => (record.ownerId ?? DEFAULT_LOCAL_USER_ID) === ownerId)
+                .sort((a, b) => b.updatedAt - a.updatedAt)
+                .slice(0, limit)
+                .map((record) => withOwner(record, ownerId))
+                .filter((record): record is HistorySummaryRecord => record !== undefined);
+              resolve(page);
+            };
+            req.onerror = () => reject(req.error);
+            return;
+          }
+          // Canonical compound-index prefix range for one owner: [ownerId] sorts
+          // before any [ownerId, updatedAt], and [ownerId, []] sorts after any of
+          // them (an empty array is greater than every number). "prev" walks it
+          // newest-updatedAt first.
+          const range = IDBKeyRange.bound([ownerId], [ownerId, []]);
+          const req = store.index("owner_updatedAt").openCursor(range, "prev");
+          const out: HistorySummaryRecord[] = [];
+          req.onsuccess = () => {
+            const cursor = req.result;
+            if (cursor && out.length < limit) {
+              const owned = withOwner(cursor.value as HistorySummaryRecord, ownerId);
+              if (owned) out.push(owned);
+              cursor.continue();
+            } else {
+              resolve(out);
+            }
+          };
+          req.onerror = () => reject(req.error);
+        });
+      } finally {
+        releaseDb(db);
+      }
+    },
+    { limit }
+  ).catch(() => [] as HistorySummaryRecord[]);
+}
+
 export async function deleteSearch(key: string): Promise<void> {
   try {
     await withStore(LEGACY_SEARCH_STORE, "readwrite", (store) => {
+      store.delete(key);
+    });
+    await withStore(HISTORY_SUMMARY_STORE, "readwrite", (store) => {
       store.delete(key);
     });
     notifyUpdated(key);
@@ -369,14 +724,18 @@ export async function deleteSearches(keys: string[]): Promise<void> {
   try {
     const db = await openDB();
     await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(LEGACY_SEARCH_STORE, "readwrite");
-      const store = tx.objectStore(LEGACY_SEARCH_STORE);
-      for (const key of keys) store.delete(key);
+      const tx = db.transaction([LEGACY_SEARCH_STORE, HISTORY_SUMMARY_STORE], "readwrite");
+      const searchStore = tx.objectStore(LEGACY_SEARCH_STORE);
+      const summaryStore = tx.objectStore(HISTORY_SUMMARY_STORE);
+      for (const key of keys) {
+        searchStore.delete(key);
+        summaryStore.delete(key);
+      }
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
       tx.onabort = () => reject(tx.error);
     });
-    db.close();
+    releaseDb(db);
     for (const key of keys) notifyUpdated(key);
   } catch {
     // Best-effort persistence — never break the UI.
@@ -445,29 +804,29 @@ export async function upsertCoverageResult(
   target: Pick<SearchTarget, "targetId" | "ownerId" | "url" | "matchType" | "mock">,
   result: CollectionCheckResult
 ): Promise<CoverageRecord> {
-  const existing = await getCoverage(target.targetId);
-  const merged = mergeCollectionResult(existing?.collectionResults[result.collection.id], result);
-  const next: CoverageRecord = {
-    targetId: target.targetId,
-    ownerId: existing?.ownerId ?? target.ownerId ?? await activeOwnerId(),
-    url: target.url,
-    matchType: target.matchType,
-    mock: target.mock,
-    collectionResults: {
-      ...(existing?.collectionResults ?? {}),
-      [result.collection.id]: merged
-    },
-    scanLogResults: existing?.scanLogResults,
-    collectionIds: existing?.collectionIds,
-    collectionListFetchedAt: existing?.collectionListFetchedAt,
-    scanWindowFrom: existing?.scanWindowFrom,
-    scanWindowTo: existing?.scanWindowTo,
-    durationMs: existing?.durationMs,
-    activeScanStartedAt: existing?.activeScanStartedAt,
-    updatedAt: Date.now()
-  };
-  await putCoverage(next);
-  return next;
+  return await mutateCoverageRecord(target.targetId, (existing, ownerId) => {
+    const merged = mergeCollectionResult(existing?.collectionResults[result.collection.id], result);
+    const next: CoverageRecord = {
+      targetId: target.targetId,
+      ownerId: existing?.ownerId ?? target.ownerId ?? ownerId,
+      url: target.url,
+      matchType: target.matchType,
+      mock: target.mock,
+      collectionResults: {
+        ...(existing?.collectionResults ?? {}),
+        [result.collection.id]: merged
+      },
+      scanLogResults: existing?.scanLogResults,
+      collectionIds: existing?.collectionIds,
+      collectionListFetchedAt: existing?.collectionListFetchedAt,
+      scanWindowFrom: existing?.scanWindowFrom,
+      scanWindowTo: existing?.scanWindowTo,
+      durationMs: existing?.durationMs,
+      activeScanStartedAt: existing?.activeScanStartedAt,
+      updatedAt: Date.now()
+    };
+    return { record: next, result: next };
+  });
 }
 
 export async function appendCoverageScanLogEntry(
@@ -493,38 +852,42 @@ export async function appendCoverageScanLogEntry(
       updatedAt: existing?.updatedAt ?? Date.now()
     };
   }
-  const existing = await getCoverage(target.targetId);
-  const next: CoverageRecord = {
-    targetId: target.targetId,
-    ownerId: existing?.ownerId ?? target.ownerId ?? await activeOwnerId(),
-    url: target.url,
-    matchType: target.matchType,
-    mock: target.mock,
-    collectionResults: existing?.collectionResults ?? {},
-    scanLogResults: [...(existing?.scanLogResults ?? coverageResults(existing)), entry],
-    collectionIds: existing?.collectionIds,
-    collectionListFetchedAt: existing?.collectionListFetchedAt,
-    scanWindowFrom: existing?.scanWindowFrom,
-    scanWindowTo: existing?.scanWindowTo,
-    durationMs: existing?.durationMs,
-    activeScanStartedAt: existing?.activeScanStartedAt,
-    updatedAt: Date.now()
-  };
-  await putCoverage(next);
-  return next;
+  return await mutateCoverageRecord(target.targetId, (existing, ownerId) => {
+    const next: CoverageRecord = {
+      targetId: target.targetId,
+      ownerId: existing?.ownerId ?? target.ownerId ?? ownerId,
+      url: target.url,
+      matchType: target.matchType,
+      mock: target.mock,
+      collectionResults: existing?.collectionResults ?? {},
+      scanLogResults: [...(existing?.scanLogResults ?? coverageResults(existing)), entry],
+      collectionIds: existing?.collectionIds,
+      collectionListFetchedAt: existing?.collectionListFetchedAt,
+      scanWindowFrom: existing?.scanWindowFrom,
+      scanWindowTo: existing?.scanWindowTo,
+      durationMs: existing?.durationMs,
+      activeScanStartedAt: existing?.activeScanStartedAt,
+      updatedAt: Date.now()
+    };
+    return { record: next, result: next };
+  });
 }
 
 // Add one run's active scanning time to the stored total. Called when a scan
 // run reaches a terminal state (done/paused/cancelled/error).
 export async function addCoverageDuration(targetId: string, segmentMs: number): Promise<void> {
   if (!Number.isFinite(segmentMs) || segmentMs <= 0) return;
-  const existing = await getCoverage(targetId);
-  if (!existing) return;
-  await putCoverage({
-    ...existing,
-    durationMs: (existing.durationMs ?? 0) + Math.round(segmentMs),
-    activeScanStartedAt: undefined,
-    updatedAt: Date.now()
+  await mutateCoverageRecord(targetId, (existing) => {
+    if (!existing) return { result: undefined };
+    return {
+      record: {
+        ...existing,
+        durationMs: (existing.durationMs ?? 0) + Math.round(segmentMs),
+        activeScanStartedAt: undefined,
+        updatedAt: Date.now()
+      },
+      result: undefined
+    };
   });
 }
 
@@ -535,22 +898,26 @@ export async function startCoverageRun(
   metadata: Pick<CoverageRecord, "collectionIds" | "collectionListFetchedAt" | "scanWindowFrom" | "scanWindowTo"> = {}
 ): Promise<void> {
   if (!Number.isFinite(startedAt) || !Number.isFinite(durationMs) || durationMs < 0) return;
-  const existing = await getCoverage(target.targetId);
-  await putCoverage({
-    targetId: target.targetId,
-    ownerId: existing?.ownerId ?? target.ownerId ?? await activeOwnerId(),
-    url: target.url,
-    matchType: target.matchType,
-    mock: target.mock,
-    collectionResults: existing?.collectionResults ?? {},
-    scanLogResults: existing?.scanLogResults,
-    collectionIds: metadata.collectionIds ?? existing?.collectionIds,
-    collectionListFetchedAt: metadata.collectionListFetchedAt ?? existing?.collectionListFetchedAt,
-    scanWindowFrom: metadata.scanWindowFrom ?? existing?.scanWindowFrom,
-    scanWindowTo: metadata.scanWindowTo ?? existing?.scanWindowTo,
-    durationMs: Math.round(durationMs),
-    activeScanStartedAt: Math.round(startedAt),
-    updatedAt: Date.now()
+  await mutateCoverageRecord(target.targetId, (existing, ownerId) => {
+    return {
+      record: {
+        targetId: target.targetId,
+        ownerId: existing?.ownerId ?? target.ownerId ?? ownerId,
+        url: target.url,
+        matchType: target.matchType,
+        mock: target.mock,
+        collectionResults: existing?.collectionResults ?? {},
+        scanLogResults: existing?.scanLogResults,
+        collectionIds: metadata.collectionIds ?? existing?.collectionIds,
+        collectionListFetchedAt: metadata.collectionListFetchedAt ?? existing?.collectionListFetchedAt,
+        scanWindowFrom: metadata.scanWindowFrom ?? existing?.scanWindowFrom,
+        scanWindowTo: metadata.scanWindowTo ?? existing?.scanWindowTo,
+        durationMs: Math.round(durationMs),
+        activeScanStartedAt: Math.round(startedAt),
+        updatedAt: Date.now()
+      },
+      result: undefined
+    };
   });
 }
 
@@ -561,14 +928,50 @@ export function coverageDurationMs(record: CoverageRecord | undefined, now = Dat
 }
 
 export function scanLogDurationMs(entries: ScanLogEntry[] | undefined): number {
-  const timestamps = (entries ?? []).flatMap((entry) => {
-    if ("kind" in entry) return [entry.checkedAt];
-    return entry.attemptLogs?.length
+  const points: Array<{ timestamp: number; event?: string }> = (entries ?? []).flatMap((entry) => {
+    if ("kind" in entry) {
+      if (typeof entry.checkedAt !== "number" || !Number.isFinite(entry.checkedAt)) return [];
+      return [{ timestamp: entry.checkedAt, event: entry.event }];
+    }
+    const attemptTimestamps = entry.attemptLogs?.length
       ? entry.attemptLogs.map((attempt) => attempt.checkedAt ?? entry.checkedAt)
       : [entry.checkedAt];
-  }).filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    return attemptTimestamps
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
+      .map((timestamp) => ({ timestamp }));
+  });
+  const timestamps = points.map((point) => point.timestamp);
   if (timestamps.length < 2) return 0;
-  return Math.max(0, Math.max(...timestamps) - Math.min(...timestamps));
+  const runStartEvents = new Set(["scan-started", "scan-restarted", "retry-started", "continue-started", "auto-retry-started"]);
+  const runStopEvents = new Set(["scan-completed", "scan-paused", "scan-failed"]);
+  if (!points.some((point) => point.event && runStartEvents.has(point.event))) {
+    return Math.max(0, Math.max(...timestamps) - Math.min(...timestamps));
+  }
+
+  let startedAt: number | undefined;
+  let lastActivityAt: number | undefined;
+  let durationMs = 0;
+  for (const point of points) {
+    if (point.event && runStartEvents.has(point.event)) {
+      if (startedAt !== undefined && lastActivityAt !== undefined) {
+        durationMs += Math.max(0, lastActivityAt - startedAt);
+      }
+      startedAt = point.timestamp;
+      lastActivityAt = point.timestamp;
+      continue;
+    }
+    if (startedAt === undefined) continue;
+    lastActivityAt = Math.max(lastActivityAt ?? startedAt, point.timestamp);
+    if (point.event && runStopEvents.has(point.event)) {
+      durationMs += Math.max(0, point.timestamp - startedAt);
+      startedAt = undefined;
+      lastActivityAt = undefined;
+    }
+  }
+  if (startedAt !== undefined && lastActivityAt !== undefined) {
+    durationMs += Math.max(0, lastActivityAt - startedAt);
+  }
+  return durationMs;
 }
 
 export function coverageResults(record: CoverageRecord | undefined): CollectionCheckResult[] {
@@ -590,6 +993,40 @@ export function coverageScanLogResults(record: CoverageRecord | undefined): Scan
 
 export function coverageCaptures(record: CoverageRecord | undefined): CommonCrawlCapture[] {
   return dedupeCaptures(coverageResults(record).flatMap((result) => result.captures));
+}
+
+export function historySummaryFromStoredSearch(record: StoredSearch, ownerId = record.ownerId): HistorySummaryRecord {
+  const results = resultsForLegacyRecord(record);
+  const sourceTotal = historySourceTotal(record, results);
+  const sourceProcessed = results.filter((result) => result.status === "checked" || result.status === "not-checked").length;
+  const failedCount = results.filter((result) => result.status === "not-checked").length;
+  return {
+    key: record.key,
+    ownerId,
+    url: record.url,
+    matchType: record.matchType,
+    mock: record.mock,
+    scanScope: record.scanScope ?? "recent",
+    dateFrom: record.dateFrom,
+    dateTo: record.dateTo,
+    collections: record.collections,
+    collectionIds: record.collectionIds ?? record.collections?.map((collection) => collection.id),
+    collectionListFetchedAt: record.collectionListFetchedAt,
+    scanWindowFrom: record.scanWindowFrom,
+    scanWindowTo: record.scanWindowTo,
+    captureCount: dedupeCaptures(record.captures).length,
+    captureKeys: Array.from(new Set(record.captures.map(captureCacheKey))),
+    sourceTotal,
+    sourceProcessed,
+    failedCount,
+    durationMs: record.durationMs,
+    activeScanStartedAt: record.activeScanStartedAt,
+    updatedAt: record.updatedAt
+  };
+}
+
+function historySourceTotal(record: StoredSearch, results: CollectionCheckResult[]) {
+  return record.collectionIds?.length ?? record.collections?.length ?? results.length;
 }
 
 export async function getScanSession(scanId: string): Promise<ScanSession | undefined> {
@@ -692,23 +1129,28 @@ export async function migrateLegacySearchToSession(
   for (const result of storedResults) {
     await upsertCoverageResult(target, result);
   }
-  const existing = await getCoverage(target.targetId);
   const inferredDurationMs = scanLogDurationMs(storedScanLog);
-  await putCoverage({
-    targetId: target.targetId,
-    ownerId: existing?.ownerId ?? target.ownerId,
-    url: target.url,
-    matchType: target.matchType,
-    mock: target.mock,
-    collectionResults: existing?.collectionResults ?? {},
-    scanLogResults: existing?.scanLogResults?.length ? existing.scanLogResults : storedScanLog,
-    collectionIds: record.collectionIds ?? existing?.collectionIds,
-    collectionListFetchedAt: record.collectionListFetchedAt ?? existing?.collectionListFetchedAt,
-    scanWindowFrom: record.scanWindowFrom ?? existing?.scanWindowFrom,
-    scanWindowTo: record.scanWindowTo ?? existing?.scanWindowTo,
-    durationMs: record.durationMs ?? existing?.durationMs ?? inferredDurationMs,
-    activeScanStartedAt: record.activeScanStartedAt ?? existing?.activeScanStartedAt,
-    updatedAt: Date.now()
+  await mutateCoverageRecord(target.targetId, (existing, ownerId) => {
+    const durationMs = Math.max(record.durationMs ?? 0, existing?.durationMs ?? 0, inferredDurationMs) || undefined;
+    return {
+      record: {
+        targetId: target.targetId,
+        ownerId: existing?.ownerId ?? target.ownerId ?? ownerId,
+        url: target.url,
+        matchType: target.matchType,
+        mock: target.mock,
+        collectionResults: existing?.collectionResults ?? {},
+        scanLogResults: existing?.scanLogResults?.length ? existing.scanLogResults : storedScanLog,
+        collectionIds: record.collectionIds ?? existing?.collectionIds,
+        collectionListFetchedAt: record.collectionListFetchedAt ?? existing?.collectionListFetchedAt,
+        scanWindowFrom: record.scanWindowFrom ?? existing?.scanWindowFrom,
+        scanWindowTo: record.scanWindowTo ?? existing?.scanWindowTo,
+        durationMs,
+        activeScanStartedAt: existing?.activeScanStartedAt ?? record.activeScanStartedAt,
+        updatedAt: Date.now()
+      },
+      result: undefined
+    };
   });
   return session;
 }
@@ -822,7 +1264,7 @@ export async function findOrCreateLegacySession(
   options?: { dateFrom?: string; dateTo?: string; savedKey?: string }
 ) {
   const canonicalUrl = normalizeScanUrl(url);
-  const matchesTarget = (record: StoredSearch) =>
+  const matchesTarget = (record: Pick<StoredSearch, "url" | "matchType" | "mock">) =>
     normalizeScanUrl(record.url) === canonicalUrl && record.matchType === matchType && record.mock === mock;
   const migrateRecords = async (records: StoredSearch[]) => {
     const healedRecords: StoredSearch[] = [];
@@ -852,7 +1294,11 @@ export async function findOrCreateLegacySession(
 
   // Key-based lookups only see canonical keys; records saved by older app
   // versions sit under raw-input keys and are only reachable by scanning.
-  const legacyCandidates = (await listSearches()).filter(matchesTarget);
+  const legacySummaries = (await listHistorySummaries()).filter(matchesTarget);
+  const legacyKeys = new Set(legacySummaries.flatMap((record) => record.storageKeys?.length ? record.storageKeys : [record.key]));
+  const legacyCandidates = (await Promise.all(Array.from(legacyKeys).map((key) => getSearch(key))))
+    .filter((record): record is StoredSearch => Boolean(record))
+    .filter(matchesTarget);
   const preferredCandidates = legacyCandidates.filter((record) => (record.scanScope ?? "recent") === scope);
   const legacySession = await migrateRecords(preferredCandidates.length > 0 ? preferredCandidates : legacyCandidates);
   if (legacySession) return legacySession;
@@ -889,12 +1335,54 @@ export function subscribeToSearchChanges(onUpdate: () => void, key?: string): ()
   return () => channel?.close();
 }
 
+// getSettings() and getOrCreateLocalUser()/activeOwnerId() run on many hot paths
+// (every WARC load, every hover prefetch, every store mutation). Cache the
+// normalized settings and the local user in memory, invalidating on any relevant
+// write — same-tab directly, cross-tab via the broadcast channel — so repeated
+// reads don't hit IndexedDB.
+let cachedSettings: AppSettings | undefined;
+let cachedLocalUser: LocalUser | undefined;
+let identityChannel: BroadcastChannel | undefined;
+let identityChannelReady = false;
+
+function invalidateSettingsCache(): void {
+  cachedSettings = undefined;
+}
+
+function invalidateLocalUserCache(): void {
+  cachedLocalUser = undefined;
+}
+
+function ensureIdentityCacheInvalidation(): void {
+  if (identityChannelReady) return;
+  identityChannelReady = true;
+  if (typeof BroadcastChannel === "undefined") return;
+  try {
+    identityChannel = new BroadcastChannel(CHANNEL_NAME);
+    identityChannel.onmessage = (event: MessageEvent) => {
+      const data = event.data as { type?: string; key?: string } | null;
+      if (data?.type !== "updated") return;
+      if (data.key === SETTINGS_STORE || data.key === "clear-all") {
+        invalidateSettingsCache();
+        invalidateLocalUserCache();
+      } else if (cachedLocalUser && data.key === cachedLocalUser.userId) {
+        invalidateLocalUserCache();
+      }
+    };
+  } catch {
+    // BroadcastChannel unavailable; same-tab invalidation still works.
+  }
+}
+
 export async function getOrCreateLocalUser(): Promise<LocalUser> {
+  ensureIdentityCacheInvalidation();
+  if (cachedLocalUser) return cachedLocalUser;
   const settings = await readSettings();
   const userId = settings?.activeUserId ?? DEFAULT_LOCAL_USER_ID;
   const existing = await getUser(userId);
   if (existing) {
     if (!settings) await writeSettings(defaultSettings(existing.userId));
+    cachedLocalUser = existing;
     return existing;
   }
   const now = Date.now();
@@ -907,6 +1395,7 @@ export async function getOrCreateLocalUser(): Promise<LocalUser> {
     store.put(user);
   });
   if (!settings) await writeSettings(defaultSettings(user.userId));
+  cachedLocalUser = user;
   return user;
 }
 
@@ -920,13 +1409,18 @@ export async function updateLocalUser(input: { displayName?: string }): Promise<
   await withStore(USER_STORE, "readwrite", (store) => {
     store.put(next);
   });
+  invalidateLocalUserCache();
   notifyUpdated(next.userId);
   return next;
 }
 
 export async function getSettings(): Promise<AppSettings> {
+  ensureIdentityCacheInvalidation();
+  if (cachedSettings) return cachedSettings;
   await getOrCreateLocalUser();
-  return normalizeSettings((await readSettings()) ?? defaultSettings(DEFAULT_LOCAL_USER_ID));
+  const settings = normalizeSettings((await readSettings()) ?? defaultSettings(DEFAULT_LOCAL_USER_ID));
+  cachedSettings = settings;
+  return settings;
 }
 
 export async function updateSettings(
@@ -936,6 +1430,7 @@ export async function updateSettings(
     | "htmlCacheLimitBytes"
     | "autoPruneEnabled"
     | "showHtmlPrivacyWarning"
+    | "robotsTxtChecksEnabled"
     | "defaultMatchType"
     | "defaultScanScope"
     | "defaultCustomDateFrom"
@@ -955,6 +1450,7 @@ export async function updateSettings(
     htmlCacheLimitBytes: normalizeCacheLimit(input.htmlCacheLimitBytes ?? current.htmlCacheLimitBytes),
     autoPruneEnabled: input.autoPruneEnabled ?? current.autoPruneEnabled,
     showHtmlPrivacyWarning: input.showHtmlPrivacyWarning ?? current.showHtmlPrivacyWarning ?? true,
+    robotsTxtChecksEnabled: input.robotsTxtChecksEnabled ?? current.robotsTxtChecksEnabled ?? true,
     defaultMatchType: input.defaultMatchType ?? current.defaultMatchType,
     defaultScanScope: input.defaultScanScope ?? current.defaultScanScope,
     defaultCustomDateFrom: input.defaultCustomDateFrom ?? current.defaultCustomDateFrom,
@@ -997,6 +1493,7 @@ export async function getCachedCaptureRecord(
     await withStore(HTML_CAPTURE_STORE, "readwrite", (store) => {
       store.put(next);
     });
+    await putCachedCaptureMeta(cachedHtmlMeta(next));
     return next;
   } catch {
     return undefined;
@@ -1034,6 +1531,7 @@ export async function putCachedCaptureRecord(input: {
     await withStore(HTML_CAPTURE_STORE, "readwrite", (store) => {
       store.put(cached);
     });
+    await putCachedCaptureMeta(cachedHtmlMeta(cached));
     if (settings.autoPruneEnabled) await pruneHtmlCache(settings.htmlCacheLimitBytes);
     notifyUpdated(cached.cacheKey);
   } catch {
@@ -1047,11 +1545,80 @@ export async function listCachedCaptureRecordsForCaptures(
   if (captures.length === 0) return [];
   try {
     const ownerId = await activeOwnerId();
-    const keys = new Set(captures.map(captureCacheKey));
-    const records = (await withStore<CachedHtmlCaptureRecord[]>(HTML_CAPTURE_STORE, "readonly", (store) => store.getAll())) ?? [];
-    return records.filter((record) => record.ownerId === ownerId && keys.has(record.cacheKey));
+    const keys = Array.from(new Set(captures.map(captureCacheKey)));
+    const db = await openDB();
+    try {
+      return await new Promise<CachedHtmlCaptureRecord[]>((resolve, reject) => {
+        const tx = db.transaction(HTML_CAPTURE_STORE, "readonly");
+        const store = tx.objectStore(HTML_CAPTURE_STORE);
+        const records: CachedHtmlCaptureRecord[] = [];
+        for (const key of keys) {
+          const request = store.get(key);
+          request.onsuccess = () => {
+            const record = request.result as CachedHtmlCaptureRecord | undefined;
+            if (record?.ownerId === ownerId) records.push(record);
+          };
+          request.onerror = () => reject(request.error);
+        }
+        tx.oncomplete = () => resolve(records);
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      });
+    } finally {
+      releaseDb(db);
+    }
   } catch {
     return [];
+  }
+}
+
+export async function countCachedCapturesForCaptures(
+  captures: Pick<CommonCrawlCapture, "filename" | "offset" | "length">[]
+): Promise<number> {
+  return countCachedCaptureKeys(captures.map(captureCacheKey));
+}
+
+export async function countCachedCaptureKeys(keys: string[]): Promise<number> {
+  if (keys.length === 0) return 0;
+  try {
+    const ownerId = await activeOwnerId();
+    const uniqueKeys = Array.from(new Set(keys));
+    const db = await openDB();
+    try {
+      return await new Promise<number>((resolve, reject) => {
+        const tx = db.transaction(HTML_CAPTURE_META_STORE, "readonly");
+        const store = tx.objectStore(HTML_CAPTURE_META_STORE);
+        let count = 0;
+        const missingKeys: string[] = [];
+        for (const key of uniqueKeys) {
+          const request = store.get(key);
+          request.onsuccess = () => {
+            const record = request.result as CachedHtmlCaptureMetaRecord | undefined;
+            if (record?.ownerId === ownerId) {
+              count += 1;
+            } else {
+              missingKeys.push(key);
+            }
+          };
+          request.onerror = () => reject(request.error);
+        }
+        tx.oncomplete = () => {
+          if (missingKeys.length === 0) {
+            resolve(count);
+            return;
+          }
+          countCachedCaptureKeysFromHtmlStore(missingKeys, ownerId)
+            .then((legacyCount) => resolve(count + legacyCount))
+            .catch(reject);
+        };
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      });
+    } finally {
+      releaseDb(db);
+    }
+  } catch {
+    return 0;
   }
 }
 
@@ -1060,9 +1627,16 @@ export async function deleteCachedCapture(
 ): Promise<void> {
   try {
     const cacheKey = typeof captureOrKey === "string" ? captureOrKey : captureCacheKey(captureOrKey);
-    await withStore(HTML_CAPTURE_STORE, "readwrite", (store) => {
-      store.delete(cacheKey);
+    const db = await openDB();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction([HTML_CAPTURE_STORE, HTML_CAPTURE_META_STORE], "readwrite");
+      tx.objectStore(HTML_CAPTURE_STORE).delete(cacheKey);
+      tx.objectStore(HTML_CAPTURE_META_STORE).delete(cacheKey);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
     });
+    releaseDb(db);
     notifyUpdated(cacheKey);
   } catch {
     // Best-effort persistence.
@@ -1074,12 +1648,27 @@ export async function deleteCachedCapturesForHistoryRecord(record: Pick<StoredSe
 }
 
 export async function deleteCachedCaptures(captures: Pick<CommonCrawlCapture, "filename" | "offset" | "length">[]): Promise<void> {
-  if (captures.length === 0) return;
+  await deleteCachedCaptureKeys(captures.map(captureCacheKey));
+}
+
+export async function deleteCachedCaptureKeys(keys: string[]): Promise<void> {
+  if (keys.length === 0) return;
   try {
-    const keys = Array.from(new Set(captures.map(captureCacheKey)));
-    await withStore(HTML_CAPTURE_STORE, "readwrite", (store) => {
-      for (const key of keys) store.delete(key);
+    const uniqueKeys = Array.from(new Set(keys));
+    const db = await openDB();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction([HTML_CAPTURE_STORE, HTML_CAPTURE_META_STORE], "readwrite");
+      const htmlStore = tx.objectStore(HTML_CAPTURE_STORE);
+      const metaStore = tx.objectStore(HTML_CAPTURE_META_STORE);
+      for (const key of uniqueKeys) {
+        htmlStore.delete(key);
+        metaStore.delete(key);
+      }
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
     });
+    releaseDb(db);
     notifyUpdated(HTML_CAPTURE_STORE);
   } catch {
     // Best-effort persistence.
@@ -1088,9 +1677,16 @@ export async function deleteCachedCaptures(captures: Pick<CommonCrawlCapture, "f
 
 export async function clearHtmlCache(): Promise<void> {
   try {
-    await withStore(HTML_CAPTURE_STORE, "readwrite", (store) => {
-      store.clear();
+    const db = await openDB();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction([HTML_CAPTURE_STORE, HTML_CAPTURE_META_STORE], "readwrite");
+      tx.objectStore(HTML_CAPTURE_STORE).clear();
+      tx.objectStore(HTML_CAPTURE_META_STORE).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
     });
+    releaseDb(db);
     notifyUpdated(HTML_CAPTURE_STORE);
   } catch {
     // Best-effort persistence.
@@ -1102,7 +1698,7 @@ export async function clearAllLocalAppData(): Promise<void> {
     const db = await openDB();
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(
-        [LEGACY_SEARCH_STORE, TARGET_STORE, COVERAGE_STORE, SESSION_STORE, USER_STORE, SETTINGS_STORE, HTML_CAPTURE_STORE],
+        [LEGACY_SEARCH_STORE, HISTORY_SUMMARY_STORE, TARGET_STORE, COVERAGE_STORE, SESSION_STORE, USER_STORE, SETTINGS_STORE, HTML_CAPTURE_STORE, HTML_CAPTURE_META_STORE],
         "readwrite"
       );
       for (const storeName of tx.objectStoreNames) tx.objectStore(storeName).clear();
@@ -1110,7 +1706,7 @@ export async function clearAllLocalAppData(): Promise<void> {
       tx.onerror = () => reject(tx.error);
       tx.onabort = () => reject(tx.error);
     });
-    db.close();
+    releaseDb(db);
     await getOrCreateLocalUser();
     notifyUpdated("clear-all");
   } catch {
@@ -1119,20 +1715,20 @@ export async function clearAllLocalAppData(): Promise<void> {
 }
 
 export async function getCacheStats(): Promise<CacheStats> {
-  try {
+  return measureAsync("settings-cache-stats", async () => {
     const ownerId = await activeOwnerId();
-    const records = (await withStore<CachedHtmlCaptureRecord[]>(HTML_CAPTURE_STORE, "readonly", (store) => store.getAll())) ?? [];
+    const records = await listCachedCaptureMetaRecords(ownerId);
     return cacheStatsFor(records.filter((record) => record.ownerId === ownerId));
-  } catch {
+  }).catch(() => {
     return { count: 0, sizeBytes: 0 };
-  }
+  });
 }
 
 export async function pruneHtmlCache(limitBytes?: number): Promise<void> {
   const limit = normalizeCacheLimit(limitBytes ?? (await getSettings()).htmlCacheLimitBytes);
   try {
     const ownerId = await activeOwnerId();
-    const records = ((await withStore<CachedHtmlCaptureRecord[]>(HTML_CAPTURE_STORE, "readonly", (store) => store.getAll())) ?? [])
+    const records = (await listCachedCaptureMetaRecords(ownerId))
       .filter((record) => record.ownerId === ownerId)
       .sort((left, right) => left.lastAccessedAt - right.lastAccessedAt);
     let size = records.reduce((sum, record) => sum + record.sizeBytes, 0);
@@ -1143,10 +1739,7 @@ export async function pruneHtmlCache(limitBytes?: number): Promise<void> {
       size -= record.sizeBytes;
     }
     if (deleteKeys.length === 0) return;
-    await withStore(HTML_CAPTURE_STORE, "readwrite", (store) => {
-      for (const key of deleteKeys) store.delete(key);
-    });
-    notifyUpdated(HTML_CAPTURE_STORE);
+    await deleteCachedCaptureKeys(deleteKeys);
   } catch {
     // Best-effort pruning.
   }
@@ -1169,6 +1762,11 @@ async function readSettings(): Promise<AppSettings | undefined> {
 }
 
 async function writeSettings(settings: AppSettings): Promise<void> {
+  // Any settings mutation invalidates the in-memory caches so the next read
+  // reflects the write (activeUserId may change; cross-tab tabs are handled by
+  // the broadcast listener).
+  invalidateSettingsCache();
+  invalidateLocalUserCache();
   await withStore(SETTINGS_STORE, "readwrite", (store) => {
     store.put(settings);
   });
@@ -1186,6 +1784,7 @@ function defaultSettings(activeUserId: string): AppSettings {
     htmlCacheLimitBytes: DEFAULT_HTML_CACHE_LIMIT_BYTES,
     autoPruneEnabled: true,
     showHtmlPrivacyWarning: true,
+    robotsTxtChecksEnabled: true,
     defaultMatchType: "exact",
     defaultScanScope: "recent",
     defaultViewMode: "list",
@@ -1203,8 +1802,13 @@ function normalizeSettings(settings: AppSettings): AppSettings {
   const normalizedDateFrom = normalizeDateSetting(settings.defaultCustomDateFrom);
   const normalizedDateTo = normalizeDateSetting(settings.defaultCustomDateTo);
   return {
-    ...settings,
+    id: settings.id,
+    activeUserId: settings.activeUserId,
+    htmlCacheEnabled: settings.htmlCacheEnabled ?? true,
+    htmlCacheLimitBytes: normalizeCacheLimit(settings.htmlCacheLimitBytes),
+    autoPruneEnabled: settings.autoPruneEnabled ?? true,
     showHtmlPrivacyWarning: settings.showHtmlPrivacyWarning ?? true,
+    robotsTxtChecksEnabled: settings.robotsTxtChecksEnabled ?? true,
     defaultMatchType: normalizeMatchType(settings.defaultMatchType),
     defaultScanScope: normalizedScope,
     defaultCustomDateFrom: normalizedScope === "custom" ? normalizedDateFrom : undefined,
@@ -1214,7 +1818,8 @@ function normalizeSettings(settings: AppSettings): AppSettings {
     searchPageSize: normalizePageSize(settings.searchPageSize, DEFAULT_SEARCH_PAGE_SIZE, 25, 500),
     historyPageSize: normalizePageSize(settings.historyPageSize, DEFAULT_HISTORY_PAGE_SIZE, 10, 100),
     defaultExportColumns: normalizeExportColumns(settings.defaultExportColumns),
-    largeCaptureLimitBytes: normalizeLargeCaptureLimit(settings.largeCaptureLimitBytes)
+    largeCaptureLimitBytes: normalizeLargeCaptureLimit(settings.largeCaptureLimitBytes),
+    updatedAt: typeof settings.updatedAt === "number" && Number.isFinite(settings.updatedAt) ? settings.updatedAt : Date.now()
   };
 }
 
@@ -1290,7 +1895,90 @@ function byteSize(value: string): number {
   return value.length;
 }
 
-function cacheStatsFor(records: CachedHtmlCaptureRecord[]): CacheStats {
+function cachedHtmlMeta(record: CachedHtmlCaptureRecord): CachedHtmlCaptureMetaRecord {
+  return {
+    cacheKey: record.cacheKey,
+    ownerId: record.ownerId,
+    filename: record.filename,
+    offset: record.offset,
+    length: record.length,
+    url: record.url,
+    timestamp: record.timestamp,
+    collectionId: record.collectionId,
+    mime: record.mime,
+    status: record.status,
+    sizeBytes: record.sizeBytes,
+    createdAt: record.createdAt,
+    lastAccessedAt: record.lastAccessedAt
+  };
+}
+
+async function putCachedCaptureMeta(record: CachedHtmlCaptureMetaRecord): Promise<void> {
+  try {
+    await withStore(HTML_CAPTURE_META_STORE, "readwrite", (store) => {
+      store.put(record);
+    });
+  } catch {
+    // Cache metadata is an optimization; HTML cache reads can still fall back.
+  }
+}
+
+async function listCachedCaptureMetaRecords(ownerId: string): Promise<CachedHtmlCaptureMetaRecord[]> {
+  const records = (await withStore<CachedHtmlCaptureMetaRecord[]>(HTML_CAPTURE_META_STORE, "readonly", (store) => store.getAll())) ?? [];
+  const ownedRecords = records.filter((record) => record.ownerId === ownerId);
+  const [htmlCount, metaCount] = await Promise.all([
+    withStore<number>(HTML_CAPTURE_STORE, "readonly", (store) => store.count()),
+    withStore<number>(HTML_CAPTURE_META_STORE, "readonly", (store) => store.count())
+  ]);
+  if (ownedRecords.length > 0 && (metaCount ?? 0) >= (htmlCount ?? 0)) return ownedRecords;
+
+  const legacyRecords = ((await withStore<CachedHtmlCaptureRecord[]>(HTML_CAPTURE_STORE, "readonly", (store) => store.getAll())) ?? [])
+    .filter((record) => record.ownerId === ownerId);
+  const migrated = legacyRecords.map(cachedHtmlMeta);
+  if (migrated.length > 0) {
+    await withStore(HTML_CAPTURE_META_STORE, "readwrite", (store) => {
+      for (const record of migrated) store.put(record);
+    });
+  }
+  return migrated;
+}
+
+async function countCachedCaptureKeysFromHtmlStore(keys: string[], ownerId: string): Promise<number> {
+  if (keys.length === 0) return 0;
+  const uniqueKeys = Array.from(new Set(keys));
+  const db = await openDB();
+  const metas: CachedHtmlCaptureMetaRecord[] = [];
+  try {
+    const count = await new Promise<number>((resolve, reject) => {
+      const tx = db.transaction(HTML_CAPTURE_STORE, "readonly");
+      const store = tx.objectStore(HTML_CAPTURE_STORE);
+      let found = 0;
+      for (const key of uniqueKeys) {
+        const request = store.get(key);
+        request.onsuccess = () => {
+          const record = request.result as CachedHtmlCaptureRecord | undefined;
+          if (record?.ownerId !== ownerId) return;
+          found += 1;
+          metas.push(cachedHtmlMeta(record));
+        };
+        request.onerror = () => reject(request.error);
+      }
+      tx.oncomplete = () => resolve(found);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+    if (metas.length > 0) {
+      await withStore(HTML_CAPTURE_META_STORE, "readwrite", (store) => {
+        for (const meta of metas) store.put(meta);
+      });
+    }
+    return count;
+  } finally {
+    releaseDb(db);
+  }
+}
+
+function cacheStatsFor(records: CachedHtmlCaptureMetaRecord[]): CacheStats {
   const lastAccessedAt = records.reduce<number | undefined>(
     (latest, record) => latest === undefined ? record.lastAccessedAt : Math.max(latest, record.lastAccessedAt),
     undefined

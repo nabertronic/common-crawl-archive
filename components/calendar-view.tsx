@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { type CommonCrawlCapture, type ResultsBackContext } from "@/lib/common-crawl";
 import { createViewerHref } from "@/lib/navigation-state";
+import { measureSync } from "@/lib/performance";
 
 type DateParts = {
   year: number;
@@ -38,6 +39,7 @@ const MONTH_LABELS = [
   "NOV",
   "DEC"
 ];
+const MAX_DAY_CAPTURE_LINKS = 250;
 
 const MONTH_NAMES_LONG = [
   "January",
@@ -87,7 +89,7 @@ export function CalendarView({
   backContext: ResultsBackContext;
   scanId?: string;
 }) {
-  const { byDay, byYear, byMonth, years, firstDate, lastDate } = useMemo(() => {
+  const { byDay, byYear, byMonth, years, firstDate, lastDate } = useMemo(() => measureSync("calendar-aggregate", () => {
     const byDayMap = new Map<string, CommonCrawlCapture[]>();
     const byYearMap = new Map<number, number>();
     const byMonthMap = new Map<string, number>();
@@ -123,7 +125,7 @@ export function CalendarView({
       firstDate: firstParts,
       lastDate: lastParts
     };
-  }, [captures]);
+  }, { total: captures.length }), [captures]);
 
   const defaultYear = lastDate?.year ?? years[years.length - 1] ?? new Date().getUTCFullYear();
   const [selectedYear, setSelectedYear] = useState<number>(defaultYear);
@@ -490,6 +492,8 @@ function DayPopover({
     () => [...captures].sort((a, b) => a.timestamp.localeCompare(b.timestamp)),
     [captures]
   );
+  const visibleCaptures = sorted.slice(0, MAX_DAY_CAPTURE_LINKS);
+  const hiddenCaptureCount = Math.max(0, sorted.length - visibleCaptures.length);
 
   return (
     <div
@@ -505,7 +509,7 @@ function DayPopover({
           {sorted.length} snapshot{sorted.length === 1 ? "" : "s"}
         </p>
         <ul className="mt-2 max-h-44 space-y-1 overflow-y-auto pr-1 thin-scrollbar">
-          {sorted.map((capture) => {
+          {visibleCaptures.map((capture) => {
             const time = formatCaptureTime(capture.timestamp);
             const isRedirect = /^3\d\d$/.test(capture.status);
             const viewerUrl = createViewerHref(capture, { scanId, legacyBackContext: backContext });
@@ -531,6 +535,11 @@ function DayPopover({
               </li>
             );
           })}
+          {hiddenCaptureCount > 0 ? (
+            <li className="text-xs font-semibold text-zinc-500">
+              {hiddenCaptureCount} more snapshot{hiddenCaptureCount === 1 ? "" : "s"}
+            </li>
+          ) : null}
         </ul>
       </div>
     </div>

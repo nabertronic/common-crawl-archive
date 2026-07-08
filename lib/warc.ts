@@ -6,6 +6,7 @@ import {
   putCachedCaptureRecord,
   type CachedHtmlCaptureRecord
 } from "@/lib/capture-store";
+import { measureSync } from "@/lib/performance";
 
 export type ParsedWarcRecord = {
   warcHeaders: Record<string, string>;
@@ -19,6 +20,8 @@ export type LoadedCaptureRecord = {
   source: "cache" | "network";
 };
 
+export type CaptureCacheMode = "read-write" | "read-only" | "off";
+
 export function parseHeaderBlock(block: string): Record<string, string> {
   const headers: Record<string, string> = {};
   for (const line of block.split(/\r?\n/)) {
@@ -30,6 +33,10 @@ export function parseHeaderBlock(block: string): Record<string, string> {
 }
 
 export function parseWarcRecord(text: string): ParsedWarcRecord {
+  return measureSync("warc-parse", () => parseWarcRecordInner(text), { bytes: text.length });
+}
+
+function parseWarcRecordInner(text: string): ParsedWarcRecord {
   const firstSplit = text.search(/\r?\n\r?\n/);
   if (firstSplit < 0) throw new Error("WARC header boundary not found");
 
@@ -131,6 +138,7 @@ export async function fetchAndParseWarcRecord({
   length,
   largeCaptureLimitBytes = LARGE_CAPTURE_LIMIT_BYTES,
   allowLarge = false,
+  retryCount = 1,
   signal
 }: {
   filename: string;
@@ -138,6 +146,7 @@ export async function fetchAndParseWarcRecord({
   length: string;
   largeCaptureLimitBytes?: number;
   allowLarge?: boolean;
+  retryCount?: number;
   signal?: AbortSignal;
 }): Promise<ParsedWarcRecord> {
   const numericLength = Number(length);
@@ -150,7 +159,8 @@ export async function fetchAndParseWarcRecord({
 
   let response: Response | undefined;
   let body = "";
-  for (let attempt = 0; attempt <= 1; attempt += 1) {
+  const attempts = Math.max(0, Math.floor(retryCount));
+  for (let attempt = 0; attempt <= attempts; attempt += 1) {
     try {
       response = await commonCrawlFetch(warcRecordUrl(filename), {
         headers: {
@@ -161,14 +171,14 @@ export async function fetchAndParseWarcRecord({
 
       if (response.ok || response.status === 206) break;
       body = await response.clone().text().catch(() => "");
-      if (attempt < 1 && shouldRetryWarcStatus(response.status, body)) {
+      if (attempt < attempts && shouldRetryWarcStatus(response.status, body)) {
         await wait(warcRetryDelay(attempt, parseRetryAfter(response.headers.get("Retry-After"))), signal);
         continue;
       }
       break;
     } catch (error) {
       if (signal?.aborted) throw error;
-      if (attempt >= 1) throw error;
+      if (attempt >= attempts) throw error;
       await wait(warcRetryDelay(attempt), signal);
     }
   }
@@ -184,14 +194,20 @@ export async function fetchAndParseWarcRecord({
 export async function loadCaptureRecord({
   capture,
   allowLarge = false,
+  cacheMode = "read-write",
+  retryCount,
   signal
 }: {
   capture: CommonCrawlCapture;
   allowLarge?: boolean;
+  cacheMode?: CaptureCacheMode;
+  retryCount?: number;
   signal?: AbortSignal;
 }): Promise<LoadedCaptureRecord> {
   const settings = await getSettings();
-  if (settings.htmlCacheEnabled) {
+  const canReadCache = cacheMode !== "off" && settings.htmlCacheEnabled;
+  const canWriteCache = cacheMode === "read-write" && settings.htmlCacheEnabled;
+  if (canReadCache) {
     const cached = await getCachedCaptureRecord(capture);
     if (cached) return { record: parsedRecordFromCache(cached), source: "cache" };
   }
@@ -202,9 +218,10 @@ export async function loadCaptureRecord({
     length: capture.length,
     largeCaptureLimitBytes: settings.largeCaptureLimitBytes,
     allowLarge,
+    retryCount,
     signal
   });
-  await putCachedCaptureRecord({ capture, record });
+  if (canWriteCache) await putCachedCaptureRecord({ capture, record });
   return { record, source: "network" };
 }
 

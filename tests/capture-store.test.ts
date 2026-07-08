@@ -9,6 +9,7 @@ import {
   DEFAULT_HISTORY_PAGE_SIZE,
   DEFAULT_LARGE_CAPTURE_LIMIT_BYTES,
   DEFAULT_SEARCH_PAGE_SIZE,
+  historySummaryFromStoredSearch,
   legacyScanSearchKey,
   legacyScanSearchKeys,
   legacyUnscopedScanSearchKey,
@@ -16,10 +17,28 @@ import {
   normalizeScanUrl,
   scanSearchKey,
   scanLogDurationMs,
+  stampMissingOwner,
   targetIdFor,
   type StoredSearch
 } from "@/lib/capture-store";
 import type { CollectionCheckResult, CommonCrawlCapture, CommonCrawlCollection, ScanLogEvent } from "@/lib/common-crawl";
+
+describe("ownerId backfill transform", () => {
+  it("stamps the owner onto records missing one", () => {
+    const record: { key: string; ownerId?: string } = { key: "a" };
+    expect(stampMissingOwner(record, "local")).toEqual({ key: "a", ownerId: "local" });
+  });
+
+  it("leaves records that already have an owner untouched (skips the write)", () => {
+    const record: { key: string; ownerId?: string } = { key: "a", ownerId: "someone" };
+    expect(stampMissingOwner(record, "local")).toBeUndefined();
+  });
+
+  it("treats an empty-string owner as missing", () => {
+    const record: { key: string; ownerId?: string } = { key: "a", ownerId: "" };
+    expect(stampMissingOwner(record, "local")).toEqual({ key: "a", ownerId: "local" });
+  });
+});
 
 describe("capture store keys", () => {
   it("builds stable target ids from url, match type, and mock mode", () => {
@@ -142,6 +161,7 @@ describe("capture store keys", () => {
           runs: 1
         }
       ],
+      durationMs: 65_000,
       updatedAt: 1
     };
     const failedMissingRun: StoredSearch = {
@@ -162,6 +182,8 @@ describe("capture store keys", () => {
           error: "browser/network request failed before an HTTP response"
         }
       ],
+      durationMs: 0,
+      activeScanStartedAt: 120_000,
       updatedAt: 2
     };
 
@@ -173,6 +195,8 @@ describe("capture store keys", () => {
       [firstCollection.id, "checked"]
     ]);
     expect(merged?.captures).toEqual([checkedCapture]);
+    expect(merged?.durationMs).toBe(65_000);
+    expect(merged?.activeScanStartedAt).toBe(120_000);
   });
 
   it("returns append-only scan log results when a coverage record has them", () => {
@@ -214,6 +238,62 @@ describe("capture store keys", () => {
         .filter((result): result is CollectionCheckResult => !("kind" in result))
         .map((result) => result.status)
     ).toEqual(["not-checked", "checked"]);
+  });
+
+  it("builds lightweight history summaries without full capture payloads", () => {
+    const collection: CommonCrawlCollection = {
+      id: "CC-MAIN-2026-21",
+      name: "May 2026 Index",
+      cdxApi: "https://index.commoncrawl.org/CC-MAIN-2026-21-index",
+      from: "2026-05-01T00:00:00",
+      to: "2026-05-15T00:00:00"
+    };
+    const capture: CommonCrawlCapture = {
+      url: "https://example.com/",
+      timestamp: "20260501120000",
+      status: "200",
+      mime: "text/html",
+      digest: "digest",
+      length: "100",
+      offset: "10",
+      filename: "crawl-data/test.warc.gz",
+      collectionId: collection.id,
+      collectionName: collection.name,
+      collectionFrom: collection.from,
+      collectionTo: collection.to
+    };
+    const record: StoredSearch = {
+      key: "live:exact:https://example.com/:scan:recent",
+      url: "https://example.com/",
+      matchType: "exact",
+      mock: false,
+      captures: [capture],
+      scanScope: "recent",
+      collections: [collection],
+      collectionIds: [collection.id],
+      results: [
+        {
+          collection,
+          status: "checked",
+          captures: [capture],
+          attempts: 1,
+          runs: 1
+        }
+      ],
+      durationMs: 12_000,
+      updatedAt: 123
+    };
+
+    expect(historySummaryFromStoredSearch(record, "local")).toMatchObject({
+      key: record.key,
+      ownerId: "local",
+      captureCount: 1,
+      captureKeys: [captureCacheKey(capture)],
+      sourceTotal: 1,
+      sourceProcessed: 1,
+      failedCount: 0,
+      durationMs: 12_000
+    });
   });
 
   it("filters restore-only coverage events from persisted scan logs", () => {
@@ -297,5 +377,58 @@ describe("capture store keys", () => {
         message: "Scan completed."
       }
     ])).toBe(65_000);
+  });
+
+  it("excludes paused time when inferring duration from multiple scan log runs", () => {
+    const collection: CommonCrawlCollection = {
+      id: "CC-MAIN-2026-21",
+      name: "May 2026 Index",
+      cdxApi: "https://index.commoncrawl.org/CC-MAIN-2026-21-index",
+      from: "2026-05-01T00:00:00",
+      to: "2026-05-15T00:00:00"
+    };
+
+    expect(scanLogDurationMs([
+      {
+        kind: "event",
+        event: "scan-started",
+        checkedAt: 10_000,
+        message: "Scan started."
+      },
+      {
+        collection,
+        status: "checked",
+        captures: [],
+        attempts: 1,
+        runs: 1,
+        checkedAt: 70_000
+      },
+      {
+        kind: "event",
+        event: "scan-paused",
+        checkedAt: 75_000,
+        message: "Scan paused."
+      },
+      {
+        kind: "event",
+        event: "scan-restarted",
+        checkedAt: 1_875_000,
+        message: "Scan restarted manually."
+      },
+      {
+        collection: { ...collection, id: "CC-MAIN-2026-25", name: "June 2026 Index" },
+        status: "checked",
+        captures: [],
+        attempts: 1,
+        runs: 1,
+        checkedAt: 1_935_000
+      },
+      {
+        kind: "event",
+        event: "scan-completed",
+        checkedAt: 1_940_000,
+        message: "Scan completed."
+      }
+    ])).toBe(130_000);
   });
 });

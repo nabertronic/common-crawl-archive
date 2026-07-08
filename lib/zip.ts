@@ -1,4 +1,6 @@
-type ZipEntry = {
+import { measureSync } from "@/lib/performance";
+
+export type ZipEntry = {
   filename: string;
   content: string | Uint8Array;
   date?: Date;
@@ -46,7 +48,7 @@ function writeUint32(view: DataView, offset: number, value: number) {
   view.setUint32(offset, value >>> 0, true);
 }
 
-function concat(parts: Uint8Array[]) {
+function concat(parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
   const size = parts.reduce((sum, part) => sum + part.length, 0);
   const output = new Uint8Array(size);
   let offset = 0;
@@ -58,6 +60,16 @@ function concat(parts: Uint8Array[]) {
 }
 
 export function createZipBlob(entries: ZipEntry[]) {
+  return new Blob([buildZipBytes(entries)], { type: "application/zip" });
+}
+
+// Pure ZIP assembly over serializable entries — no DOM/Blob — so it can run
+// either on the main thread or inside the compute worker.
+export function buildZipBytes(entries: ZipEntry[]): Uint8Array<ArrayBuffer> {
+  return measureSync("zip-build", () => assembleZipBytes(entries), { entries: entries.length });
+}
+
+function assembleZipBytes(entries: ZipEntry[]): Uint8Array<ArrayBuffer> {
   const localParts: Uint8Array[] = [];
   const centralParts: Uint8Array[] = [];
   let localOffset = 0;
@@ -122,5 +134,5 @@ export function createZipBlob(entries: ZipEntry[]) {
   writeUint32(endView, 16, localOffset);
   writeUint16(endView, 20, 0);
 
-  return new Blob([concat([...localParts, centralDirectory, end])], { type: "application/zip" });
+  return concat([...localParts, centralDirectory, end]);
 }

@@ -2,7 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsApp } from "@/components/settings-app";
-import type { AppSettings } from "@/lib/capture-store";
+import { updateSettings, type AppSettings } from "@/lib/capture-store";
 
 const settings: AppSettings = {
   id: "active",
@@ -11,6 +11,7 @@ const settings: AppSettings = {
   htmlCacheLimitBytes: 50 * 1024 * 1024,
   autoPruneEnabled: true,
   showHtmlPrivacyWarning: true,
+  robotsTxtChecksEnabled: true,
   defaultMatchType: "exact",
   defaultScanScope: "recent",
   defaultViewMode: "list",
@@ -50,6 +51,16 @@ class TestIntersectionObserver {
   disconnect = vi.fn();
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("SettingsApp", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -65,10 +76,11 @@ describe("SettingsApp", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /open menu/i }));
 
-    const menuItems = screen.getAllByRole("menuitem");
-    expect(menuItems.map((item) => item.textContent)).toEqual(["New Scan", "History"]);
-    expect(menuItems[0]).toHaveAttribute("href", "/");
-    expect(menuItems[1]).toHaveAttribute("href", "/history");
+    const menu = screen.getByRole("navigation", { name: "App navigation" });
+    const menuLinks = Array.from(menu.querySelectorAll("a"));
+    expect(menuLinks.map((item) => item.textContent)).toEqual(["New Scan", "History"]);
+    expect(menuLinks[0]).toHaveAttribute("href", "/");
+    expect(menuLinks[1]).toHaveAttribute("href", "/history");
   });
 
   it("shows the settings sections in the configured order", async () => {
@@ -82,7 +94,7 @@ describe("SettingsApp", () => {
       "02Results",
       "03Viewer",
       "04Storage",
-      "05Export",
+      "05Export defaults",
       "06Danger zone"
     ]);
     expect(sectionLinks.map((link) => link.getAttribute("href"))).toEqual([
@@ -95,7 +107,66 @@ describe("SettingsApp", () => {
     ]);
     expect(screen.queryByRole("link", { name: /collections/i })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Scan settings" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Export" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Export defaults" })).toBeInTheDocument();
     expect(screen.getByText("Common Crawl list")).toBeInTheDocument();
+    expect(screen.getByText("Default match mode")).toBeInTheDocument();
+    expect(screen.getByText("Default scan window")).toBeInTheDocument();
+  });
+
+  it("saves the global robots.txt check setting", async () => {
+    render(<SettingsApp />);
+
+    const switchButton = await screen.findByRole("switch", { name: "Check target robots.txt before scans" });
+    fireEvent.click(switchButton);
+
+    expect(updateSettings).toHaveBeenCalledWith({ robotsTxtChecksEnabled: false });
+  });
+
+  it("updates switches immediately before async settings persistence finishes", async () => {
+    const save = deferred<AppSettings>();
+    vi.mocked(updateSettings).mockReturnValueOnce(save.promise);
+    render(<SettingsApp />);
+
+    const robotsSwitch = await screen.findByRole("switch", { name: "Check target robots.txt before scans" });
+    expect(robotsSwitch).toHaveAttribute("aria-checked", "true");
+
+    fireEvent.click(robotsSwitch);
+
+    expect(updateSettings).toHaveBeenCalledWith({ robotsTxtChecksEnabled: false });
+    expect(robotsSwitch).toHaveAttribute("aria-checked", "false");
+
+    save.resolve({ ...settings, robotsTxtChecksEnabled: false });
+
+    await waitFor(() => expect(robotsSwitch).toHaveAttribute("aria-checked", "false"));
+  });
+
+  it("keeps newer setting changes visible while older saves are still resolving", async () => {
+    const firstSave = deferred<AppSettings>();
+    const secondSave = deferred<AppSettings>();
+    vi.mocked(updateSettings)
+      .mockReturnValueOnce(firstSave.promise)
+      .mockReturnValueOnce(secondSave.promise);
+    render(<SettingsApp />);
+
+    const robotsSwitch = await screen.findByRole("switch", { name: "Check target robots.txt before scans" });
+    const cacheSwitch = await screen.findByRole("switch", { name: "Cache HTML" });
+
+    fireEvent.click(robotsSwitch);
+    fireEvent.click(cacheSwitch);
+
+    expect(robotsSwitch).toHaveAttribute("aria-checked", "false");
+    expect(cacheSwitch).toHaveAttribute("aria-checked", "false");
+
+    firstSave.resolve({ ...settings, robotsTxtChecksEnabled: false });
+
+    await waitFor(() => expect(cacheSwitch).toHaveAttribute("aria-checked", "false"));
+    expect(robotsSwitch).toHaveAttribute("aria-checked", "false");
+
+    secondSave.resolve({ ...settings, robotsTxtChecksEnabled: false, htmlCacheEnabled: false });
+
+    await waitFor(() => {
+      expect(robotsSwitch).toHaveAttribute("aria-checked", "false");
+      expect(cacheSwitch).toHaveAttribute("aria-checked", "false");
+    });
   });
 });

@@ -10,6 +10,7 @@ import {
   type MatchType
 } from "@/lib/common-crawl";
 import { loadCaptureRecord, sanitizeHtmlForPreview, type ParsedWarcRecord } from "@/lib/warc";
+import { markPerformance, measureAsync } from "@/lib/performance";
 import { cn, formatBytes } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { HtmlPrivacyWarningDialog } from "@/components/html-privacy-warning-dialog";
@@ -95,12 +96,29 @@ export function CaptureViewerApp() {
   const [allowLargeLoad, setAllowLargeLoad] = useState(false);
   const numericLength = Number(length);
 
+  const sortedCaptures = useMemo(
+    () => [...captures].sort((a, b) => a.timestamp.localeCompare(b.timestamp)),
+    [captures]
+  );
+
   const currentIndex = useMemo(() => {
     if (captures.length === 0) return -1;
     return captures.findIndex(
       (c) => c.filename === filename && c.offset === offset && c.timestamp === timestamp
     );
   }, [captures, filename, offset, timestamp]);
+
+  const currentSortedIndex = useMemo(() => {
+    if (currentIndex < 0) return -1;
+    const current = captures[currentIndex];
+    if (!current) return -1;
+    return sortedCaptures.findIndex(
+      (capture) =>
+        capture.timestamp === current.timestamp &&
+        capture.filename === current.filename &&
+        capture.offset === current.offset
+    );
+  }, [captures, currentIndex, sortedCaptures]);
 
   const routeCapture = useMemo<CommonCrawlCapture>(
     () => ({
@@ -167,7 +185,11 @@ export function CaptureViewerApp() {
       return;
     }
 
-    void loadCaptureRecord({ capture: routeCapture, allowLarge: allowLargeLoad, signal: controller.signal })
+    void measureAsync(
+      "viewer-capture-record-load",
+      () => loadCaptureRecord({ capture: routeCapture, allowLarge: allowLargeLoad, signal: controller.signal }),
+      { allowLarge: allowLargeLoad }
+    )
       .then(({ record, source }) => setState({ kind: "loaded", record, source }))
       .catch((error) => {
         if (controller.signal.aborted) return;
@@ -178,11 +200,13 @@ export function CaptureViewerApp() {
   }, [allowLargeLoad, collection, filename, largeCaptureLimitBytes, length, numericLength, offset, routeCapture, timestamp, url]);
 
   useEffect(() => {
+    markPerformance("page-hydrated:viewer");
     if (scanId) {
       let cancelled = false;
       const load = () => {
-        getScanSession(scanId)
-          .then((session) => session ? getCoverage(session.targetId) : undefined)
+        measureAsync("viewer-capture-manifest-load", () =>
+          getScanSession(scanId).then((session) => session ? getCoverage(session.targetId) : undefined)
+        )
           .then((coverage) => {
             if (!cancelled) setCaptures(coverageCaptures(coverage));
           });
@@ -206,7 +230,7 @@ export function CaptureViewerApp() {
     ]));
     let cancelled = false;
     const load = () => {
-      Promise.all(keys.map((key) => getSearch(key))).then((records) => {
+      measureAsync("viewer-capture-manifest-load", () => Promise.all(keys.map((key) => getSearch(key)))).then((records) => {
         const stored = records
           .filter((record) => record?.captures?.length)
           .sort((left, right) => (right?.updatedAt ?? 0) - (left?.updatedAt ?? 0))[0];
@@ -243,24 +267,18 @@ export function CaptureViewerApp() {
       if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-      const sorted = [...captures].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-      const current = captures[currentIndex];
-      if (!current) return;
-      const sortedIndex = sorted.findIndex(
-        (c) => c.timestamp === current.timestamp && c.filename === current.filename && c.offset === current.offset
-      );
-      if (sortedIndex < 0) return;
-      if (event.key === "ArrowLeft" && sortedIndex > 0) {
+      if (currentSortedIndex < 0) return;
+      if (event.key === "ArrowLeft" && currentSortedIndex > 0) {
         event.preventDefault();
-        navigateToCapture(sorted[sortedIndex - 1]);
-      } else if (event.key === "ArrowRight" && sortedIndex < sorted.length - 1) {
+        navigateToCapture(sortedCaptures[currentSortedIndex - 1]);
+      } else if (event.key === "ArrowRight" && currentSortedIndex < sortedCaptures.length - 1) {
         event.preventDefault();
-        navigateToCapture(sorted[sortedIndex + 1]);
+        navigateToCapture(sortedCaptures[currentSortedIndex + 1]);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [captures, currentIndex, navigateToCapture]);
+  }, [captures, currentSortedIndex, navigateToCapture, sortedCaptures]);
 
   const sanitizedHtml = useMemo(
     () => (state.kind === "loaded" ? sanitizeHtmlForPreview(state.record.html) : ""),
@@ -317,6 +335,7 @@ export function CaptureViewerApp() {
         url={url}
         timestamp={timestamp}
         captures={captures}
+        sortedCaptures={sortedCaptures}
         currentIndex={currentIndex}
         backHref={scanId || backUrl ? backHref : null}
         onJumpTo={handleJumpTo}

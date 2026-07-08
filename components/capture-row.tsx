@@ -1,8 +1,11 @@
 "use client";
 
+import { memo, useRef } from "react";
 import { ArrowDown, ArrowUp, ArrowUpRight, ChevronsUpDown, CornerDownRight } from "lucide-react";
 import { type CommonCrawlCapture, type ResultsBackContext } from "@/lib/common-crawl";
-import { createLegacySearchHref, createViewerHref } from "@/lib/navigation-state";
+import { createViewerHref } from "@/lib/navigation-state";
+import { captureKey } from "@/lib/scan-results";
+import { prefetchCaptureRecord } from "@/lib/warc-prefetch";
 import { describeHttpStatus, formatBytes, formatTimestamp } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { LinkButton } from "@/components/ui/button";
@@ -83,24 +86,43 @@ function SortHeader({
   );
 }
 
-export function CaptureRow({
-  capture,
-  backContext,
-  scanId
-}: {
+type CaptureRowProps = {
   capture: CommonCrawlCapture;
   backContext: ResultsBackContext;
   scanId?: string;
-}) {
+};
+
+function CaptureRowImpl({ capture, backContext, scanId }: CaptureRowProps) {
   const viewerUrl = createViewerHref(capture, { scanId, legacyBackContext: backContext });
   const isRedirect = /^3\d\d$/.test(capture.status);
   const statusTone = capture.status === "200" ? "green" : isRedirect ? "amber" : "neutral";
-  const followTarget = capture.redirect ?? "";
-  const followSearchUrl = followTarget ? buildFollowSearchHref(followTarget, backContext) : "";
   const isHtml = capture.mime === "text/html";
 
+  // Warm the capture cache on a brief hover/focus so opening the viewer is
+  // instant. Debounced so a quick pass over the list doesn't fire a request.
+  const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const startPrefetch = () => {
+    if (!isHtml || hoverTimerRef.current) return;
+    hoverTimerRef.current = setTimeout(() => {
+      hoverTimerRef.current = null;
+      prefetchCaptureRecord(capture);
+    }, 150);
+  };
+  const cancelPrefetch = () => {
+    if (hoverTimerRef.current) {
+      clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = null;
+    }
+  };
+
   return (
-    <article className={`px-4 py-3 text-sm hover:bg-zinc-900/60 ${GRID_COLS}`}>
+    <article
+      onMouseEnter={startPrefetch}
+      onMouseLeave={cancelPrefetch}
+      onFocus={startPrefetch}
+      onBlur={cancelPrefetch}
+      className={`px-4 py-3 text-sm hover:bg-zinc-900/60 [content-visibility:auto] [contain-intrinsic-size:auto_3.25rem] ${GRID_COLS}`}
+    >
       <div className="mb-2 flex flex-wrap items-center gap-2 lg:mb-0">
         <Tooltip content={describeHttpStatus(capture.status)}>
           <Badge tone={statusTone} className="justify-center">
@@ -128,13 +150,12 @@ export function CaptureRow({
           {capture.url}
         </p>
         {capture.redirect ? (
-          <p
-            className="mt-0.5 flex items-center gap-1 text-xs text-amber-200/90 lg:truncate"
-            title={capture.redirect}
-          >
-            <CornerDownRight size={11} className="shrink-0 text-amber-300/70" />
-            <span className="break-all lg:truncate lg:break-normal">{capture.redirect}</span>
-          </p>
+          <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-amber-200/90">
+            <p className="flex min-w-0 items-center gap-1 lg:truncate" title={capture.redirect}>
+              <CornerDownRight size={11} className="shrink-0 text-amber-300/70" />
+              <span className="break-all lg:truncate lg:break-normal">{capture.redirect}</span>
+            </p>
+          </div>
         ) : null}
         {!isHtml ? (
           <p className="mt-0.5 text-[10px] uppercase tracking-[0.12em] text-zinc-500">
@@ -155,43 +176,37 @@ export function CaptureRow({
       </div>
 
       <div className="mt-2 flex justify-end lg:mt-0">
-        {isRedirect && followSearchUrl ? (
-          <LinkButton
-            href={followSearchUrl}
-            variant="secondary"
-            size="sm"
-            className="whitespace-nowrap lg:w-full lg:justify-center"
-          >
-            <ArrowUpRight size={14} />
-            Search target
-          </LinkButton>
-        ) : (
-          <LinkButton
-            href={viewerUrl}
-            target="_blank"
-            rel="noreferrer"
-            size="sm"
-            className="whitespace-nowrap lg:w-full lg:justify-center"
-          >
-            <ArrowUpRight size={14} />
-            View
-          </LinkButton>
-        )}
+        <LinkButton
+          href={viewerUrl}
+          target="_blank"
+          rel="noreferrer"
+          size="sm"
+          className="whitespace-nowrap lg:w-full lg:justify-center"
+        >
+          <ArrowUpRight size={14} />
+          View
+        </LinkButton>
       </div>
     </article>
   );
 }
 
-function buildFollowSearchHref(targetUrl: string, context: ResultsBackContext) {
-  return createLegacySearchHref({
-    url: targetUrl,
-    matchType: context.match === "host" || context.match === "domain" ? context.match : "exact",
-    mock: context.mock === "1",
-    scope: context.scope === "all" ? "all" : context.scope === "custom" ? "custom" : "recent",
-    dateFrom: context.dateFrom ?? undefined,
-    dateTo: context.dateTo ?? undefined
-  });
-}
+// Memoized so streaming scan-progress re-renders of the parent don't re-render
+// every visible row. The capture object may be rebuilt during result merges, so
+// compare by capture identity key plus the fields the row actually renders;
+// backContext is memoized upstream and scanId is stable.
+export const CaptureRow = memo(CaptureRowImpl, (prev, next) => {
+  return (
+    prev.scanId === next.scanId &&
+    prev.backContext === next.backContext &&
+    captureKey(prev.capture) === captureKey(next.capture) &&
+    prev.capture.status === next.capture.status &&
+    prev.capture.mime === next.capture.mime &&
+    prev.capture.redirect === next.capture.redirect &&
+    prev.capture.length === next.capture.length &&
+    prev.capture.url === next.capture.url
+  );
+});
 
 function formatTimestampCompact(timestamp: string): string {
   if (!/^\d{14}$/.test(timestamp)) return formatTimestamp(timestamp);

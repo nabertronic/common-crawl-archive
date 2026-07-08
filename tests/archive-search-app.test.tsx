@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const commonCrawlMocks = vi.hoisted(() => ({
@@ -10,6 +10,27 @@ const commonCrawlMocks = vi.hoisted(() => ({
     from: string;
     to: string;
   }>
+}));
+
+const settingsMocks = vi.hoisted(() => ({
+  settings: {
+    id: "active",
+    activeUserId: "local",
+    htmlCacheEnabled: true,
+    htmlCacheLimitBytes: 50 * 1024 * 1024,
+    autoPruneEnabled: true,
+    showHtmlPrivacyWarning: true,
+    robotsTxtChecksEnabled: true,
+    defaultMatchType: "exact",
+    defaultScanScope: "recent",
+    defaultViewMode: "list",
+    defaultSort: "timestamp-desc",
+    searchPageSize: 50,
+    historyPageSize: 25,
+    defaultExportColumns: ["url", "timestamp"],
+    largeCaptureLimitBytes: 10 * 1024 * 1024,
+    updatedAt: 1
+  }
 }));
 
 vi.mock("@/lib/capture-store", async () => {
@@ -83,6 +104,7 @@ vi.mock("@/lib/capture-store", async () => {
       createdAt: 1,
       updatedAt: 1
     })),
+    getSettings: vi.fn(async () => settingsMocks.settings),
     getScanSession: vi.fn(async () => undefined),
     getCoverage: vi.fn(async () => undefined),
     startCoverageRun: vi.fn(async () => {}),
@@ -121,13 +143,14 @@ vi.mock("@/lib/common-crawl", async () => {
           captureCount: 0
         }
       ]
-    }))
+    })),
+    resetCommonCrawlRateLimitState: vi.fn()
   };
 });
 
-import { ArchiveSearchApp } from "@/components/archive-search-app";
-import { ensureScanSession, findOrCreateLegacySession, getCoverage, getScanSession, putSearch } from "@/lib/capture-store";
-import { queryCollection } from "@/lib/common-crawl";
+import { ArchiveSearchApp, mergePersistedScanLog, persistedSearchDurationMs, restoredCoverageDurationMs } from "@/components/archive-search-app";
+import { ensureScanSession, findOrCreateLegacySession, getCoverage, getScanSession, putSearch, startCoverageRun, upsertCoverageResult } from "@/lib/capture-store";
+import { queryCollection, resetCommonCrawlRateLimitState } from "@/lib/common-crawl";
 import { robotsCacheKey } from "@/lib/robots-cache";
 
 vi.mock("next/navigation", () => ({
@@ -148,6 +171,14 @@ function dispatchPageShow(persisted: boolean) {
   window.dispatchEvent(event);
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
+}
+
 function blockedRobotsApprovalStorageKey(targetId: string) {
   return `crawlback:blocked-robots-approved:${targetId}`;
 }
@@ -160,6 +191,24 @@ describe("ArchiveSearchApp", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    settingsMocks.settings = {
+      id: "active",
+      activeUserId: "local",
+      htmlCacheEnabled: true,
+      htmlCacheLimitBytes: 50 * 1024 * 1024,
+      autoPruneEnabled: true,
+      showHtmlPrivacyWarning: true,
+      robotsTxtChecksEnabled: true,
+      defaultMatchType: "exact",
+      defaultScanScope: "recent",
+      defaultViewMode: "list",
+      defaultSort: "timestamp-desc",
+      searchPageSize: 50,
+      historyPageSize: 25,
+      defaultExportColumns: ["url", "timestamp"],
+      largeCaptureLimitBytes: 10 * 1024 * 1024,
+      updatedAt: 1
+    };
     const storage = new Map<string, string>();
     vi.stubGlobal("localStorage", {
       getItem: vi.fn((key: string) => storage.get(key) ?? null),
@@ -194,6 +243,177 @@ describe("ArchiveSearchApp", () => {
       window.requestAnimationFrame = (callback) => window.setTimeout(callback, 0);
       window.cancelAnimationFrame = (id) => window.clearTimeout(id);
     }
+    vi.mocked(getCoverage).mockResolvedValue(undefined);
+    vi.mocked(upsertCoverageResult).mockImplementation(async (_target, result) => ({
+      targetId: _target.targetId,
+      url: _target.url,
+      matchType: _target.matchType,
+      mock: _target.mock,
+      collectionResults: { [result.collection.id]: result },
+      updatedAt: Date.now()
+    }));
+    vi.mocked(queryCollection).mockImplementation(async (_targetUrl, collection) => ({
+      collection,
+      status: "checked",
+      captures: [],
+      checkedAt: Date.now(),
+      attempts: 1,
+      runs: 1,
+      attemptLogs: [
+        {
+          status: "checked",
+          checkedAt: Date.now(),
+          captureCount: 0
+        }
+      ]
+    }));
+  });
+
+  it("does not bake the active scan segment into durationMs while persisting a running scan", () => {
+    const durationMs = persistedSearchDurationMs({
+      isRunning: true,
+      activeDurationMs: 360_000,
+      storedDurationMs: 120_000,
+      coverage: {
+        targetId: "target_test",
+        url: "https://example.com/",
+        matchType: "exact",
+        mock: false,
+        collectionResults: {},
+        durationMs: 120_000,
+        activeScanStartedAt: 1_000,
+        updatedAt: 1_000
+      },
+      persistedScanLog: [
+        { kind: "event", event: "scan-started", checkedAt: 1_000, message: "Scan started." },
+        {
+          collection: commonCrawlMocks.collections[0],
+          status: "checked",
+          captures: [],
+          checkedAt: 361_000,
+          attempts: 1,
+          runs: 1
+        }
+      ]
+    });
+
+    expect(durationMs).toBe(120_000);
+  });
+
+  it("uses the UI elapsed duration at completion when coverage still has a stale active marker", () => {
+    const durationMs = persistedSearchDurationMs({
+      isRunning: false,
+      activeDurationMs: 360_000,
+      storedDurationMs: 0,
+      coverage: {
+        targetId: "target_test",
+        url: "https://example.com/",
+        matchType: "exact",
+        mock: false,
+        collectionResults: {},
+        durationMs: 0,
+        activeScanStartedAt: 1_000,
+        updatedAt: 1_000
+      },
+      persistedScanLog: [
+        { kind: "event", event: "scan-started", checkedAt: 1_000, message: "Scan started." },
+        {
+          collection: commonCrawlMocks.collections[0],
+          status: "checked",
+          captures: [],
+          checkedAt: 361_000,
+          attempts: 1,
+          runs: 1
+        }
+      ]
+    });
+
+    expect(durationMs).toBe(360_000);
+  });
+
+  it("does not revive a stale active marker as running time when restoring coverage", () => {
+    const durationMs = restoredCoverageDurationMs(
+      {
+        targetId: "target_test",
+        url: "https://example.com/",
+        matchType: "exact",
+        mock: false,
+        collectionResults: {},
+        durationMs: 120_000,
+        activeScanStartedAt: 1_000,
+        updatedAt: 1_000
+      },
+      [
+        { kind: "event", event: "scan-started", checkedAt: 1_000, message: "Scan started." },
+        {
+          collection: commonCrawlMocks.collections[0],
+          status: "checked",
+          captures: [],
+          checkedAt: 181_000,
+          attempts: 1,
+          runs: 1
+        }
+      ]
+    );
+
+    expect(durationMs).toBe(180_000);
+  });
+
+  it("uses scan-log duration when stored coverage duration is smaller", () => {
+    const durationMs = restoredCoverageDurationMs(
+      {
+        targetId: "target_test",
+        url: "https://example.com/",
+        matchType: "exact",
+        mock: false,
+        collectionResults: {},
+        durationMs: 90_000,
+        updatedAt: 1_000
+      },
+      [
+        { kind: "event", event: "scan-started", checkedAt: 1_000, message: "Scan started." },
+        {
+          collection: commonCrawlMocks.collections[0],
+          status: "checked",
+          captures: [],
+          checkedAt: 121_000,
+          attempts: 1,
+          runs: 1
+        },
+        { kind: "event", event: "scan-completed", checkedAt: 125_000, message: "Scan completed." }
+      ]
+    );
+
+    expect(durationMs).toBe(124_000);
+  });
+
+  it("keeps a recent active scan segment after reload", () => {
+    const durationMs = restoredCoverageDurationMs(
+      {
+        targetId: "target_test",
+        url: "https://example.com/",
+        matchType: "exact",
+        mock: false,
+        collectionResults: {},
+        durationMs: 90_000,
+        activeScanStartedAt: 1_000,
+        updatedAt: 1_000
+      },
+      [
+        { kind: "event", event: "scan-started", checkedAt: 1_000, message: "Scan started." },
+        {
+          collection: commonCrawlMocks.collections[0],
+          status: "checked",
+          captures: [],
+          checkedAt: 121_000,
+          attempts: 1,
+          runs: 1
+        }
+      ],
+      181_000
+    );
+
+    expect(durationMs).toBe(270_000);
   });
 
   it("syncs back-forward restored URL field values before enabling search controls", async () => {
@@ -246,10 +466,11 @@ describe("ArchiveSearchApp", () => {
   it("opens the landing-page menu with history and settings links", () => {
     render(<ArchiveSearchApp />);
 
-    fireEvent.click(screen.getByRole("button", { name: /open menu/i }));
+    fireEvent.click(screen.getAllByRole("button", { name: /open menu/i })[0]);
 
-    expect(screen.getByRole("menuitem", { name: /history/i })).toHaveAttribute("href", "/history");
-    expect(screen.getByRole("menuitem", { name: /settings/i })).toHaveAttribute("href", "/settings");
+    const menu = screen.getByRole("navigation", { name: "App navigation" });
+    expect(within(menu).getByRole("link", { name: /history/i })).toHaveAttribute("href", "/history");
+    expect(within(menu).getByRole("link", { name: /settings/i })).toHaveAttribute("href", "/settings");
   });
 
   it("responds when search route params change without a full reload", async () => {
@@ -303,8 +524,51 @@ describe("ArchiveSearchApp", () => {
     await waitFor(() => expect(screen.getByLabelText("Scanned URL")).toHaveTextContent("https://example.org/"));
     fireEvent.click(screen.getByRole("button", { name: /open menu/i }));
 
-    expect(screen.getByRole("menuitem", { name: /history/i })).toHaveAttribute("href", "/history");
-    expect(screen.getByRole("menuitem", { name: /settings/i })).toHaveAttribute("href", "/settings");
+    const menu = screen.getByRole("navigation", { name: "App navigation" });
+    expect(within(menu).getByRole("link", { name: /history/i })).toHaveAttribute("href", "/history");
+    expect(within(menu).getByRole("link", { name: /settings/i })).toHaveAttribute("href", "/settings");
+  });
+
+  it("keeps stored collection rows when persisting a reduced visible scan log", () => {
+    const [firstCollection, secondCollection] = commonCrawlMocks.collections;
+    const scanStarted = {
+      kind: "event" as const,
+      event: "scan-started" as const,
+      checkedAt: 1_000,
+      message: "Scan started."
+    };
+    const firstResult = {
+      collection: firstCollection,
+      status: "checked" as const,
+      captures: [],
+      checkedAt: 2_000,
+      httpStatus: 404,
+      attempts: 1,
+      runs: 1
+    };
+    const secondResult = {
+      collection: secondCollection,
+      status: "checked" as const,
+      captures: [],
+      checkedAt: 3_000,
+      httpStatus: 404,
+      attempts: 1,
+      runs: 1
+    };
+    const completed = {
+      kind: "event" as const,
+      event: "scan-completed" as const,
+      checkedAt: 4_000,
+      message: "Scan completed · 2 checked · 0 failed · 0 captures."
+    };
+
+    const mergedLog = mergePersistedScanLog(
+      [scanStarted, firstResult, secondResult],
+      [scanStarted, completed],
+      commonCrawlMocks.collections
+    );
+
+    expect(mergedLog).toEqual([scanStarted, firstResult, secondResult, completed]);
   });
 
   it("shows a separate retry action for failed scan results", async () => {
@@ -458,6 +722,458 @@ describe("ArchiveSearchApp", () => {
 
     const storedProgressRows = await screen.findAllByText("Loaded stored progress · 1/2 sources · 0 snapshots · 0 failed.");
     expect(storedProgressRows).toHaveLength(1);
+  });
+
+  it("labels a pending history restore as loading saved data instead of searching", async () => {
+    const coverage = deferred<Awaited<ReturnType<typeof getCoverage>>>();
+    vi.mocked(getCoverage).mockReturnValueOnce(coverage.promise);
+
+    render(<ArchiveSearchApp autoStart initialParams={{ history: "1", url: "large.example", scope: "all" }} />);
+
+    await waitFor(() => expect(getCoverage).toHaveBeenCalled());
+
+    expect(screen.getByText("Loading")).toBeInTheDocument();
+    expect(screen.getByText("Reading saved scan data from local history. Large histories can take a moment.")).toBeInTheDocument();
+    expect(screen.queryByText("Searching")).not.toBeInTheDocument();
+    expect(screen.queryByText(/No snapshots were found/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /run full scan/i })).not.toBeInTheDocument();
+
+    await act(async () => {
+      coverage.resolve({
+        targetId: "target:https://large.example/:exact:live",
+        url: "https://large.example/",
+        matchType: "exact",
+        mock: false,
+        collectionResults: {},
+        updatedAt: 1
+      });
+    });
+
+    await waitFor(() => expect(screen.getByText("Scan paused")).toBeInTheDocument());
+    expect(screen.getAllByRole("button", { name: /continue/i }).length).toBeGreaterThan(0);
+  });
+
+  it("counts only successful stored sources in the stored-progress row", async () => {
+    const [restoredCollection, failedCollection] = commonCrawlMocks.collections;
+    const restoredResult = {
+      collection: restoredCollection,
+      status: "checked" as const,
+      captures: [],
+      checkedAt: 1_000,
+      httpStatus: 404,
+      attempts: 1,
+      runs: 1
+    };
+    const failedResult = {
+      collection: failedCollection,
+      status: "not-checked" as const,
+      captures: [],
+      checkedAt: 2_000,
+      error: "browser/network request failed before an HTTP response",
+      errorKind: "network_no_response" as const,
+      attempts: 1,
+      runs: 1
+    };
+    const session = {
+      scanId: "scan_existing",
+      targetId: "target:https://example.org/:exact:live",
+      url: "https://example.org/",
+      matchType: "exact" as const,
+      mock: false,
+      scope: "all" as const,
+      collectionIds: [restoredCollection.id, failedCollection.id],
+      collectionListFetchedAt: 1,
+      scanWindowFrom: restoredCollection.from,
+      scanWindowTo: failedCollection.to,
+      createdAt: 1,
+      updatedAt: 1
+    };
+
+    vi.mocked(getScanSession).mockResolvedValue(session);
+    vi.mocked(getCoverage).mockResolvedValue({
+      targetId: session.targetId,
+      url: session.url,
+      matchType: session.matchType,
+      mock: session.mock,
+      collectionResults: {
+        [restoredCollection.id]: restoredResult,
+        [failedCollection.id]: failedResult
+      },
+      scanLogResults: [restoredResult, failedResult],
+      updatedAt: 1
+    });
+
+    render(<ArchiveSearchApp autoStart initialParams={{ scan: session.scanId }} />);
+
+    await waitFor(() => expect(screen.getByLabelText("Scanned URL")).toHaveTextContent("https://example.org/"));
+    fireEvent.click(screen.getByRole("button", { name: /scan log/i }));
+
+    const storedProgressRows = await screen.findAllByText("Loaded stored progress · 1/2 sources · 0 snapshots · 1 failed.");
+    expect(storedProgressRows).toHaveLength(1);
+  });
+
+  it("offers only Continue while unchecked sources remain and retries failed sources last", async () => {
+    const [failedCollection, pendingCollection] = commonCrawlMocks.collections;
+    const failedResult = {
+      collection: failedCollection,
+      status: "not-checked" as const,
+      captures: [],
+      checkedAt: 1_000,
+      error: "browser/network request failed before an HTTP response",
+      errorKind: "network_no_response" as const,
+      attempts: 1,
+      runs: 1
+    };
+    const session = {
+      scanId: "scan_partial",
+      targetId: "target:https://example.org/:exact:live",
+      url: "https://example.org/",
+      matchType: "exact" as const,
+      mock: false,
+      scope: "all" as const,
+      collectionIds: [failedCollection.id, pendingCollection.id],
+      collectionListFetchedAt: 1,
+      scanWindowFrom: failedCollection.from,
+      scanWindowTo: pendingCollection.to,
+      createdAt: 1,
+      updatedAt: 1
+    };
+
+    vi.mocked(getScanSession).mockResolvedValue(session);
+    vi.mocked(getCoverage).mockResolvedValue({
+      targetId: session.targetId,
+      url: session.url,
+      matchType: session.matchType,
+      mock: session.mock,
+      collectionResults: { [failedCollection.id]: failedResult },
+      scanLogResults: [failedResult],
+      collectionIds: session.collectionIds,
+      collectionListFetchedAt: session.collectionListFetchedAt,
+      scanWindowFrom: session.scanWindowFrom,
+      scanWindowTo: session.scanWindowTo,
+      updatedAt: 1
+    });
+
+    render(<ArchiveSearchApp autoStart initialParams={{ scan: session.scanId }} />);
+
+    await waitFor(() => expect(screen.getByLabelText("Scanned URL")).toHaveTextContent("https://example.org/"));
+    expect(resetCommonCrawlRateLimitState).not.toHaveBeenCalled();
+    expect(screen.getAllByRole("button", { name: /continue/i }).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: /retry failed/i })).not.toBeInTheDocument();
+
+    const continueButtons = screen.getAllByRole("button", { name: /continue/i });
+    fireEvent.click(continueButtons[continueButtons.length - 1]);
+
+    await waitFor(() => expect(resetCommonCrawlRateLimitState).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(queryCollection).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(queryCollection).mock.calls.map((call) => call[1].id)).toEqual([
+      pendingCollection.id,
+      failedCollection.id
+    ]);
+  });
+
+  it("retries failed sources immediately after continuing unfinished work", async () => {
+    const [failedCollection, pendingCollection] = commonCrawlMocks.collections;
+    const failedResult = {
+      collection: failedCollection,
+      status: "not-checked" as const,
+      captures: [],
+      checkedAt: 1_000,
+      error: "browser/network request failed before an HTTP response",
+      errorKind: "network_no_response" as const,
+      attempts: 1,
+      runs: 1
+    };
+    const session = {
+      scanId: "scan_partial_retry",
+      targetId: "target:https://example.org/:exact:live",
+      url: "https://example.org/",
+      matchType: "exact" as const,
+      mock: false,
+      scope: "all" as const,
+      collectionIds: [failedCollection.id, pendingCollection.id],
+      collectionListFetchedAt: 1,
+      scanWindowFrom: failedCollection.from,
+      scanWindowTo: pendingCollection.to,
+      createdAt: 1,
+      updatedAt: 1
+    };
+    const collectionResults: Record<string, typeof failedResult | Awaited<ReturnType<typeof queryCollection>>> = {
+      [failedCollection.id]: failedResult
+    };
+    const coverage = () => ({
+      targetId: session.targetId,
+      url: session.url,
+      matchType: session.matchType,
+      mock: session.mock,
+      collectionResults,
+      scanLogResults: Object.values(collectionResults),
+      collectionIds: session.collectionIds,
+      collectionListFetchedAt: session.collectionListFetchedAt,
+      scanWindowFrom: session.scanWindowFrom,
+      scanWindowTo: session.scanWindowTo,
+      updatedAt: Date.now()
+    });
+
+    vi.mocked(getScanSession).mockResolvedValue(session);
+    vi.mocked(getCoverage).mockImplementation(async () => coverage());
+    vi.mocked(upsertCoverageResult).mockImplementation(async (_target, result) => {
+      collectionResults[result.collection.id] = result;
+      return coverage();
+    });
+    vi.mocked(queryCollection).mockImplementation(async (_targetUrl, collection) => {
+      if (collection.id === failedCollection.id) {
+        return {
+          collection,
+          status: "not-checked",
+          captures: [],
+          checkedAt: Date.now(),
+          error: "browser/network request failed before an HTTP response",
+          errorKind: "network_no_response",
+          attempts: 1,
+          runs: 1,
+          attemptLogs: [
+            {
+              status: "not-checked",
+              checkedAt: Date.now(),
+              error: "browser/network request failed before an HTTP response",
+              errorKind: "network_no_response"
+            }
+          ]
+        };
+      }
+      return {
+        collection,
+        status: "checked",
+        captures: [],
+        checkedAt: Date.now(),
+        httpStatus: 404,
+        attempts: 1,
+        runs: 1,
+        attemptLogs: [
+          {
+            status: "checked",
+            checkedAt: Date.now(),
+            httpStatus: 404,
+            captureCount: 0
+          }
+        ]
+      };
+    });
+
+    render(<ArchiveSearchApp autoStart initialParams={{ scan: session.scanId }} />);
+
+    await waitFor(() => expect(screen.getByLabelText("Scanned URL")).toHaveTextContent("https://example.org/"));
+    const continueButtons = screen.getAllByRole("button", { name: /continue/i });
+    fireEvent.click(continueButtons[continueButtons.length - 1]);
+
+    await waitFor(() => expect(queryCollection).toHaveBeenCalledTimes(3));
+    expect(vi.mocked(queryCollection).mock.calls.map((call) => call[1].id)).toEqual([
+      pendingCollection.id,
+      failedCollection.id,
+      failedCollection.id
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: /scan log/i }));
+
+    expect(screen.getByText(/Retrying 1 failed source before finishing/i)).toBeInTheDocument();
+    expect(screen.getByText(/Scan paused · 1 checked · 1 failed/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Scan completed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Auto retry scheduled/i)).not.toBeInTheDocument();
+  });
+
+  it("does not auto-resume a complete stored scan opened from the search route", async () => {
+    const [firstCollection, secondCollection] = commonCrawlMocks.collections;
+    const firstResult = {
+      collection: firstCollection,
+      status: "checked" as const,
+      captures: [],
+      checkedAt: 1_000,
+      httpStatus: 404,
+      attempts: 1,
+      runs: 1
+    };
+    const secondResult = {
+      collection: secondCollection,
+      status: "checked" as const,
+      captures: [],
+      checkedAt: 2_000,
+      httpStatus: 404,
+      attempts: 1,
+      runs: 1
+    };
+    const session = {
+      scanId: "scan_complete",
+      targetId: "target:https://example.org/:exact:live",
+      url: "https://example.org/",
+      matchType: "exact" as const,
+      mock: false,
+      scope: "all" as const,
+      collectionIds: [firstCollection.id, secondCollection.id],
+      collectionListFetchedAt: 1,
+      scanWindowFrom: firstCollection.from,
+      scanWindowTo: secondCollection.to,
+      createdAt: 1,
+      updatedAt: 1
+    };
+
+    vi.mocked(findOrCreateLegacySession).mockResolvedValue(session);
+    vi.mocked(getCoverage).mockResolvedValue({
+      targetId: session.targetId,
+      url: session.url,
+      matchType: session.matchType,
+      mock: session.mock,
+      collectionResults: {
+        [firstCollection.id]: firstResult,
+        [secondCollection.id]: secondResult
+      },
+      scanLogResults: [firstResult, secondResult],
+      collectionIds: session.collectionIds,
+      durationMs: 420_000,
+      activeScanStartedAt: 1_000,
+      updatedAt: 3_000
+    });
+
+    render(<ArchiveSearchApp autoStart initialParams={{ url: "example.org", scope: "all" }} />);
+
+    await waitFor(() => expect(screen.getByLabelText("Scanned URL")).toHaveTextContent("https://example.org/"));
+    await waitFor(() => expect(screen.queryByRole("button", { name: /cancel/i })).not.toBeInTheDocument());
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(startCoverageRun).not.toHaveBeenCalled();
+    expect(queryCollection).not.toHaveBeenCalled();
+    expect(screen.queryByText("Searching")).not.toBeInTheDocument();
+    expect(screen.queryByText("Scan started.")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /scan log/i }));
+    expect(screen.getByText(firstCollection.id)).toBeInTheDocument();
+    expect(screen.getByText(secondCollection.id)).toBeInTheDocument();
+  });
+
+  it("does not restart a complete stored scan when reloading a fresh-action scan route", async () => {
+    const [firstCollection, secondCollection] = commonCrawlMocks.collections;
+    const firstResult = {
+      collection: firstCollection,
+      status: "checked" as const,
+      captures: [],
+      checkedAt: 1_000,
+      httpStatus: 404,
+      attempts: 1,
+      runs: 1
+    };
+    const secondResult = {
+      collection: secondCollection,
+      status: "checked" as const,
+      captures: [],
+      checkedAt: 2_000,
+      httpStatus: 404,
+      attempts: 1,
+      runs: 1
+    };
+    const session = {
+      scanId: "scan_complete",
+      targetId: "target:https://example.org/:exact:live",
+      url: "https://example.org/",
+      matchType: "exact" as const,
+      mock: false,
+      scope: "recent" as const,
+      collectionIds: [firstCollection.id, secondCollection.id],
+      collectionListFetchedAt: 1,
+      scanWindowFrom: firstCollection.from,
+      scanWindowTo: secondCollection.to,
+      createdAt: 1,
+      updatedAt: 1
+    };
+
+    vi.mocked(getScanSession).mockResolvedValue(session);
+    vi.mocked(getCoverage).mockResolvedValue({
+      targetId: session.targetId,
+      url: session.url,
+      matchType: session.matchType,
+      mock: session.mock,
+      collectionResults: {
+        [firstCollection.id]: firstResult,
+        [secondCollection.id]: secondResult
+      },
+      scanLogResults: [
+        { kind: "event", event: "scan-started", checkedAt: 500, message: "Original scan started." },
+        firstResult,
+        secondResult
+      ],
+      collectionIds: session.collectionIds,
+      durationMs: 68_000,
+      updatedAt: 3_000
+    });
+
+    render(<ArchiveSearchApp autoStart initialParams={{ scan: session.scanId, action: "fresh" }} />);
+
+    await waitFor(() => expect(screen.getByLabelText("Scanned URL")).toHaveTextContent("https://example.org/"));
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(startCoverageRun).not.toHaveBeenCalled();
+    expect(queryCollection).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /scan log/i }));
+    expect(screen.getByText("Original scan started.")).toBeInTheDocument();
+    expect(screen.queryByText("Scan started.")).not.toBeInTheDocument();
+    expect(screen.getByText(firstCollection.id)).toBeInTheDocument();
+    expect(screen.getByText(secondCollection.id)).toBeInTheDocument();
+  });
+
+  it("resumes an incomplete fresh-action scan route without dropping the stored scan log", async () => {
+    const [restoredCollection, pendingCollection] = commonCrawlMocks.collections;
+    const originalStart = {
+      kind: "event" as const,
+      event: "scan-started" as const,
+      checkedAt: 1_000,
+      message: "Original scan started."
+    };
+    const restoredResult = {
+      collection: restoredCollection,
+      status: "checked" as const,
+      captures: [],
+      checkedAt: 2_000,
+      httpStatus: 404,
+      attempts: 1,
+      runs: 1
+    };
+    const session = {
+      scanId: "scan_incomplete_fresh",
+      targetId: "target:https://example.org/:exact:live",
+      url: "https://example.org/",
+      matchType: "exact" as const,
+      mock: false,
+      scope: "recent" as const,
+      collectionIds: [restoredCollection.id, pendingCollection.id],
+      collectionListFetchedAt: 1,
+      scanWindowFrom: restoredCollection.from,
+      scanWindowTo: pendingCollection.to,
+      createdAt: 1,
+      updatedAt: 1
+    };
+
+    vi.mocked(getScanSession).mockResolvedValue(session);
+    vi.mocked(getCoverage).mockResolvedValue({
+      targetId: session.targetId,
+      url: session.url,
+      matchType: session.matchType,
+      mock: session.mock,
+      collectionResults: {
+        [restoredCollection.id]: restoredResult
+      },
+      scanLogResults: [originalStart, restoredResult],
+      collectionIds: session.collectionIds,
+      durationMs: 68_000,
+      activeScanStartedAt: 1_000,
+      updatedAt: 3_000
+    });
+
+    render(<ArchiveSearchApp autoStart initialParams={{ scan: session.scanId, action: "fresh" }} />);
+
+    await waitFor(() => expect(queryCollection).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(queryCollection).mock.calls[0][1].id).toBe(pendingCollection.id);
+
+    fireEvent.click(screen.getByRole("button", { name: /scan log/i }));
+    expect(screen.getByText("Original scan started.")).toBeInTheDocument();
+    expect(screen.getByText(restoredCollection.id)).toBeInTheDocument();
   });
 
   it("does not duplicate scope or opt-out rows when restoring and continuing a stored full scan", async () => {
@@ -767,6 +1483,25 @@ describe("ArchiveSearchApp", () => {
     expect(screen.queryByRole("button", { name: /start scan anyway/i })).not.toBeInTheDocument();
   });
 
+  it("does not contact the target robots.txt endpoint when robots checks are disabled", async () => {
+    settingsMocks.settings = {
+      ...settingsMocks.settings,
+      robotsTxtChecksEnabled: false
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes("/api/robots?")) throw new Error("robots endpoint should not be called");
+      return new Response("", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<ArchiveSearchApp autoStart initialParams={{ url: "blocked.example", scope: "all" }} />);
+
+    await waitFor(() => expect(queryCollection).toHaveBeenCalled());
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /start scan anyway/i })).not.toBeInTheDocument();
+  });
+
   it("clears the URL when navigating from a search flow back to the home screen", async () => {
     const { unmount } = render(<ArchiveSearchApp initialParams={{ mock: "1", url: "hutt.io" }} />);
 
@@ -860,6 +1595,78 @@ describe("ArchiveSearchApp", () => {
     );
   });
 
+  it("offers a full scan after a recent scan completes with snapshots", async () => {
+    const [collection] = commonCrawlMocks.collections;
+    const capture = {
+      collectionId: collection.id,
+      collectionName: collection.name,
+      collectionFrom: collection.from,
+      collectionTo: collection.to,
+      timestamp: "20260510000000",
+      url: "https://example.org/",
+      status: "200",
+      mime: "text/html",
+      filename: "crawl-data/example.warc.gz",
+      offset: "0",
+      length: "123"
+    };
+    const result = {
+      collection,
+      status: "checked" as const,
+      captures: [capture],
+      checkedAt: 1_000,
+      httpStatus: 200,
+      attempts: 1,
+      runs: 1
+    };
+    const session = {
+      scanId: "scan_recent_complete",
+      targetId: "target:https://example.org/:exact:live",
+      url: "https://example.org/",
+      matchType: "exact" as const,
+      mock: false,
+      scope: "recent" as const,
+      collectionIds: [collection.id],
+      collectionListFetchedAt: 1,
+      scanWindowFrom: collection.from,
+      scanWindowTo: collection.to,
+      createdAt: 1,
+      updatedAt: 1
+    };
+
+    vi.mocked(getScanSession).mockResolvedValue(session);
+    vi.mocked(getCoverage).mockResolvedValue({
+      targetId: session.targetId,
+      url: session.url,
+      matchType: session.matchType,
+      mock: session.mock,
+      collectionResults: { [collection.id]: result },
+      scanLogResults: [result],
+      collectionIds: session.collectionIds,
+      collectionListFetchedAt: session.collectionListFetchedAt,
+      scanWindowFrom: session.scanWindowFrom,
+      scanWindowTo: session.scanWindowTo,
+      updatedAt: 1
+    });
+
+    render(<ArchiveSearchApp autoStart initialParams={{ scan: session.scanId }} />);
+
+    await waitFor(() => expect(screen.getByLabelText("Scanned URL")).toHaveTextContent("https://example.org/"));
+    expect(screen.getByRole("button", { name: /run full scan/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /run full scan/i }));
+
+    await waitFor(() =>
+      expect(vi.mocked(ensureScanSession)).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          scanId: "scan_recent_complete",
+          scope: "all",
+          dateFrom: undefined,
+          dateTo: undefined
+        })
+      )
+    );
+  });
+
   it("does not offer the full-scan CTA when the active scope is already full scan", async () => {
     render(
       <ArchiveSearchApp
@@ -934,6 +1741,8 @@ describe("ArchiveSearchApp", () => {
     expect(queriedIds).toContain("CC-MAIN-2026-26");
     // A full-archive scan is not date-constrained: no window reaches the API.
     for (const call of vi.mocked(queryCollection).mock.calls) {
+      expect(call[10]).toBeNull();
+      expect(call[11]).toBeNull();
       expect(call[12]).toBeUndefined();
     }
   });
@@ -994,70 +1803,9 @@ describe("ArchiveSearchApp", () => {
     const calls = vi.mocked(queryCollection).mock.calls;
     expect(calls.map((call) => call[1].id)).toContain("CC-MAIN-2026-21");
     for (const call of calls) {
+      expect(call[10]).toBeNull();
+      expect(call[11]).toBeNull();
       expect(call[12]).toEqual({ from: "2026-05-01", to: "2026-05-31" });
     }
-  });
-
-  it("logs a truncation notice when a collection has more captures than the limit", async () => {
-    vi.mocked(queryCollection).mockImplementation(async (_targetUrl, collection) => ({
-      collection,
-      status: "checked",
-      captures: [],
-      checkedAt: Date.now(),
-      attempts: 1,
-      runs: 1,
-      truncated: true,
-      attemptLogs: [{ status: "checked", checkedAt: Date.now(), captureCount: 0 }]
-    }));
-    vi.mocked(findOrCreateLegacySession).mockResolvedValue({
-      scanId: "scan_legacy",
-      targetId: "target:https://truncated.example/:exact:live",
-      url: "https://truncated.example/",
-      matchType: "exact",
-      mock: false,
-      scope: "all",
-      collectionIds: ["CC-MAIN-2026-21", "CC-MAIN-2026-26"],
-      collectionListFetchedAt: 1,
-      scanWindowFrom: "2026-05-08T07:40:46",
-      scanWindowTo: "2026-06-30T00:00:00",
-      createdAt: 1,
-      updatedAt: 1
-    });
-    vi.mocked(getCoverage).mockResolvedValue({
-      targetId: "target:https://truncated.example/:exact:live",
-      ownerId: "owner_test",
-      url: "https://truncated.example/",
-      matchType: "exact",
-      mock: false,
-      // CC-MAIN-2026-21 is already fully covered so it is skipped; the remaining
-      // collection is queried and comes back truncated.
-      collectionResults: {
-        "CC-MAIN-2026-21": {
-          collection: commonCrawlMocks.collections[0],
-          status: "checked",
-          captures: [],
-          checkedAt: 1,
-          attempts: 1,
-          runs: 1
-        }
-      },
-      collectionIds: ["CC-MAIN-2026-21", "CC-MAIN-2026-26"],
-      collectionListFetchedAt: 1,
-      updatedAt: 1
-    });
-    localStorage.setItem(robotsCacheKey("https://truncated.example/"), JSON.stringify({
-      status: "allowed",
-      robotsUrl: "https://truncated.example/robots.txt",
-      userAgent: "CCBot",
-      checkedAt: Date.now()
-    }));
-
-    render(<ArchiveSearchApp autoStart initialParams={{ url: "truncated.example", scope: "all" }} />);
-
-    await waitFor(() => expect(queryCollection).toHaveBeenCalled());
-    fireEvent.click(await screen.findByRole("button", { name: /scan log/i }));
-    expect(
-      await screen.findByText(/more captures than the per-collection limit/i)
-    ).toBeInTheDocument();
   });
 });
