@@ -1,4 +1,4 @@
-import type { CommonCrawlCapture } from "@/lib/common-crawl";
+import { isHtmlCaptureMime, type CommonCrawlCapture } from "@/lib/common-crawl";
 import { captureKey } from "@/lib/scan-results";
 import { getSettings } from "@/lib/capture-store";
 import { loadCaptureRecord } from "@/lib/warc";
@@ -30,7 +30,7 @@ async function htmlCacheEnabled(): Promise<boolean> {
 }
 
 export function prefetchCaptureRecord(capture: CommonCrawlCapture): void {
-  if (capture.mime !== "text/html") return;
+  if (!isHtmlCaptureMime(capture.mime)) return;
   const key = captureKey(capture);
   if (attempted.has(key)) return;
   attempted.add(key);

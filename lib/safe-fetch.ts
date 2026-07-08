@@ -5,6 +5,12 @@ import { request as httpsRequest } from "node:https";
 
 const MAX_REDIRECTS = 4;
 
+// Hard ceiling on how much of a response body we buffer. The target host is
+// user-supplied, so a malicious endpoint could otherwise stream unbounded bytes
+// into memory (DoS). robots.txt and the other resources fetched through here are
+// tiny; 2 MiB is generous headroom. Bodies past the cap abort the request.
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+
 /**
  * Raised when a request target is rejected by the SSRF guard. Callers can treat
  * the message as user-facing, it never contains resolved addresses.
@@ -160,7 +166,15 @@ function nodePinnedTransport(url: URL, pinnedIp: string, init: RequestInit): Pro
       },
       (res) => {
         const chunks: Buffer[] = [];
-        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        let received = 0;
+        res.on("data", (chunk: Buffer) => {
+          received += chunk.length;
+          if (received > MAX_RESPONSE_BYTES) {
+            req.destroy(new SsrfError("Target response exceeded the size limit."));
+            return;
+          }
+          chunks.push(chunk);
+        });
         res.on("end", () => {
           const status = res.statusCode ?? 502;
           const headers = new Headers();

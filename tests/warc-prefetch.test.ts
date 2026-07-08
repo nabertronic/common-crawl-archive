@@ -55,6 +55,13 @@ describe("prefetchCaptureRecord", () => {
     expect(loadCaptureRecord).not.toHaveBeenCalled();
   });
 
+  it("warms HTML captures whose MIME carries a charset or is xhtml", async () => {
+    prefetchCaptureRecord(capture({ mime: "text/html; charset=utf-8", offset: "10" }));
+    prefetchCaptureRecord(capture({ mime: "application/xhtml+xml", offset: "20" }));
+    await flush();
+    expect(loadCaptureRecord).toHaveBeenCalledTimes(2);
+  });
+
   it("does not fetch when the HTML cache is disabled", async () => {
     getSettings.mockResolvedValue({ htmlCacheEnabled: false });
     prefetchCaptureRecord(capture());

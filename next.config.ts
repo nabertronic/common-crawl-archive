@@ -1,8 +1,9 @@
 import type { NextConfig } from "next";
 
 // Static hardening headers applied to every response. The full
-// Content-Security-Policy (with a per-request nonce) is set in middleware.ts;
-// these are the controls that don't need a nonce.
+// Content-Security-Policy (with a per-request nonce) is set in proxy.ts (the
+// Next.js middleware/proxy entrypoint); these are the controls that don't need a
+// nonce.
 const securityHeaders = [
   { key: "X-Frame-Options", value: "DENY" },
   { key: "X-Content-Type-Options", value: "nosniff" },

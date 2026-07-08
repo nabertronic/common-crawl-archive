@@ -47,6 +47,9 @@ fetches it on the server. Without guarding, an attacker sends
 - If you extend the blocklist, keep both the IPv4 CIDR table and the IPv6 checks
   in sync, and remember IPv4-mapped IPv6 (`::ffff:a.b.c.d`).
 - `SsrfError` messages are user-safe (no resolved addresses); keep them that way.
+- The pinned node transport caps buffered response bodies at `MAX_RESPONSE_BYTES`
+  (2 MiB) and aborts past it. The target host is user-supplied, so never remove
+  the cap — an unbounded body is a memory-exhaustion DoS.
 
 **The injectable `transport` param** exists only for tests — production always
 uses the pinned node transport. Do not wire a test transport into a route.

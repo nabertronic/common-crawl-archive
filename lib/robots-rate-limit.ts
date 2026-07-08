@@ -1,24 +1,41 @@
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_REQUESTS = 30;
 
-const rateLimitBuckets = new Map<string, { count: number; resetAt: number }>();
+export type RateLimitResult = { allowed: true } | { allowed: false; retryAfterMs: number };
 
-export function checkRobotsRouteRateLimit(
-  request: Request,
-  now = Date.now()
-): { allowed: true } | { allowed: false; retryAfterMs: number } {
-  const key = clientKey(request);
-  const bucket = rateLimitBuckets.get(key);
-  if (!bucket || now >= bucket.resetAt) {
-    rateLimitBuckets.set(key, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
-    pruneRateLimitBuckets(now);
+/**
+ * Build a fixed-window, per-client rate limiter for an API route. Each limiter
+ * owns its own bucket map so distinct routes cannot exhaust one another's
+ * budget. Keyed by the client IP (proxy headers first, then "local").
+ */
+export function createRouteRateLimiter({
+  windowMs = RATE_LIMIT_WINDOW_MS,
+  maxRequests = RATE_LIMIT_MAX_REQUESTS
+}: { windowMs?: number; maxRequests?: number } = {}) {
+  const buckets = new Map<string, { count: number; resetAt: number }>();
+
+  function check(request: Request, now = Date.now()): RateLimitResult {
+    const key = clientKey(request);
+    const bucket = buckets.get(key);
+    if (!bucket || now >= bucket.resetAt) {
+      buckets.set(key, { count: 1, resetAt: now + windowMs });
+      prune(now);
+      return { allowed: true };
+    }
+    if (bucket.count >= maxRequests) {
+      return { allowed: false, retryAfterMs: Math.max(0, bucket.resetAt - now) };
+    }
+    bucket.count += 1;
     return { allowed: true };
   }
-  if (bucket.count >= RATE_LIMIT_MAX_REQUESTS) {
-    return { allowed: false, retryAfterMs: Math.max(0, bucket.resetAt - now) };
+
+  function prune(now: number) {
+    for (const [key, bucket] of buckets) {
+      if (now >= bucket.resetAt) buckets.delete(key);
+    }
   }
-  bucket.count += 1;
-  return { allowed: true };
+
+  return { check, reset: () => buckets.clear() };
 }
 
 function clientKey(request: Request) {
@@ -31,12 +48,12 @@ function clientKey(request: Request) {
   );
 }
 
-function pruneRateLimitBuckets(now: number) {
-  for (const [key, bucket] of rateLimitBuckets) {
-    if (now >= bucket.resetAt) rateLimitBuckets.delete(key);
-  }
+const robotsRouteRateLimiter = createRouteRateLimiter();
+
+export function checkRobotsRouteRateLimit(request: Request, now = Date.now()): RateLimitResult {
+  return robotsRouteRateLimiter.check(request, now);
 }
 
 export function resetRobotsRateLimitForTests() {
-  rateLimitBuckets.clear();
+  robotsRouteRateLimiter.reset();
 }

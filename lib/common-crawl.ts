@@ -496,9 +496,16 @@ export function parseCdxjResponse(
     .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
 }
 
+// A capture is HTML if its MIME contains "html" (covers "text/html",
+// "text/html; charset=utf-8", "application/xhtml+xml"). Shared so retention and
+// prefetch agree on what counts as HTML.
+export function isHtmlCaptureMime(mime: string): boolean {
+  return /html/i.test(mime);
+}
+
 function isRetainedCapture(capture: CommonCrawlCapture): boolean {
   if (capture.status === "200") {
-    return /html/i.test(capture.mime);
+    return isHtmlCaptureMime(capture.mime);
   }
   return /^3\d\d$/.test(capture.status);
 }

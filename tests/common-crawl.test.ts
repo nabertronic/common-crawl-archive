@@ -11,6 +11,7 @@ import {
   getCommonCrawlRateLimitSnapshot,
   isLikelyCommonCrawlAvailabilityIssue,
   isLikelyRateLimitError,
+  isHtmlCaptureMime,
   LARGE_CAPTURE_LIMIT_BYTES,
   parseCdxjResponse,
   parseCollections,
@@ -29,6 +30,20 @@ const collection: CommonCrawlCollection = {
   from: "2026-05-08T07:40:46",
   to: "2026-05-21T22:06:58"
 };
+
+describe("isHtmlCaptureMime", () => {
+  it("matches HTML mime types including charset and xhtml variants", () => {
+    for (const mime of ["text/html", "text/html; charset=utf-8", "application/xhtml+xml", "TEXT/HTML"]) {
+      expect(isHtmlCaptureMime(mime), mime).toBe(true);
+    }
+  });
+
+  it("rejects non-HTML mime types", () => {
+    for (const mime of ["application/pdf", "image/png", "text/plain", ""]) {
+      expect(isHtmlCaptureMime(mime), mime).toBe(false);
+    }
+  });
+});
 
 describe("Common Crawl client", () => {
   beforeEach(() => {

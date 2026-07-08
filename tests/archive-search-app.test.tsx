@@ -1477,6 +1477,10 @@ describe("ArchiveSearchApp", () => {
       "1"
     );
 
+    // `autoStart` only renders on the /search route; a fresh scan started from
+    // any other path navigates there first and returns (see runSearch). Start on
+    // /search so the scan runs instead of early-returning against the stub router.
+    window.history.pushState({}, "", "/search?url=blocked.example");
     render(<ArchiveSearchApp autoStart initialParams={{ url: "blocked.example", scope: "all" }} />);
 
     await waitFor(() => expect(queryCollection).toHaveBeenCalled());
@@ -1495,10 +1499,18 @@ describe("ArchiveSearchApp", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
+    // See the note above: a fresh autostart only completes on the /search route.
+    window.history.pushState({}, "", "/search?url=blocked.example");
     render(<ArchiveSearchApp autoStart initialParams={{ url: "blocked.example", scope: "all" }} />);
 
     await waitFor(() => expect(queryCollection).toHaveBeenCalled());
-    expect(fetchMock).not.toHaveBeenCalled();
+    // The scan still runs (and may hit other endpoints like the opt-out
+    // registry), but the target's robots.txt must never be contacted.
+    const robotsCalls = fetchMock.mock.calls.filter(([input]) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      return url.includes("/api/robots?");
+    });
+    expect(robotsCalls).toHaveLength(0);
     expect(screen.queryByRole("button", { name: /start scan anyway/i })).not.toBeInTheDocument();
   });
 
