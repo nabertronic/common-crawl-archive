@@ -6,12 +6,16 @@ import {
   Ban,
   CalendarDays,
   ChevronDown,
+  ChevronRight,
   Download,
   Clock,
+  Boxes,
   FileArchive,
+  FileJson,
   FileText,
   Info,
   List,
+  ListTree,
   Loader2,
   Pause,
   Play,
@@ -109,16 +113,26 @@ import {
   type ScanSession,
   type StoredSearch
 } from "@/lib/capture-store";
-import { dedupeCaptures, mergeCollectionResults, upsertCollectionResult } from "@/lib/scan-results";
-import { loadCaptureRecord } from "@/lib/warc";
+import { captureKey, dedupeCaptures, mergeCollectionResults, upsertCollectionResult } from "@/lib/scan-results";
+import { groupCapturesByUrl } from "@/lib/capture-grouping";
+import { prefetchCaptureRecord } from "@/lib/warc-prefetch";
+import { planScanFetches, prefetchScanInBackground } from "@/lib/background-scan";
+import { fetchRawWarcRecordBytes, loadCaptureRecord } from "@/lib/warc";
+import {
+  buildWarcResponseRecord,
+  concatByteChunks,
+  gzipText,
+  warcExportFilename
+} from "@/lib/warc-export";
 import { computeCsv, computeZipBytes } from "@/lib/compute-client";
 import { rowsToCsv } from "@/lib/csv";
+import { buildCapturesJson } from "@/lib/json-export";
 import { robotsUrlForTarget, type RobotsCheckResult } from "@/lib/robots";
 import { readCachedRobotsStatus, writeCachedRobotsStatus } from "@/lib/robots-cache";
 import { findOptOutMatch, type OptOutMatch } from "@/lib/opt-out-registry";
-import { createLegacySearchHref, createSearchHref } from "@/lib/navigation-state";
+import { createLegacySearchHref, createSearchHref, createViewerHref } from "@/lib/navigation-state";
 
-type ViewMode = "list" | "calendar";
+type ViewMode = "list" | "calendar" | "grouped";
 type ScanScope = "recent" | "all" | "custom";
 type RunSearchMode = "fresh" | "resume" | "retry-failed" | "auto-retry" | "missing";
 
@@ -129,6 +143,16 @@ type HtmlZipDownloadState = {
   failed?: number;
   part?: number;
   parts?: number;
+  bytes?: number;
+  error?: string;
+};
+
+type WarcDownloadState = {
+  active: boolean;
+  completed: number;
+  total: number;
+  failed?: number;
+  part?: number;
   bytes?: number;
   error?: string;
 };
@@ -336,7 +360,9 @@ function customDateRangeIssue(dateFrom: string, dateTo: string) {
 }
 
 function normalizeInitialViewMode(value: string | null): ViewMode {
-  return value === "calendar" ? "calendar" : "list";
+  if (value === "calendar") return "calendar";
+  if (value === "grouped") return "grouped";
+  return "list";
 }
 
 function normalizeInitialSort(value: string | null): SortOption {
@@ -787,6 +813,12 @@ async function downloadCaptureExport(captures: CommonCrawlCapture[], columnKeys:
   downloadBlob(blob, filename);
 }
 
+function downloadCaptureJsonExport(captures: CommonCrawlCapture[]) {
+  const date = new Date().toISOString().slice(0, 10);
+  const blob = new Blob([buildCapturesJson(captures)], { type: "application/json;charset=utf-8" });
+  downloadBlob(blob, `common-crawl-results-${date}.json`);
+}
+
 function sanitizeArchiveFilename(value: string) {
   const cleaned = value
     .replace(/^https?:\/\//i, "")
@@ -816,6 +848,10 @@ const HTML_ZIP_WARN_ESTIMATED_BYTES = 250 * 1024 * 1024;
 const HTML_ZIP_HARD_CAPTURE_LIMIT = 50_000;
 const HTML_ZIP_HARD_ESTIMATED_BYTES = 10 * 1024 * 1024 * 1024;
 const HTML_ZIP_DOWNLOAD_PAUSE_MS = 350;
+// WARC export: split into a new .warc.gz once a part passes this many raw bytes,
+// and refuse absurd batch sizes outright.
+const WARC_BATCH_BYTES = 500 * 1024 * 1024;
+const WARC_HARD_CAPTURE_LIMIT = 50_000;
 
 type HtmlZipPartEntry = { filename: string; content: string };
 type HtmlZipSuccess = {
@@ -1450,6 +1486,11 @@ export function ArchiveSearchApp({
     total: 0
   });
   const [htmlZipWarningOpen, setHtmlZipWarningOpen] = useState(false);
+  const [warcDownload, setWarcDownload] = useState<WarcDownloadState>({
+    active: false,
+    completed: 0,
+    total: 0
+  });
   const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
   const [showHtmlPrivacyWarning, setShowHtmlPrivacyWarning] = useState(true);
   const [exportScope, setExportScope] = useState<ExportScope>("filtered");
@@ -1458,6 +1499,7 @@ export function ArchiveSearchApp({
   const abortRef = useRef<AbortController | null>(null);
   const robotsAbortRef = useRef<AbortController | null>(null);
   const htmlZipAbortRef = useRef<AbortController | null>(null);
+  const warcAbortRef = useRef<AbortController | null>(null);
   const autoStartedSignatureRef = useRef<string | null>(null);
   const blockedRobotsApprovedScanIdsRef = useRef<Set<string>>(new Set());
   const filterResetMountedRef = useRef(false);
@@ -2851,6 +2893,104 @@ export function ArchiveSearchApp({
     htmlZipAbortRef.current?.abort();
   }
 
+  async function downloadWarcArchive(capturesToDownload: CommonCrawlCapture[]) {
+    if (capturesToDownload.length === 0 || warcDownload.active || htmlZipDownload.active) return;
+    if (capturesToDownload.length > WARC_HARD_CAPTURE_LIMIT) {
+      const message = `WARC export is too large for one browser session (${capturesToDownload.length} captures). Narrow the filters and export in smaller batches.`;
+      setWarcDownload({ active: false, completed: 0, total: capturesToDownload.length, error: message });
+      return;
+    }
+
+    const controller = new AbortController();
+    warcAbortRef.current = controller;
+    setWarcDownload({ active: true, completed: 0, total: capturesToDownload.length, failed: 0, part: 1, bytes: 0 });
+
+    let part = 1;
+    let completed = 0;
+    let failed = 0;
+    let exportedBytes = 0;
+    let members: Uint8Array[] = [];
+    let partBytes = 0;
+
+    // The total part count is only known once streaming finishes, so name each
+    // part by its own number: a lone part stays un-suffixed, extra parts get a
+    // "-part-NN" suffix (filenames never collide either way).
+    const flushPart = async () => {
+      if (members.length === 0) return;
+      const bytes = concatByteChunks(members);
+      downloadBlob(new Blob([bytes], { type: "application/warc" }), warcExportFilename(part, part));
+      await waitForBrowserDownload(HTML_ZIP_DOWNLOAD_PAUSE_MS);
+      part += 1;
+      members = [];
+      partBytes = 0;
+    };
+
+    try {
+      for (let index = 0; index < capturesToDownload.length; index += 1) {
+        if (controller.signal.aborted) throw new DOMException("The operation was aborted.", "AbortError");
+        const capture = capturesToDownload[index];
+        try {
+          const bytes = isMockCaptureFilename(capture.filename)
+            ? await gzipText(
+                buildWarcResponseRecord(
+                  capture,
+                  createMockWarcRecord({
+                    filename: capture.filename,
+                    timestamp: capture.timestamp,
+                    url: capture.url,
+                    collection: capture.collectionId
+                  })
+                )
+              )
+            : await fetchRawWarcRecordBytes({
+                filename: capture.filename,
+                offset: capture.offset,
+                length: capture.length,
+                allowLarge: true,
+                retryCount: 2,
+                signal: controller.signal
+              });
+
+          if (partBytes > 0 && partBytes + bytes.length > WARC_BATCH_BYTES) {
+            await flushPart();
+          }
+          members.push(bytes);
+          partBytes += bytes.length;
+          exportedBytes += bytes.length;
+        } catch (error) {
+          if (controller.signal.aborted) throw error;
+          failed += 1;
+        }
+        completed = index + 1;
+        setWarcDownload({ active: true, completed, total: capturesToDownload.length, failed, part, bytes: exportedBytes });
+      }
+
+      await flushPart();
+      setWarcDownload({
+        active: false,
+        completed: capturesToDownload.length,
+        total: capturesToDownload.length,
+        failed,
+        part: Math.max(1, part - 1),
+        bytes: exportedBytes,
+        error: failed > 0 ? `${failed} capture${failed === 1 ? "" : "s"} could not be exported.` : undefined
+      });
+    } catch (error) {
+      if (controller.signal.aborted) {
+        setWarcDownload({ active: false, completed: 0, total: 0 });
+        return;
+      }
+      const message = error instanceof Error ? error.message : "Could not export WARC.";
+      setWarcDownload({ active: false, completed: 0, total: capturesToDownload.length, error: message });
+    } finally {
+      if (warcAbortRef.current === controller) warcAbortRef.current = null;
+    }
+  }
+
+  function cancelWarcDownload() {
+    warcAbortRef.current?.abort();
+  }
+
   useEffect(() => {
     if (initialScanId && autoStartedSignatureRef.current !== autoStartSignature) {
       autoStartedSignatureRef.current = autoStartSignature;
@@ -2973,6 +3113,29 @@ export function ArchiveSearchApp({
   ]);
 
   const isRunning = state === "loading-collections" || state === "running";
+
+  // While a scan is running and the tab is hidden, ask the service worker to keep
+  // warming the CDX pages of the not-yet-checked collections so the scan makes
+  // progress in the background and resumes fast when the user returns. No-op when
+  // there is no controlling worker (dev, or first load before activation).
+  useEffect(() => {
+    if (!isRunning) return;
+    const warmRemaining = () => {
+      if (typeof document === "undefined" || document.visibilityState !== "hidden") return;
+      const remaining = collections.filter((collection) => !checkedCollectionIds.has(collection.id));
+      if (remaining.length === 0) return;
+      const dateWindow =
+        scanScope === "custom" && hasValidCustomDateRange(customDateFrom, customDateTo)
+          ? { from: customDateFrom, to: customDateTo }
+          : undefined;
+      prefetchScanInBackground(
+        planScanFetches({ url: targetUrl, matchType, collections: remaining, dateWindow })
+      );
+    };
+    document.addEventListener("visibilitychange", warmRemaining);
+    return () => document.removeEventListener("visibilitychange", warmRemaining);
+  }, [isRunning, collections, checkedCollectionIds, scanScope, customDateFrom, customDateTo, targetUrl, matchType]);
+
   const currentNoticeFailedResults = liveFailedResults;
   const availabilityIssue = currentNoticeFailedResults.some((result) =>
     isLikelyCommonCrawlAvailabilityIssue(result.error, result.httpStatus, result.errorKind)
@@ -3687,7 +3850,7 @@ export function ArchiveSearchApp({
                   Controls
                 </div>
                 <div className="mt-4 space-y-3">
-                  {viewMode !== "calendar" && <SortSelect value={sortBy} onChange={setSortBy} />}
+                  {viewMode === "list" && <SortSelect value={sortBy} onChange={setSortBy} />}
                   <Filter label="Year" value={yearFilter} onChange={setYearFilter} options={filterOptions.years} />
                   <Filter label="Collection" value={collectionFilter} onChange={setCollectionFilter} options={filterOptions.collections} />
                   <Filter label="MIME" value={mimeFilter} onChange={setMimeFilter} options={filterOptions.mimes} />
@@ -3747,6 +3910,16 @@ export function ArchiveSearchApp({
                     <FileText size={14} />
                     Export CSV
                   </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={!canExport || htmlZipDownload.active}
+                    onClick={() => downloadCaptureJsonExport(exportCaptures)}
+                    className="justify-center"
+                  >
+                    <FileJson size={14} />
+                    Export JSON
+                  </Button>
                   {htmlZipDownload.active ? (
                     <Button
                       size="sm"
@@ -3761,7 +3934,7 @@ export function ArchiveSearchApp({
                     <Button
                       size="sm"
                       variant="secondary"
-                      disabled={!canExport}
+                      disabled={!canExport || warcDownload.active}
                       onClick={requestHtmlZipDownload}
                       className="justify-center"
                     >
@@ -3769,7 +3942,33 @@ export function ArchiveSearchApp({
                       Download HTML ZIP{canExport ? ` (${exportCaptures.length})` : ""}
                     </Button>
                   )}
+                  {warcDownload.active ? (
+                    <Button size="sm" variant="danger" onClick={cancelWarcDownload} className="justify-center">
+                      <X size={14} />
+                      Cancel WARC Export
+                    </Button>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={!canExport || htmlZipDownload.active}
+                      onClick={() => void downloadWarcArchive(exportCaptures)}
+                      className="justify-center"
+                    >
+                      <Boxes size={14} />
+                      Export WARC{canExport ? ` (${exportCaptures.length})` : ""}
+                    </Button>
+                  )}
                 </div>
+                {warcDownload.active ? (
+                  <p className="mt-2 text-xs text-amber-200">
+                    Exporting WARC {warcDownload.completed}/{warcDownload.total}
+                    {warcDownload.bytes ? ` · ${formatBytes(warcDownload.bytes)}` : ""}
+                    {warcDownload.failed ? ` · ${warcDownload.failed} failed` : ""}
+                  </p>
+                ) : warcDownload.error ? (
+                  <p className="mt-2 text-xs text-red-200">{warcDownload.error}</p>
+                ) : null}
 
                 {!canExport ? (
                   <p className="mt-2 text-[11px] text-zinc-500">
@@ -3861,6 +4060,12 @@ export function ArchiveSearchApp({
                 </div>
               ) : viewMode === "calendar" ? (
                 <CalendarView captures={filteredCaptures} backContext={resultsBackContext} scanId={activeScanId || undefined} />
+              ) : viewMode === "grouped" ? (
+                <GroupedCaptureList
+                  captures={filteredCaptures}
+                  backContext={resultsBackContext}
+                  scanId={activeScanId || undefined}
+                />
               ) : (
                 <>
                   <CaptureRowHeader sort={sortBy} onSortChange={setSortBy} />
@@ -4530,6 +4735,102 @@ function Filter({ label, value, options, onChange }: { label: string; value: str
   );
 }
 
+function formatVersionTimestamp(timestamp: string): string {
+  if (!/^\d{14}$/.test(timestamp)) return timestamp;
+  return `${timestamp.slice(0, 4)}-${timestamp.slice(4, 6)}-${timestamp.slice(6, 8)} ${timestamp.slice(8, 10)}:${timestamp.slice(10, 12)}`;
+}
+
+// Domain/host scans return many URLs, each captured several times. This view
+// groups captures by URL so the user can expand a URL and click through its
+// dated versions, instead of scrolling one flat timeline.
+function GroupedCaptureList({
+  captures,
+  backContext,
+  scanId
+}: {
+  captures: CommonCrawlCapture[];
+  backContext: ResultsBackContext;
+  scanId?: string;
+}) {
+  const groups = useMemo(() => groupCapturesByUrl(captures), [captures]);
+  // Auto-expand when a scan resolves to a single URL (exact match); otherwise
+  // start collapsed so a large domain scan stays scannable.
+  const [expanded, setExpanded] = useState<Set<string>>(() =>
+    groups.length === 1 ? new Set(groups.map((group) => group.url)) : new Set()
+  );
+
+  const toggle = useCallback((url: string) => {
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(url)) next.delete(url);
+      else next.add(url);
+      return next;
+    });
+  }, []);
+
+  return (
+    <ul className="divide-y divide-zinc-800">
+      {groups.map((group) => {
+        const isOpen = expanded.has(group.url);
+        return (
+          <li key={group.url}>
+            <button
+              type="button"
+              aria-expanded={isOpen}
+              onClick={() => toggle(group.url)}
+              className="flex w-full items-center gap-2 px-4 py-3 text-left hover:bg-zinc-900/60"
+            >
+              {isOpen ? (
+                <ChevronDown size={14} className="shrink-0 text-zinc-500" />
+              ) : (
+                <ChevronRight size={14} className="shrink-0 text-zinc-500" />
+              )}
+              <span className="min-w-0 flex-1 truncate font-mono text-xs text-zinc-200">{group.url}</span>
+              <Badge tone="neutral" className="shrink-0">
+                {group.versions.length} version{group.versions.length === 1 ? "" : "s"}
+              </Badge>
+              <span className="hidden shrink-0 font-mono text-[11px] tabular-nums text-zinc-500 sm:inline">
+                {formatVersionTimestamp(group.latestTimestamp)}
+              </span>
+            </button>
+            {isOpen ? (
+              <ul className="border-t border-zinc-800/60 bg-zinc-950/40">
+                {group.versions.map((capture) => {
+                  const isRedirect = /^3\d\d$/.test(capture.status);
+                  const statusTone = capture.status === "200" ? "green" : isRedirect ? "amber" : "neutral";
+                  return (
+                    <li key={captureKey(capture)}>
+                      <Link
+                        href={createViewerHref(capture, { scanId, legacyBackContext: backContext })}
+                        onMouseEnter={() => prefetchCaptureRecord(capture)}
+                        onFocus={() => prefetchCaptureRecord(capture)}
+                        className="flex items-center gap-3 py-2 pl-10 pr-4 text-sm hover:bg-zinc-900/60"
+                      >
+                        <Badge tone={statusTone} className="shrink-0 justify-center">
+                          {capture.status}
+                        </Badge>
+                        <span className="shrink-0 font-mono text-xs tabular-nums text-zinc-300">
+                          {formatVersionTimestamp(capture.timestamp)}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-500">
+                          {capture.collectionId}
+                        </span>
+                        <span className="shrink-0 font-mono text-[11px] tabular-nums text-zinc-400">
+                          {formatBytes(capture.length)}
+                        </span>
+                      </Link>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : null}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 function ViewModeToggle({
   value,
   onChange
@@ -4568,6 +4869,19 @@ function ViewModeToggle({
       >
         <CalendarDays size={14} />
         Calendar
+      </button>
+      <button
+        type="button"
+        aria-pressed={value === "grouped"}
+        onClick={() => onChange("grouped")}
+        className={
+          value === "grouped"
+            ? "inline-flex h-8 items-center gap-1.5 bg-amber-300 px-3 text-xs font-bold uppercase tracking-[0.12em] text-zinc-950"
+            : "inline-flex h-8 items-center gap-1.5 px-3 text-xs font-semibold uppercase tracking-[0.12em] text-zinc-300 transition hover:text-amber-100"
+        }
+      >
+        <ListTree size={14} />
+        By URL
       </button>
     </div>
   );

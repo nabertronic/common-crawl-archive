@@ -1745,6 +1745,108 @@ export async function pruneHtmlCache(limitBytes?: number): Promise<void> {
   }
 }
 
+export type CachedHtmlSearchMatch = {
+  cacheKey: string;
+  url?: string;
+  timestamp?: string;
+  collectionId?: string;
+  status?: string;
+  mime?: string;
+  filename: string;
+  offset: string;
+  length: string;
+  sizeBytes: number;
+  snippet: string;
+  inUrl: boolean;
+};
+
+// Collapse a slice of raw HTML around a match into a readable one-line snippet:
+// drop tags, collapse whitespace, and window the text around the hit.
+function htmlSnippet(html: string, matchIndex: number, needleLength: number): string {
+  const source = matchIndex >= 0 ? html.slice(Math.max(0, matchIndex - 80), matchIndex + needleLength + 120) : html.slice(0, 200);
+  const text = source
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+}
+
+/**
+ * Pure matcher for full-text cache search: returns a search match when the
+ * needle (already lower-cased) appears in the record's HTML body or URL, else
+ * null. Exported so the matching/snippet behaviour can be unit-tested without
+ * IndexedDB.
+ */
+export function matchCachedHtmlRecord(
+  record: CachedHtmlCaptureRecord,
+  needle: string
+): CachedHtmlSearchMatch | null {
+  const html = typeof record.html === "string" ? record.html : "";
+  const matchIndex = html.toLowerCase().indexOf(needle);
+  const inUrl = (record.url ?? "").toLowerCase().includes(needle);
+  if (matchIndex < 0 && !inUrl) return null;
+  return {
+    cacheKey: record.cacheKey,
+    url: record.url,
+    timestamp: record.timestamp,
+    collectionId: record.collectionId,
+    status: record.status,
+    mime: record.mime,
+    filename: record.filename,
+    offset: record.offset,
+    length: record.length,
+    sizeBytes: record.sizeBytes,
+    snippet: htmlSnippet(html, matchIndex, needle.length),
+    inUrl
+  };
+}
+
+/**
+ * Full-text search over locally cached HTML captures. Scans the HTML cache for
+ * the query (case-insensitive) in the page body or URL and returns matches with
+ * a readable snippet, newest first. Purely local — no network.
+ */
+export async function searchCachedHtml(
+  query: string,
+  { limit = 100, signal }: { limit?: number; signal?: AbortSignal } = {}
+): Promise<CachedHtmlSearchMatch[]> {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [];
+  const ownerId = await activeOwnerId();
+  const db = await openDB();
+  try {
+    const matches = await new Promise<CachedHtmlSearchMatch[]>((resolve, reject) => {
+      const tx = db.transaction(HTML_CAPTURE_STORE, "readonly");
+      const store = tx.objectStore(HTML_CAPTURE_STORE);
+      const request = store.openCursor();
+      const found: CachedHtmlSearchMatch[] = [];
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor || signal?.aborted) {
+          resolve(found);
+          return;
+        }
+        const record = cursor.value as CachedHtmlCaptureRecord;
+        if (record.ownerId === ownerId) {
+          const match = matchCachedHtmlRecord(record, needle);
+          if (match) found.push(match);
+        }
+        cursor.continue();
+      };
+      request.onerror = () => reject(request.error);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+    return matches
+      .sort((left, right) => (right.timestamp ?? "").localeCompare(left.timestamp ?? ""))
+      .slice(0, limit);
+  } catch {
+    return [];
+  } finally {
+    releaseDb(db);
+  }
+}
+
 async function getUser(userId: string): Promise<LocalUser | undefined> {
   try {
     return await withStore<LocalUser>(USER_STORE, "readonly", (store) => store.get(userId));

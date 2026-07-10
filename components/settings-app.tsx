@@ -29,6 +29,7 @@ import {
   DEFAULT_SEARCH_PAGE_SIZE,
   getCacheStats,
   getSettings,
+  pruneHtmlCache,
   resetSettings,
   subscribeToSearchChanges,
   updateSettings,
@@ -79,6 +80,7 @@ export function SettingsApp() {
   const [stats, setStats] = useState<CacheStats>({ count: 0, sizeBytes: 0 });
   const [collectionInfo, setCollectionInfo] = useState<CollectionCacheInfo>({ count: 0 });
   const [refreshingCollections, setRefreshingCollections] = useState(false);
+  const [pruning, setPruning] = useState(false);
   const [activeSection, setActiveSection] = useState<SectionId>(SECTIONS[0].id);
   const [flash, setFlash] = useState<{ id: number; text: string } | null>(null);
   const flashCounter = useRef(0);
@@ -192,6 +194,17 @@ export function SettingsApp() {
     await clearHtmlCache();
     showFlash("HTML cache cleared.");
     await refresh();
+  }
+
+  async function handlePruneCache() {
+    setPruning(true);
+    try {
+      await pruneHtmlCache(settings?.htmlCacheLimitBytes);
+      showFlash("Cache pruned to the current limit.");
+      await refresh();
+    } finally {
+      setPruning(false);
+    }
   }
 
   async function handleResetSettings() {
@@ -453,6 +466,17 @@ export function SettingsApp() {
                   <Stat label="Cached files" value={String(stats.count)} />
                   <Stat label="Size" value={formatStorageBytes(stats.sizeBytes)} />
                   <Stat label="Last used" value={stats.lastAccessedAt ? shortDate(stats.lastAccessedAt) : "Never"} />
+                </div>
+                <div className="mt-2 flex justify-end">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={pruning || stats.count === 0}
+                    onClick={() => void handlePruneCache()}
+                  >
+                    <Trash2 size={14} />
+                    {pruning ? "Pruning…" : "Prune now"}
+                  </Button>
                 </div>
               </div>
               <SettingRow label="Cache HTML" description="Keep fetched snapshots locally for instant reopening.">

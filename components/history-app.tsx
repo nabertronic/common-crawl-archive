@@ -33,18 +33,23 @@ import {
   listRecentHistorySummaries,
   normalizeScanUrl,
   scanSearchKey,
+  searchCachedHtml,
   subscribeToSearchChanges,
   type AppSettings,
+  type CachedHtmlSearchMatch,
   type HistorySummaryRecord
 } from "@/lib/capture-store";
 import {
   fetchCollections,
   filterCollectionsByDateRange,
   filterCollectionsByRecentMonths,
+  type CommonCrawlCapture,
   type CommonCrawlCollection
 } from "@/lib/common-crawl";
+import { createViewerHref } from "@/lib/navigation-state";
 import { markPerformance, measureAsync } from "@/lib/performance";
 import { computeCsv } from "@/lib/compute-client";
+import { toJsonText } from "@/lib/json-export";
 
 type ScanScope = "recent" | "all" | "custom";
 type ScanOutcome = "complete" | "partial" | "empty";
@@ -98,6 +103,7 @@ export function HistoryApp() {
   const [sortKey, setSortKey] = useState<SortKey>("updated");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const [exportFormat, setExportFormat] = useState<"csv" | "json">("csv");
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [page, setPage] = useState(1);
   const [cachedCountsByKey, setCachedCountsByKey] = useState<Record<string, number>>({});
@@ -399,6 +405,8 @@ export function HistoryApp() {
           </div>
         </header>
 
+        <CachedHtmlSearchPanel />
+
         <section className="archive-panel rounded-md p-4">
           <div className="flex flex-col gap-2 lg:flex-row">
             <label className="relative flex-1">
@@ -482,12 +490,29 @@ export function HistoryApp() {
               {selectedKeys.length > 0 ? (
                 <span className="text-xs text-zinc-500">{selectedKeys.length} selected</span>
               ) : null}
+              <div className="inline-flex overflow-hidden rounded-md border border-zinc-700" role="group" aria-label="Export format">
+                {(["csv", "json"] as const).map((format) => (
+                  <button
+                    key={format}
+                    type="button"
+                    aria-pressed={exportFormat === format}
+                    onClick={() => setExportFormat(format)}
+                    className={`h-8 px-2.5 text-[11px] font-semibold uppercase tracking-wide transition ${
+                      exportFormat === format
+                        ? "bg-amber-300/10 text-amber-200"
+                        : "bg-zinc-950 text-zinc-400 hover:text-zinc-200"
+                    }`}
+                  >
+                    {format}
+                  </button>
+                ))}
+              </div>
               <Button
                 type="button"
                 size="sm"
                 variant="secondary"
                 disabled={selectedRecords.length === 0}
-                onClick={() => void downloadCsv(selectedRecords, "selected")}
+                onClick={() => void downloadHistoryExport(selectedRecords, "selected", exportFormat)}
                 suppressHydrationWarning
               >
                 <Download size={14} />
@@ -499,7 +524,7 @@ export function HistoryApp() {
                   size="sm"
                   variant="secondary"
                   disabled={sortedRecords.length === 0}
-                  onClick={() => void downloadCsv(sortedRecords, "filtered")}
+                  onClick={() => void downloadHistoryExport(sortedRecords, "filtered", exportFormat)}
                   suppressHydrationWarning
                 >
                   <Download size={14} />
@@ -511,7 +536,7 @@ export function HistoryApp() {
                 size="sm"
                 variant="secondary"
                 disabled={records.length === 0}
-                onClick={() => void downloadCsv(records, "all")}
+                onClick={() => void downloadHistoryExport(records, "all", exportFormat)}
                 suppressHydrationWarning
               >
                 <Download size={14} />
@@ -1070,6 +1095,175 @@ function formatDateTime(timestamp: number) {
     dateStyle: "medium",
     timeStyle: "short"
   }).format(timestamp);
+}
+
+function viewerHrefForMatch(match: CachedHtmlSearchMatch): string {
+  const capture: CommonCrawlCapture = {
+    collectionId: match.collectionId ?? "",
+    collectionName: "",
+    collectionFrom: "",
+    collectionTo: "",
+    timestamp: match.timestamp ?? "",
+    url: match.url ?? "",
+    status: match.status ?? "",
+    mime: match.mime ?? "",
+    filename: match.filename,
+    offset: match.offset,
+    length: match.length
+  };
+  return createViewerHref(capture, {});
+}
+
+function formatMatchTimestamp(timestamp?: string): string {
+  if (!timestamp) return "";
+  const match = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(timestamp);
+  if (!match) return timestamp;
+  const [, y, mo, d, h, mi] = match;
+  return `${y}-${mo}-${d} ${h}:${mi}`;
+}
+
+/**
+ * Full-text search across locally cached HTML captures. Purely local: it scans
+ * the IndexedDB HTML cache, so results only include pages the user has opened or
+ * bulk-exported (and thus cached), never the live web.
+ */
+function CachedHtmlSearchPanel() {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<CachedHtmlSearchMatch[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [open, setOpen] = useState(false);
+  const lastQueryRef = useRef("");
+
+  const runSearch = useCallback(async () => {
+    const trimmed = query.trim();
+    lastQueryRef.current = trimmed;
+    if (!trimmed) {
+      setResults(null);
+      return;
+    }
+    setSearching(true);
+    try {
+      setResults(await searchCachedHtml(trimmed, { limit: 100 }));
+    } catch {
+      setResults([]);
+    } finally {
+      setSearching(false);
+    }
+  }, [query]);
+
+  return (
+    <section className="archive-panel rounded-md p-4">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 text-left text-xs font-bold uppercase tracking-[0.14em] text-zinc-200"
+      >
+        <Search size={14} />
+        Full-text search (cached pages)
+        {open ? <ChevronUp size={14} className="ml-auto" /> : <ChevronDown size={14} className="ml-auto" />}
+      </button>
+      {open ? (
+        <div className="mt-3">
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              void runSearch();
+            }}
+            className="flex flex-col gap-2 sm:flex-row"
+          >
+            <Input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Find text inside cached HTML…"
+              aria-label="Search cached HTML"
+              className="flex-1"
+            />
+            <Button type="submit" size="sm" disabled={searching || query.trim().length === 0}>
+              <Search size={14} />
+              {searching ? "Searching…" : "Search"}
+            </Button>
+          </form>
+          <p className="mt-2 text-[11px] text-zinc-500">
+            Only pages you have opened or exported are cached locally and searchable here.
+          </p>
+          {results !== null ? (
+            results.length === 0 ? (
+              <p className="mt-3 text-sm text-zinc-400">No cached pages match “{lastQueryRef.current}”.</p>
+            ) : (
+              <ul className="mt-3 flex flex-col gap-2">
+                {results.map((match) => (
+                  <li key={match.cacheKey}>
+                    <Link
+                      href={viewerHrefForMatch(match)}
+                      className="block rounded-md border border-zinc-800 bg-zinc-950 p-3 transition hover:border-zinc-600"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="truncate text-sm font-semibold text-amber-200">{match.url || "(unknown URL)"}</span>
+                        <span className="shrink-0 text-[11px] text-zinc-500">{formatMatchTimestamp(match.timestamp)}</span>
+                      </div>
+                      <p className="mt-1 line-clamp-2 text-xs text-zinc-400">
+                        {match.inUrl && !match.snippet ? "Matched in the URL." : match.snippet}
+                      </p>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+type HistoryExportMode = "all" | "filtered" | "selected";
+
+function historyExportRecord(record: HistoryRecord, mode: HistoryExportMode, exportedAt: string) {
+  return {
+    exportedAt,
+    mode,
+    key: record.key,
+    updatedAt: new Date(record.updatedAt).toISOString(),
+    url: record.url,
+    matchType: record.matchType,
+    scanScope: record.scanScope,
+    outcome: scanOutcome(record),
+    captures: record.captureCount,
+    checkedCollections: sourceCounts(record, []).processed,
+    failedCollections: failedCount(record),
+    storedCollections: record.collectionIds?.length ?? record.collections?.length ?? record.sourceTotal
+  };
+}
+
+function triggerDownload(blob: Blob, filename: string) {
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(objectUrl);
+}
+
+async function downloadHistoryExport(
+  records: HistoryRecord[],
+  mode: HistoryExportMode,
+  format: "csv" | "json"
+) {
+  const date = new Date().toISOString().slice(0, 10);
+  if (format === "json") {
+    const exportedAt = new Date().toISOString();
+    const json = toJsonText({
+      tool: "Crawlback",
+      exportedAt,
+      mode,
+      recordCount: records.length,
+      records: records.map((record) => historyExportRecord(record, mode, exportedAt))
+    });
+    triggerDownload(new Blob([json], { type: "application/json;charset=utf-8" }), `common-crawl-history-${mode}-${date}.json`);
+    return;
+  }
+  await downloadCsv(records, mode);
 }
 
 async function downloadCsv(records: HistoryRecord[], mode: "all" | "filtered" | "selected") {

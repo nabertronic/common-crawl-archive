@@ -132,7 +132,10 @@ function shouldRetryWarcStatus(status: number, body: string): boolean {
   return status === 429 || status === 503 || status === 504 || /SlowDown|Please reduce your request rate/i.test(body);
 }
 
-export async function fetchAndParseWarcRecord({
+// Range-fetches a single WARC record from Common Crawl with the shared
+// retry/backoff policy, returning the raw HTTP response. Both the parse path and
+// the raw-bytes (WARC export) path build on this so they stay consistent.
+async function fetchWarcRangeResponse({
   filename,
   offset,
   length,
@@ -148,7 +151,7 @@ export async function fetchAndParseWarcRecord({
   allowLarge?: boolean;
   retryCount?: number;
   signal?: AbortSignal;
-}): Promise<ParsedWarcRecord> {
+}): Promise<Response> {
   const numericLength = Number(length);
   if (!Number.isFinite(numericLength) || numericLength <= 0) {
     throw new Error("Invalid WARC length metadata.");
@@ -186,9 +189,40 @@ export async function fetchAndParseWarcRecord({
   if (!response || (!response.ok && response.status !== 206)) {
     throw new Error(`WARC range request returned HTTP ${response?.status ?? "unknown"}.`);
   }
+  return response;
+}
 
+export async function fetchAndParseWarcRecord(input: {
+  filename: string;
+  offset: string;
+  length: string;
+  largeCaptureLimitBytes?: number;
+  allowLarge?: boolean;
+  retryCount?: number;
+  signal?: AbortSignal;
+}): Promise<ParsedWarcRecord> {
+  const response = await fetchWarcRangeResponse(input);
   const decompressed = await decompressGzip(await response.blob());
   return parseWarcRecord(new TextDecoder("utf-8").decode(decompressed));
+}
+
+/**
+ * Fetch the raw, still-gzipped bytes of a single WARC record. Common Crawl
+ * stores each capture as an independently-gzipped WARC member, so these bytes
+ * are a valid gzip member on their own and multiple of them concatenate into a
+ * standards-compliant `.warc.gz` (replayable in pywb / ReplayWeb.page).
+ */
+export async function fetchRawWarcRecordBytes(input: {
+  filename: string;
+  offset: string;
+  length: string;
+  largeCaptureLimitBytes?: number;
+  allowLarge?: boolean;
+  retryCount?: number;
+  signal?: AbortSignal;
+}): Promise<Uint8Array> {
+  const response = await fetchWarcRangeResponse(input);
+  return new Uint8Array(await response.arrayBuffer());
 }
 
 export async function loadCaptureRecord({

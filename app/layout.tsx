@@ -3,6 +3,7 @@ import { headers } from "next/headers";
 import "./globals.css";
 import { APP_NAME } from "@/lib/app-meta";
 import { DevTools } from "@/components/dev/dev-tools";
+import { ServiceWorkerRegistrar } from "@/components/service-worker-registrar";
 
 export const metadata: Metadata = {
   title: APP_NAME,
@@ -20,6 +21,8 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
     <html lang="en" suppressHydrationWarning>
       <body>
         {children}
+        {/* Registers the background-scan service worker (production only). */}
+        <ServiceWorkerRegistrar />
         {/* Dev-only Performance overlay; its chunk is tree-shaken out of prod. */}
         <DevTools />
       </body>

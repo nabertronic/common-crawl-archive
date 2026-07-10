@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LARGE_CAPTURE_LIMIT_BYTES } from "@/lib/common-crawl";
-import { fetchAndParseWarcRecord, parseHeaderBlock, parseWarcRecord, sanitizeHtmlForPreview } from "@/lib/warc";
+import { fetchAndParseWarcRecord, fetchRawWarcRecordBytes, parseHeaderBlock, parseWarcRecord, sanitizeHtmlForPreview } from "@/lib/warc";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -120,6 +120,35 @@ describe("WARC parser", () => {
     ).rejects.toThrow("WARC range request returned HTTP 404");
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns the raw (still-gzipped) WARC bytes without decompressing", async () => {
+    const rawBytes = new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0x01, 0x02, 0x03]);
+    const fetchMock = vi.fn<typeof globalThis.fetch>(async () => new Response(rawBytes, { status: 206 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const bytes = await fetchRawWarcRecordBytes({
+      filename: "crawl-data/example.warc.gz",
+      offset: "10",
+      length: String(rawBytes.length)
+    });
+
+    expect(Array.from(bytes)).toEqual(Array.from(rawBytes));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks oversized raw WARC fetches unless allowLarge is set", async () => {
+    const fetchMock = vi.fn<typeof globalThis.fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      fetchRawWarcRecordBytes({
+        filename: "crawl-data/example.warc.gz",
+        offset: "0",
+        length: String(LARGE_CAPTURE_LIMIT_BYTES + 1)
+      })
+    ).rejects.toThrow("viewer safety limit");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("requests oversized WARC records when the caller explicitly allows them", async () => {
