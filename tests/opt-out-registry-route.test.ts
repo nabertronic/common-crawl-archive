@@ -36,6 +36,7 @@ describe("opt-out registry API route", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
     expect(response.headers.get("X-Opt-Out-Registry-Source")).toBe("live");
     expect(body).toMatchObject({
       sourceUpdatedAt: "2026 Jun 23",

@@ -16,10 +16,21 @@ vi.mock("node:https", () => {
   return { request, default: { request } };
 });
 
-import { GET } from "@/app/api/robots/route";
+import { POST } from "@/app/api/robots/route";
 import { resetRobotsRateLimitForTests } from "@/lib/robots-rate-limit";
 
 type Listener = (...args: unknown[]) => void;
+
+function requestFor(url?: string, headers: Record<string, string> = {}) {
+  return new Request("https://app.example/api/robots", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...headers
+    },
+    body: url ? JSON.stringify({ url }) : undefined
+  });
+}
 
 function fakeResponse(body: string, status = 200, headers: Record<string, string> = {}) {
   httpsRequestMock.mockImplementation((_options: unknown, callback: (res: unknown) => void) => {
@@ -58,7 +69,7 @@ describe("robots API route", () => {
   it("returns the evaluated CCBot robots status", async () => {
     fakeResponse("User-agent: CCBot\nDisallow: /private\n");
 
-    const response = await GET(new Request("https://app.example/api/robots?url=https%3A%2F%2Fexample.com%2Fprivate%2Fpage"));
+    const response = await POST(requestFor("https://example.com/private/page"));
     const body = await response.json();
 
     expect(response.status).toBe(200);
@@ -73,21 +84,21 @@ describe("robots API route", () => {
     });
   });
 
-  it("reports missing URL parameters as unavailable", async () => {
-    const response = await GET(new Request("https://app.example/api/robots"));
+  it("reports a missing URL body value as unavailable", async () => {
+    const response = await POST(requestFor());
     const body = await response.json();
 
     expect(response.status).toBe(400);
     expect(body).toMatchObject({
       status: "unavailable",
-      error: "Missing url query parameter."
+      error: "Missing url in JSON request body."
     });
   });
 
   it("refuses to fetch hosts that resolve to a private or reserved address", async () => {
     httpsRequestMock.mockReset();
 
-    const response = await GET(new Request("https://app.example/api/robots?url=https%3A%2F%2Finternal.example%2Fadmin"));
+    const response = await POST(requestFor("https://internal.example/admin"));
     const body = await response.json();
 
     expect(httpsRequestMock).not.toHaveBeenCalled();
@@ -99,7 +110,7 @@ describe("robots API route", () => {
   it("rejects non-http(s) schemes without issuing a request", async () => {
     httpsRequestMock.mockReset();
 
-    const response = await GET(new Request("https://app.example/api/robots?url=file%3A%2F%2F%2Fetc%2Fpasswd"));
+    const response = await POST(requestFor("file:///etc/passwd"));
     const body = await response.json();
 
     expect(httpsRequestMock).not.toHaveBeenCalled();
@@ -108,15 +119,12 @@ describe("robots API route", () => {
 
   it("rate limits repeated robots checks by client", async () => {
     fakeResponse("User-agent: CCBot\nAllow: /\n");
-    const request = () =>
-      new Request("https://app.example/api/robots?url=https%3A%2F%2Fexample.com%2F", {
-        headers: { "x-forwarded-for": "203.0.113.10" }
-      });
+    const request = () => requestFor("https://example.com/", { "x-forwarded-for": "203.0.113.10" });
 
     for (let index = 0; index < 30; index += 1) {
-      expect((await GET(request())).status).toBe(200);
+      expect((await POST(request())).status).toBe(200);
     }
-    const limited = await GET(request());
+    const limited = await POST(request());
     const body = await limited.json();
 
     expect(limited.status).toBe(429);

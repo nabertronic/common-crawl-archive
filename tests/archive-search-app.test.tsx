@@ -1460,7 +1460,7 @@ describe("ArchiveSearchApp", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-        if (url.includes("/api/robots?")) {
+        if (url === "/api/robots") {
           return Response.json({
             status: "blocked",
             robotsUrl: "https://blocked.example/robots.txt",
@@ -1494,7 +1494,7 @@ describe("ArchiveSearchApp", () => {
     };
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      if (url.includes("/api/robots?")) throw new Error("robots endpoint should not be called");
+      if (url === "/api/robots") throw new Error("robots endpoint should not be called");
       return new Response("", { status: 404 });
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -1508,7 +1508,7 @@ describe("ArchiveSearchApp", () => {
     // registry), but the target's robots.txt must never be contacted.
     const robotsCalls = fetchMock.mock.calls.filter(([input]) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      return url.includes("/api/robots?");
+      return url === "/api/robots";
     });
     expect(robotsCalls).toHaveLength(0);
     expect(screen.queryByRole("button", { name: /start scan anyway/i })).not.toBeInTheDocument();

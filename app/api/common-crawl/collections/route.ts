@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { auth } from "@clerk/nextjs/server";
 import { fetchCollections } from "@/lib/common-crawl";
 import { createRouteRateLimiter } from "@/lib/robots-rate-limit";
 
@@ -10,8 +11,13 @@ export const runtime = "nodejs";
 // to amplify traffic (and get our egress IP throttled by Common Crawl).
 const rateLimiter = createRouteRateLimiter({ windowMs: 60_000, maxRequests: 20 });
 
+export function resetCollectionsRateLimitForTests() {
+  rateLimiter.reset();
+}
+
 export async function GET(request: Request) {
-  const rateLimit = rateLimiter.check(request);
+  const { userId } = await auth.protect();
+  const rateLimit = rateLimiter.check(request, userId);
   if (!rateLimit.allowed) {
     return NextResponse.json(
       { error: "Too many source-list requests. Try again shortly." },

@@ -6,7 +6,8 @@ export type RateLimitResult = { allowed: true } | { allowed: false; retryAfterMs
 /**
  * Build a fixed-window, per-client rate limiter for an API route. Each limiter
  * owns its own bucket map so distinct routes cannot exhaust one another's
- * budget. Keyed by the client IP (proxy headers first, then "local").
+ * budget. Authenticated app routes use the Clerk user ID as their bucket;
+ * the IP remains a safe fallback for unauthenticated or infrastructure calls.
  */
 export function createRouteRateLimiter({
   windowMs = RATE_LIMIT_WINDOW_MS,
@@ -14,8 +15,8 @@ export function createRouteRateLimiter({
 }: { windowMs?: number; maxRequests?: number } = {}) {
   const buckets = new Map<string, { count: number; resetAt: number }>();
 
-  function check(request: Request, now = Date.now()): RateLimitResult {
-    const key = clientKey(request);
+  function check(request: Request, userId?: string | null, now = Date.now()): RateLimitResult {
+    const key = userId ? `user:${userId}` : `ip:${clientKey(request)}`;
     const bucket = buckets.get(key);
     if (!bucket || now >= bucket.resetAt) {
       buckets.set(key, { count: 1, resetAt: now + windowMs });
@@ -50,8 +51,12 @@ function clientKey(request: Request) {
 
 const robotsRouteRateLimiter = createRouteRateLimiter();
 
-export function checkRobotsRouteRateLimit(request: Request, now = Date.now()): RateLimitResult {
-  return robotsRouteRateLimiter.check(request, now);
+export function checkRobotsRouteRateLimit(
+  request: Request,
+  userId?: string | null,
+  now = Date.now()
+): RateLimitResult {
+  return robotsRouteRateLimiter.check(request, userId, now);
 }
 
 export function resetRobotsRateLimitForTests() {

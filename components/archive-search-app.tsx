@@ -153,6 +153,7 @@ type WarcDownloadState = {
   total: number;
   failed?: number;
   part?: number;
+  parts?: number;
   bytes?: number;
   error?: string;
 };
@@ -841,17 +842,14 @@ function htmlArchiveFilename(capture: CommonCrawlCapture, index: number) {
 const HTML_ZIP_WARNING_FILENAME = "0000_WARNING_READ-ME-FIRST.txt";
 const HTML_ZIP_MANIFEST_FILENAME = "0001_MANIFEST.csv";
 const HTML_ZIP_FAILED_FILENAME = "0002_FAILED.txt";
-const HTML_ZIP_WARN_CAPTURE_COUNT = 100;
-const HTML_ZIP_BATCH_CAPTURE_LIMIT = 500;
-const HTML_ZIP_BATCH_BYTES = 250 * 1024 * 1024;
-const HTML_ZIP_WARN_ESTIMATED_BYTES = 250 * 1024 * 1024;
-const HTML_ZIP_HARD_CAPTURE_LIMIT = 50_000;
-const HTML_ZIP_HARD_ESTIMATED_BYTES = 10 * 1024 * 1024 * 1024;
+// Both bulk download formats use the same browser-safety budget. There is no
+// fixed capture-count ceiling: the estimated compressed input is the hard cap.
+const BULK_EXPORT_WARN_CAPTURE_COUNT = 100;
+const BULK_EXPORT_BATCH_CAPTURE_LIMIT = 500;
+const BULK_EXPORT_BATCH_BYTES = 250 * 1024 * 1024;
+const BULK_EXPORT_WARN_ESTIMATED_BYTES = 250 * 1024 * 1024;
+const BULK_EXPORT_HARD_ESTIMATED_BYTES = 10 * 1024 * 1024 * 1024;
 const HTML_ZIP_DOWNLOAD_PAUSE_MS = 350;
-// WARC export: split into a new .warc.gz once a part passes this many raw bytes,
-// and refuse absurd batch sizes outright.
-const WARC_BATCH_BYTES = 500 * 1024 * 1024;
-const WARC_HARD_CAPTURE_LIMIT = 50_000;
 
 type HtmlZipPartEntry = { filename: string; content: string };
 type HtmlZipSuccess = {
@@ -982,22 +980,20 @@ function waitForBrowserDownload(ms: number): Promise<void> {
   return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
 }
 
-function htmlZipPlan(captures: CommonCrawlCapture[]) {
+function bulkExportPlan(captures: CommonCrawlCapture[]) {
   const estimatedBytes = captures.reduce((sum, capture) => sum + captureLengthBytes(capture), 0);
   const estimatedParts = Math.max(
     1,
-    Math.ceil(captures.length / HTML_ZIP_BATCH_CAPTURE_LIMIT),
-    estimatedBytes > 0 ? Math.ceil(estimatedBytes / HTML_ZIP_BATCH_BYTES) : 1
+    Math.ceil(captures.length / BULK_EXPORT_BATCH_CAPTURE_LIMIT),
+    estimatedBytes > 0 ? Math.ceil(estimatedBytes / BULK_EXPORT_BATCH_BYTES) : 1
   );
   return {
     estimatedBytes,
     estimatedParts,
-    tooLarge:
-      captures.length > HTML_ZIP_HARD_CAPTURE_LIMIT ||
-      estimatedBytes > HTML_ZIP_HARD_ESTIMATED_BYTES,
+    tooLarge: estimatedBytes > BULK_EXPORT_HARD_ESTIMATED_BYTES,
     needsConfirmation:
-      captures.length >= HTML_ZIP_WARN_CAPTURE_COUNT ||
-      estimatedBytes >= HTML_ZIP_WARN_ESTIMATED_BYTES ||
+      captures.length >= BULK_EXPORT_WARN_CAPTURE_COUNT ||
+      estimatedBytes >= BULK_EXPORT_WARN_ESTIMATED_BYTES ||
       estimatedParts > 1
   };
 }
@@ -1010,6 +1006,17 @@ function htmlZipConfirmationMessage(captures: CommonCrawlCapture[], estimatedByt
     `The export may be split into about ${estimatedParts} ZIP file${estimatedParts === 1 ? "" : "s"}.`,
     "",
     "Crawlback will read existing cached HTML, but newly fetched captures will not be added to the local HTML cache during this bulk export."
+  ].join("\n");
+}
+
+function warcExportConfirmationMessage(captures: CommonCrawlCapture[], estimatedBytes: number, estimatedParts: number) {
+  return [
+    `Export ${captures.length} WARC capture${captures.length === 1 ? "" : "s"}?`,
+    "",
+    `Estimated compressed WARC input: ${formatBytes(estimatedBytes)}.`,
+    `The export may be split into about ${estimatedParts} WARC file${estimatedParts === 1 ? "" : "s"}.`,
+    "",
+    "Crawlback downloads the original compressed WARC records directly from Common Crawl."
   ].join("\n");
 }
 
@@ -2690,8 +2697,14 @@ export function ArchiveSearchApp({
   }
 
   async function fetchRobotsStatusViaApi(url: string, signal: AbortSignal): Promise<RobotsCheckResult> {
-    const response = await fetch(`/api/robots?${new URLSearchParams({ url }).toString()}`, {
-      headers: { Accept: "application/json" },
+    const response = await fetch("/api/robots", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ url }),
+      referrerPolicy: "no-referrer",
       signal
     });
     const result = (await response.json()) as RobotsCheckResult;
@@ -2707,7 +2720,7 @@ export function ArchiveSearchApp({
 
   async function downloadHtmlZip(capturesToDownload: CommonCrawlCapture[]) {
     if (capturesToDownload.length === 0 || htmlZipDownload.active) return;
-    const plan = htmlZipPlan(capturesToDownload);
+    const plan = bulkExportPlan(capturesToDownload);
     if (plan.tooLarge) {
       const message = `HTML ZIP export is too large for one browser session (${capturesToDownload.length} captures, estimated ${formatBytes(plan.estimatedBytes)}). Narrow the filters and export in smaller batches.`;
       setHtmlZipDownload({
@@ -2817,7 +2830,7 @@ export function ArchiveSearchApp({
           const contentBytes = byteSize(loaded.record.html);
           if (
             partCaptureCount > 0 &&
-            (partCaptureCount >= HTML_ZIP_BATCH_CAPTURE_LIMIT || partBytes + contentBytes > HTML_ZIP_BATCH_BYTES)
+            (partCaptureCount >= BULK_EXPORT_BATCH_CAPTURE_LIMIT || partBytes + contentBytes > BULK_EXPORT_BATCH_BYTES)
           ) {
             await flushPart();
           }
@@ -2840,7 +2853,7 @@ export function ArchiveSearchApp({
             capture,
             error: error instanceof Error ? error.message : "Could not load this capture."
           });
-          if (partCaptureCount + failures.length >= HTML_ZIP_BATCH_CAPTURE_LIMIT) {
+          if (partCaptureCount + failures.length >= BULK_EXPORT_BATCH_CAPTURE_LIMIT) {
             await flushPart();
           }
         }
@@ -2895,22 +2908,39 @@ export function ArchiveSearchApp({
 
   async function downloadWarcArchive(capturesToDownload: CommonCrawlCapture[]) {
     if (capturesToDownload.length === 0 || warcDownload.active || htmlZipDownload.active) return;
-    if (capturesToDownload.length > WARC_HARD_CAPTURE_LIMIT) {
-      const message = `WARC export is too large for one browser session (${capturesToDownload.length} captures). Narrow the filters and export in smaller batches.`;
+    const plan = bulkExportPlan(capturesToDownload);
+    if (plan.tooLarge) {
+      const message = `WARC export is too large for one browser session (estimated ${formatBytes(plan.estimatedBytes)}). Narrow the filters and export in smaller batches.`;
       setWarcDownload({ active: false, completed: 0, total: capturesToDownload.length, error: message });
+      return;
+    }
+    if (
+      plan.needsConfirmation &&
+      !window.confirm(warcExportConfirmationMessage(capturesToDownload, plan.estimatedBytes, plan.estimatedParts))
+    ) {
       return;
     }
 
     const controller = new AbortController();
     warcAbortRef.current = controller;
-    setWarcDownload({ active: true, completed: 0, total: capturesToDownload.length, failed: 0, part: 1, bytes: 0 });
+    setWarcDownload({
+      active: true,
+      completed: 0,
+      total: capturesToDownload.length,
+      failed: 0,
+      part: 1,
+      parts: plan.estimatedParts,
+      bytes: 0
+    });
 
     let part = 1;
+    let parts = plan.estimatedParts;
     let completed = 0;
     let failed = 0;
     let exportedBytes = 0;
     let members: Uint8Array[] = [];
     let partBytes = 0;
+    let partCaptureCount = 0;
 
     // The total part count is only known once streaming finishes, so name each
     // part by its own number: a lone part stays un-suffixed, extra parts get a
@@ -2921,8 +2951,10 @@ export function ArchiveSearchApp({
       downloadBlob(new Blob([bytes], { type: "application/warc" }), warcExportFilename(part, part));
       await waitForBrowserDownload(HTML_ZIP_DOWNLOAD_PAUSE_MS);
       part += 1;
+      parts = Math.max(parts, part);
       members = [];
       partBytes = 0;
+      partCaptureCount = 0;
     };
 
     try {
@@ -2951,18 +2983,30 @@ export function ArchiveSearchApp({
                 signal: controller.signal
               });
 
-          if (partBytes > 0 && partBytes + bytes.length > WARC_BATCH_BYTES) {
+          if (
+            partCaptureCount > 0 &&
+            (partCaptureCount >= BULK_EXPORT_BATCH_CAPTURE_LIMIT || partBytes + bytes.length > BULK_EXPORT_BATCH_BYTES)
+          ) {
             await flushPart();
           }
           members.push(bytes);
           partBytes += bytes.length;
+          partCaptureCount += 1;
           exportedBytes += bytes.length;
         } catch (error) {
           if (controller.signal.aborted) throw error;
           failed += 1;
         }
         completed = index + 1;
-        setWarcDownload({ active: true, completed, total: capturesToDownload.length, failed, part, bytes: exportedBytes });
+        setWarcDownload({
+          active: true,
+          completed,
+          total: capturesToDownload.length,
+          failed,
+          part,
+          parts,
+          bytes: exportedBytes
+        });
       }
 
       await flushPart();
@@ -2972,6 +3016,7 @@ export function ArchiveSearchApp({
         total: capturesToDownload.length,
         failed,
         part: Math.max(1, part - 1),
+        parts: Math.max(1, part - 1),
         bytes: exportedBytes,
         error: failed > 0 ? `${failed} capture${failed === 1 ? "" : "s"} could not be exported.` : undefined
       });
@@ -3939,7 +3984,7 @@ export function ArchiveSearchApp({
                       className="justify-center"
                     >
                       <FileArchive size={14} />
-                      Download HTML ZIP{canExport ? ` (${exportCaptures.length})` : ""}
+                      Download HTML{canExport ? ` (${exportCaptures.length})` : ""}
                     </Button>
                   )}
                   {warcDownload.active ? (
@@ -3963,6 +4008,9 @@ export function ArchiveSearchApp({
                 {warcDownload.active ? (
                   <p className="mt-2 text-xs text-amber-200">
                     Exporting WARC {warcDownload.completed}/{warcDownload.total}
+                    {warcDownload.parts && warcDownload.parts > 1
+                      ? ` · Part ${warcDownload.part ?? 1}/${warcDownload.parts}`
+                      : ""}
                     {warcDownload.bytes ? ` · ${formatBytes(warcDownload.bytes)}` : ""}
                     {warcDownload.failed ? ` · ${warcDownload.failed} failed` : ""}
                   </p>
@@ -4112,7 +4160,7 @@ export function ArchiveSearchApp({
       {htmlZipWarningOpen ? (
         <HtmlPrivacyWarningDialog
           open={htmlZipWarningOpen}
-          actionLabel="Download HTML ZIP"
+          actionLabel="Download HTML"
           onCancel={() => setHtmlZipWarningOpen(false)}
           onContinue={({ dontShowAgain }) => {
             setHtmlZipWarningOpen(false);

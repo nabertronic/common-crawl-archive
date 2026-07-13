@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { ClerkProvider } from "@clerk/nextjs";
 import { headers } from "next/headers";
 import "./globals.css";
 import { APP_NAME } from "@/lib/app-meta";
@@ -7,8 +8,11 @@ import { ServiceWorkerRegistrar } from "@/components/service-worker-registrar";
 
 export const metadata: Metadata = {
   title: APP_NAME,
-  description:
-    "Search 100+ Common Crawl collections — 300B+ pages archived since 2008 — to find past versions of any URL. A fallback web archive for when the Wayback Machine comes up empty. Runs entirely in your browser."
+  description: "Private beta access for Crawlback.",
+  robots: {
+    index: false,
+    follow: false
+  }
 };
 
 export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
@@ -19,12 +23,18 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
   await headers();
   return (
     <html lang="en" suppressHydrationWarning>
+      <head>
+        <link rel="preconnect" href="https://clerk.linewise.app" crossOrigin="anonymous" />
+        <link rel="dns-prefetch" href="//clerk.linewise.app" />
+      </head>
       <body>
-        {children}
-        {/* Registers the background-scan service worker (production only). */}
-        <ServiceWorkerRegistrar />
-        {/* Dev-only Performance overlay; its chunk is tree-shaken out of prod. */}
-        <DevTools />
+        <ClerkProvider>
+          {children}
+          {/* Registers the background-scan service worker (production only). */}
+          <ServiceWorkerRegistrar />
+          {/* Dev-only Performance overlay; its chunk is tree-shaken out of prod. */}
+          <DevTools />
+        </ClerkProvider>
       </body>
     </html>
   );

@@ -1,3 +1,4 @@
+import { clerkMiddleware } from "@clerk/nextjs/server";
 import { NextResponse, type NextRequest } from "next/server";
 
 /**
@@ -13,7 +14,7 @@ import { NextResponse, type NextRequest } from "next/server";
  *    directly from the browser.
  *  - frame-src 'self' permits the sandboxed srcdoc capture preview iframe.
  */
-export function proxy(request: NextRequest) {
+function securityResponse(request: NextRequest) {
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
   const isProd = process.env.NODE_ENV === "production";
 
@@ -31,7 +32,7 @@ export function proxy(request: NextRequest) {
     // strict-dynamic script-src, only default-src, which is 'self').
     "worker-src 'self' blob:",
     "font-src 'self'",
-    "connect-src 'self' https://index.commoncrawl.org https://data.commoncrawl.org",
+    "connect-src 'self' https://index.commoncrawl.org https://data.commoncrawl.org https://clerk.linewise.app https://accounts.linewise.app",
     "frame-src 'self'",
     "upgrade-insecure-requests"
   ].join("; ");
@@ -45,16 +46,47 @@ export function proxy(request: NextRequest) {
   return response;
 }
 
+function isPublicAuthenticationPath(pathname: string) {
+  return pathname === "/sign-in" || pathname.startsWith("/sign-in/");
+}
+
+/**
+ * Clerk is the first gate for every document and API request. Protected pages
+ * and route handlers also call auth.protect() directly: this early check keeps
+ * signed-out visitors out of the app shell, while resource checks remain the
+ * non-bypassable authorization boundary.
+ */
+export const proxy = clerkMiddleware(
+  async (auth, request) => {
+    const pathname = request.nextUrl.pathname;
+
+    if (!isPublicAuthenticationPath(pathname)) {
+      const session = await auth();
+      if (!session.isAuthenticated) {
+        // Do not confirm which application endpoints exist to signed-out callers.
+        if (pathname.startsWith("/api/")) {
+          return new NextResponse(null, {
+            status: 404,
+            headers: {
+              "Cache-Control": "no-store",
+              "X-Robots-Tag": "noindex, nofollow"
+            }
+          });
+        }
+        return session.redirectToSignIn({ returnBackUrl: request.url });
+      }
+    }
+
+    return securityResponse(request);
+  }
+);
+
+export default proxy;
+
 export const config = {
   matcher: [
-    // Apply to all routes except API responses and static assets, which don't
-    // render HTML and don't need a nonce.
-    {
-      source: "/((?!api|_next/static|_next/image|favicon.ico).*)",
-      missing: [
-        { type: "header", key: "next-router-prefetch" },
-        { type: "header", key: "x-middleware-prefetch" }
-      ]
-    }
+    // Skip Next.js internals and static files, but always cover app APIs.
+    "/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)",
+    "/(api|trpc)(.*)"
   ]
 };

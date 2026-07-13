@@ -5,7 +5,7 @@ vi.mock("@/lib/common-crawl", () => ({
   fetchCollections: (...args: unknown[]) => fetchCollectionsMock(...args)
 }));
 
-import { GET } from "@/app/api/common-crawl/collections/route";
+import { GET, resetCollectionsRateLimitForTests } from "@/app/api/common-crawl/collections/route";
 
 const collections = [
   { id: "CC-MAIN-2026-26", name: "June 2026", cdxApi: "https://index.commoncrawl.org/CC-MAIN-2026-26-index", from: "2026-06-01", to: "2026-06-30" }
@@ -21,6 +21,7 @@ function requestFrom(ip: string, refresh = false): Request {
 describe("common-crawl collections API route", () => {
   beforeEach(() => {
     fetchCollectionsMock.mockReset();
+    resetCollectionsRateLimitForTests();
   });
 
   it("returns the collection list with a no-store cache header", async () => {

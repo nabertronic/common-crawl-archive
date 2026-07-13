@@ -33,6 +33,36 @@ pnpm build
 
 `pnpm build` creates a server-capable Next.js build. Deploy it on a runtime that supports Next.js route handlers.
 
+## Private beta deployment
+
+Crawlback is configured as an invite-only Clerk application. All app pages and
+route handlers require a valid Clerk session; `/sign-in` is the sole public app
+page. The app never renders a sign-up component.
+
+Before deploying, create a separate **Clerk Production** instance and complete
+these dashboard steps:
+
+1. In **Restrictions**, enable **Restricted mode**. Create every beta account
+   manually in Clerk; do not use the waitlist or public sign-up mode.
+2. Configure the beta domain (for example `beta.example.com`) as the only
+   production origin and redirect URL. Keep local development origins in the
+   development Clerk instance, not in the production instance.
+3. In Vercel, add the four values from `.env.example` to **Production** and
+   Preview as appropriate. The secret key belongs in Vercel only and must never
+   be committed. Use Clerk's verified `clerk.<domain>` CNAME for the Frontend
+   API rather than proxying authentication through the app.
+4. Protect Preview deployments with Vercel Authentication. Testers should use
+   the fixed beta domain and Clerk, not random Preview URLs. If the Vercel plan
+   includes Password Protection and an additional shared gate is wanted, enable
+   it for production as well.
+
+After each deploy, verify in an incognito browser that every page redirects to
+sign-in and that each `/api/*` endpoint returns a non-cacheable `404` without a
+session. Then sign in with one manually created Clerk account and repeat the
+three API checks. A public URL or JavaScript bundle cannot be made secret on the
+web; the security boundary is the authenticated server response, not obscurity
+of a path name.
+
 ## Opt-out Registry
 
 The Common Crawl opt-out registry is fetched live from the published Google Sheet and cached by the app. A bundled snapshot is also stored at `data/common-crawl-opt-out-registry-snapshot.csv` so the app can still answer opt-out checks if the sheet is temporarily unavailable.

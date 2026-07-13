@@ -1,14 +1,18 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { auth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 import { OPT_OUT_REGISTRY_CSV_URL, parseOptOutRegistryCsv } from "@/lib/opt-out-registry";
 
 export const dynamic = "force-dynamic";
 
-const ROUTE_CACHE_CONTROL = "public, max-age=3600, stale-while-revalidate=86400";
+// This endpoint is authenticated. Never allow a shared browser/CDN cache to
+// replay its response outside the user's Clerk session.
+const ROUTE_CACHE_CONTROL = "private, no-store";
 const SNAPSHOT_PATH = path.join(process.cwd(), "data", "common-crawl-opt-out-registry-snapshot.csv");
 
 export async function GET() {
+  await auth.protect();
   try {
     const response = await fetch(OPT_OUT_REGISTRY_CSV_URL, {
       headers: { Accept: "text/csv" },

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { auth } from "@clerk/nextjs/server";
 import { fetchRobotsStatus } from "@/lib/robots";
 import { checkRobotsRouteRateLimit } from "@/lib/robots-rate-limit";
 import { safeFetch } from "@/lib/safe-fetch";
@@ -6,8 +7,9 @@ import { safeFetch } from "@/lib/safe-fetch";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-export async function GET(request: Request) {
-  const rateLimit = checkRobotsRouteRateLimit(request);
+export async function POST(request: Request) {
+  const { userId } = await auth.protect();
+  const rateLimit = checkRobotsRouteRateLimit(request, userId);
   if (!rateLimit.allowed) {
     return NextResponse.json(
       {
@@ -26,14 +28,14 @@ export async function GET(request: Request) {
     );
   }
 
-  const url = new URL(request.url).searchParams.get("url")?.trim() ?? "";
+  const url = await requestTargetUrl(request);
 
   if (!url) {
     return NextResponse.json(
       {
         status: "unavailable",
         userAgent: "CCBot",
-        error: "Missing url query parameter.",
+        error: "Missing url in JSON request body.",
         checkedAt: Date.now()
       },
       { status: 400 }
@@ -46,4 +48,22 @@ export async function GET(request: Request) {
       "Cache-Control": "no-store"
     }
   });
+}
+
+async function requestTargetUrl(request: Request) {
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().startsWith("application/json")) return "";
+
+  try {
+    const body = await request.text();
+    // A target URL is small; reject oversized bodies before parsing to keep a
+    // public-facing server route from becoming an allocation sink.
+    if (body.length > 16_384) return "";
+    const parsed: unknown = JSON.parse(body);
+    return typeof parsed === "object" && parsed !== null && "url" in parsed && typeof parsed.url === "string"
+      ? parsed.url.trim()
+      : "";
+  } catch {
+    return "";
+  }
 }
