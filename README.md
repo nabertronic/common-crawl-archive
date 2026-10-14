@@ -2,7 +2,7 @@
 
 Find and open archived versions of web pages from Common Crawl, a fallback for when the Wayback Machine has no capture.
 
-Live site: https://crawlback.vercel.app
+Live site: https://crawlback.cc
 
 ## Features
 
@@ -24,7 +24,7 @@ Live site: https://crawlback.vercel.app
 - The robots.txt check and the opt-out registry lookup go through the Crawlback server. The robots.txt check sends your target URL to the target site's server, not your IP address.
 - The hosting provider processes standard request data to deliver the site.
 
-The full description is on the [privacy page](https://crawlback.vercel.app/privacy).
+The full description is on the [privacy page](https://crawlback.cc/privacy).
 
 ## How it works
 
