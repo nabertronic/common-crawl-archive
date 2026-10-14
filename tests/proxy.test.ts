@@ -26,7 +26,20 @@ describe("public CSP proxy", () => {
     expect(csp).toContain("connect-src 'self' https://index.commoncrawl.org https://data.commoncrawl.org");
     expect(csp).toContain("frame-src 'self'");
     expect(csp).toContain("worker-src 'self' blob:");
+    expect(csp).toContain("manifest-src 'self'");
     expect(csp).not.toMatch(/clerk|posthog/i);
+  });
+
+  it("sends Trusted Types as a separate report-only policy only", async () => {
+    const response = await proxyResponse(new NextRequest("https://app.test/"));
+    expect(response.headers.get("content-security-policy-report-only")).toBe("require-trusted-types-for 'script'");
+    expect(response.headers.get("content-security-policy")).not.toMatch(/trusted-types|require-trusted-types-for/i);
+  });
+
+  it("keeps exactly one enforcing CSP header", async () => {
+    const response = await proxyResponse(new NextRequest("https://app.test/"));
+    const enforcing = [...response.headers.entries()].filter(([name]) => name === "content-security-policy");
+    expect(enforcing).toHaveLength(1);
   });
 
   it("uses a nonce with strict-dynamic for scripts", async () => {

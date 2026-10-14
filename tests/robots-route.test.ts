@@ -47,6 +47,9 @@ function fakeResponse(body: string, status = 200, headers: Record<string, string
       on() {
         return req;
       },
+      setTimeout() {
+        return req;
+      },
       end() {
         callback(res);
         queueMicrotask(() => {
@@ -95,6 +98,32 @@ describe("robots API route", () => {
     });
   });
 
+  it("rejects truncated JSON bodies", async () => {
+    const request = new Request("https://app.example/api/robots", {
+      method: "POST", headers: { "content-type": "application/json" }, body: '{"url":"https://example.com'
+    });
+    const response = await POST(request);
+    expect(response.status).toBe(400);
+    expect(httpsRequestMock).not.toHaveBeenCalled();
+  });
+
+  it("stops reading a chunked JSON body as soon as it exceeds the byte limit", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(16_000));
+        controller.enqueue(new Uint8Array(1_000));
+        controller.close();
+      }
+    });
+    const request = new Request("https://app.example/api/robots", {
+      method: "POST", headers: { "content-type": "application/json" }, body,
+      duplex: "half"
+    } as RequestInit);
+    const response = await POST(request);
+    expect(response.status).toBe(400);
+    expect(httpsRequestMock).not.toHaveBeenCalled();
+  });
+
   it("refuses to fetch hosts that resolve to a private or reserved address", async () => {
     httpsRequestMock.mockReset();
 
@@ -115,6 +144,38 @@ describe("robots API route", () => {
 
     expect(httpsRequestMock).not.toHaveBeenCalled();
     expect(body).toMatchObject({ status: "unavailable" });
+  });
+
+  it("does not leak the remote HTTP status code to the client", async () => {
+    fakeResponse("", 500);
+
+    const response = await POST(requestFor("https://example.com/page"));
+    const body = await response.json();
+
+    expect(body).toMatchObject({
+      status: "unavailable",
+      error: "robots.txt could not be read from the target site."
+    });
+    expect(JSON.stringify(body)).not.toMatch(/500/);
+  });
+
+  it("rejects target URLs longer than 2048 characters", async () => {
+    httpsRequestMock.mockReset();
+
+    const response = await POST(requestFor(`https://example.com/${"a".repeat(2048)}`));
+
+    expect(response.status).toBe(400);
+    expect(httpsRequestMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-standard ports without issuing a request", async () => {
+    httpsRequestMock.mockReset();
+
+    const response = await POST(requestFor("https://example.com:8443/robots.txt"));
+    const body = await response.json();
+
+    expect(httpsRequestMock).not.toHaveBeenCalled();
+    expect(body).toMatchObject({ status: "unavailable", error: "Only standard web ports can be checked." });
   });
 
   it("rate limits repeated robots checks by client", async () => {

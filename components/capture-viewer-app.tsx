@@ -9,11 +9,18 @@ import {
   type CommonCrawlCapture,
   type MatchType
 } from "@/lib/common-crawl";
-import { loadCaptureRecord, sanitizeHtmlForPreview, type ParsedWarcRecord } from "@/lib/warc";
+import { loadCaptureRecord, type ParsedWarcRecord } from "@/lib/warc";
+import { buildCapturePreviewDocument } from "@/lib/capture-preview";
 import { markPerformance, measureAsync } from "@/lib/performance";
 import { cn, formatBytes } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { HtmlPrivacyWarningDialog } from "@/components/html-privacy-warning-dialog";
+import {
+  buildDownloadedHtml,
+  checkCaptureIntegrity,
+  formatCaptureTimestamp,
+  type CaptureIntegrity
+} from "@/lib/capture-integrity";
 import { createMockWarcRecord, isMockCaptureFilename } from "@/lib/mock-data";
 import { buildTabTitle, extractHtmlTitle } from "@/lib/app-meta";
 import { CaptureNavBar } from "@/components/capture-navbar";
@@ -94,7 +101,18 @@ export function CaptureViewerApp() {
   const [largeCaptureLimitBytes, setLargeCaptureLimitBytes] = useState(LARGE_CAPTURE_LIMIT_BYTES);
   const [captures, setCaptures] = useState<CommonCrawlCapture[]>([]);
   const [allowLargeLoad, setAllowLargeLoad] = useState(false);
+  const [showMismatchedPreview, setShowMismatchedPreview] = useState(false);
   const numericLength = Number(length);
+
+  // Compare the link's url/timestamp with the record's own WARC headers.
+  const integrity = useMemo<CaptureIntegrity | undefined>(
+    () =>
+      state.kind === "loaded"
+        ? checkCaptureIntegrity({ linkUrl: url, linkTimestamp: timestamp, warcHeaders: state.record.warcHeaders })
+        : undefined,
+    [state, timestamp, url]
+  );
+  const previewBlocked = integrity?.status === "mismatch" && !showMismatchedPreview;
 
   const sortedCaptures = useMemo(
     () => [...captures].sort((a, b) => a.timestamp.localeCompare(b.timestamp)),
@@ -164,6 +182,10 @@ export function CaptureViewerApp() {
   useEffect(() => {
     setAllowLargeLoad(false);
   }, [filename, offset, length, timestamp]);
+
+  useEffect(() => {
+    setShowMismatchedPreview(false);
+  }, [filename, offset, length, timestamp, url]);
 
   useEffect(() => {
     setState({ kind: "loading" });
@@ -281,7 +303,7 @@ export function CaptureViewerApp() {
   }, [captures, currentSortedIndex, navigateToCapture, sortedCaptures]);
 
   const sanitizedHtml = useMemo(
-    () => (state.kind === "loaded" ? sanitizeHtmlForPreview(state.record.html) : ""),
+    () => (state.kind === "loaded" ? buildCapturePreviewDocument(state.record.html) : ""),
     [state]
   );
 
@@ -299,7 +321,9 @@ export function CaptureViewerApp() {
 
   const downloadHtml = useCallback(() => {
     if (state.kind !== "loaded") return;
-    const blob = new Blob([state.record.html], { type: "text/html;charset=utf-8" });
+    // Downloaded HTML carries a CSP so opening it locally cannot run scripts or
+    // fetch remote assets. Copy HTML stays the raw archived markup.
+    const blob = new Blob([buildDownloadedHtml(state.record.html)], { type: "text/html;charset=utf-8" });
     const downloadUrl = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = downloadUrl;
@@ -413,7 +437,21 @@ export function CaptureViewerApp() {
                 </Button>
               </div>
             </div>
-            {activeTab === "preview" ? (
+            {integrity?.status === "mismatch" ? (
+              <IntegrityWarning
+                linkUrl={url}
+                linkTimestamp={timestamp}
+                integrity={integrity}
+                previewShown={!previewBlocked}
+                onShowAnyway={() => setShowMismatchedPreview(true)}
+              />
+            ) : null}
+            {activeTab === "preview" && previewBlocked ? (
+              <div className="grid min-h-0 flex-1 place-items-center bg-zinc-950 p-6 text-center text-sm text-zinc-500">
+                Preview hidden until you confirm this record is the one you expected.
+              </div>
+            ) : null}
+            {activeTab === "preview" && !previewBlocked ? (
               <div className="min-h-0 flex-1 bg-white">
                 <iframe
                   title="Sanitized capture preview"
@@ -449,6 +487,58 @@ export function CaptureViewerApp() {
         }}
       />
     </main>
+  );
+}
+
+function IntegrityWarning({
+  linkUrl,
+  linkTimestamp,
+  integrity,
+  previewShown,
+  onShowAnyway
+}: {
+  linkUrl: string;
+  linkTimestamp: string;
+  integrity: Extract<CaptureIntegrity, { status: "mismatch" }>;
+  previewShown: boolean;
+  onShowAnyway: () => void;
+}) {
+  const recordDate = integrity.recordDate || "missing";
+  return (
+    <section role="alert" className="m-3 rounded-md border border-red-400/40 bg-red-400/10 p-4 text-sm text-red-100">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex gap-3">
+          <ShieldAlert className="mt-1 shrink-0 text-red-300" size={22} />
+          <div className="space-y-2">
+            <h2 className="font-bold text-zinc-100">This link does not match the archived record</h2>
+            <p className="max-w-2xl text-xs leading-5 text-red-100/85">
+              The link says it shows a capture of {linkUrl || "an unknown URL"} from{" "}
+              {formatCaptureTimestamp(linkTimestamp)}. The archived record itself is different.
+            </p>
+            <dl className="grid gap-1 text-xs">
+              <div className="flex flex-wrap gap-x-2">
+                <dt className="font-bold text-zinc-300">Record URL:</dt>
+                <dd className="break-all">{integrity.recordUrl || "missing"}</dd>
+              </div>
+              <div className="flex flex-wrap gap-x-2">
+                <dt className="font-bold text-zinc-300">Record date:</dt>
+                <dd>{recordDate}</dd>
+              </div>
+            </dl>
+            {integrity.urlDiffersOnlyByVariant ? (
+              <p className="text-xs leading-5 text-red-100/75">
+                The URLs differ only by http/https or www., so this may be a harmless alias.
+              </p>
+            ) : null}
+          </div>
+        </div>
+        {previewShown ? null : (
+          <Button type="button" variant="secondary" size="sm" onClick={onShowAnyway} className="shrink-0 justify-center">
+            Show anyway
+          </Button>
+        )}
+      </div>
+    </section>
   );
 }
 

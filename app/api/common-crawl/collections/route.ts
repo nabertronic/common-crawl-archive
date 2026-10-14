@@ -9,9 +9,15 @@ export const runtime = "nodejs";
 // skips the cache. Bound how often a client can force those so it can't be used
 // to amplify traffic (and get our egress IP throttled by Common Crawl).
 const rateLimiter = createRouteRateLimiter({ windowMs: 60_000, maxRequests: 20 });
+const UPSTREAM_TIMEOUT_MS = 15_000;
+const COLLECTIONS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+let cachedCollections: { value: Awaited<ReturnType<typeof fetchCollections>>; expiresAt: number } | undefined;
+const collectionsRefreshes = new Map<boolean, Promise<Awaited<ReturnType<typeof fetchCollections>>>>();
 
 export function resetCollectionsRateLimitForTests() {
   rateLimiter.reset();
+  cachedCollections = undefined;
+  collectionsRefreshes.clear();
 }
 
 export async function GET(request: Request) {
@@ -31,18 +37,36 @@ export async function GET(request: Request) {
 
   const url = new URL(request.url);
   const forceRefresh = url.searchParams.get("refresh") === "1";
+  if (!forceRefresh && cachedCollections && cachedCollections.expiresAt > Date.now()) {
+    return NextResponse.json(cachedCollections.value, { headers: { "Cache-Control": "no-store" } });
+  }
 
   try {
-    const collections = await fetchCollections({ forceRefresh });
+    let refresh = collectionsRefreshes.get(forceRefresh);
+    if (!refresh) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+      refresh = fetchCollections({ forceRefresh, signal: controller.signal }).finally(() => clearTimeout(timeout));
+      collectionsRefreshes.set(forceRefresh, refresh);
+      void refresh.then(
+        (value) => {
+          if (collectionsRefreshes.get(forceRefresh) === refresh) collectionsRefreshes.delete(forceRefresh);
+          cachedCollections = { value, expiresAt: Date.now() + COLLECTIONS_CACHE_TTL_MS };
+        },
+        () => { if (collectionsRefreshes.get(forceRefresh) === refresh) collectionsRefreshes.delete(forceRefresh); }
+      );
+    }
+    const collections = await refresh;
     return NextResponse.json(collections, {
       headers: {
         "Cache-Control": "no-store"
       }
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Could not reach Common Crawl from this network";
+    // Log the real upstream error server-side only; never echo it to the client.
+    console.error("Common Crawl collections fetch failed", error);
     return NextResponse.json(
-      { error: message },
+      { error: "Could not reach Common Crawl from this network" },
       {
         status: 502,
         headers: {

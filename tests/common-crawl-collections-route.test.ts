@@ -31,22 +31,38 @@ describe("common-crawl collections API route", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     expect(await response.json()).toEqual(collections);
-    expect(fetchCollectionsMock).toHaveBeenCalledWith({ forceRefresh: false });
+    expect(fetchCollectionsMock).toHaveBeenCalledWith({ forceRefresh: false, signal: expect.any(AbortSignal) });
   });
 
   it("passes forceRefresh through when ?refresh=1 is set", async () => {
     fetchCollectionsMock.mockResolvedValue(collections);
 
+    await GET(requestFrom("203.0.113.21"));
     await GET(requestFrom("203.0.113.21", true));
-    expect(fetchCollectionsMock).toHaveBeenCalledWith({ forceRefresh: true });
+    expect(fetchCollectionsMock).toHaveBeenNthCalledWith(1, { forceRefresh: false, signal: expect.any(AbortSignal) });
+    expect(fetchCollectionsMock).toHaveBeenNthCalledWith(2, { forceRefresh: true, signal: expect.any(AbortSignal) });
   });
 
-  it("surfaces upstream failures as HTTP 502", async () => {
-    fetchCollectionsMock.mockRejectedValue(new Error("Could not reach Common Crawl from this network"));
+  it("serves normal requests from the server cache while allowing an explicit refresh", async () => {
+    fetchCollectionsMock.mockResolvedValue(collections);
+    await GET(requestFrom("203.0.113.25"));
+    await GET(requestFrom("203.0.113.25"));
+    expect(fetchCollectionsMock).toHaveBeenCalledTimes(1);
+    await GET(requestFrom("203.0.113.25", true));
+    expect(fetchCollectionsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns a generic 502 message and logs the real upstream error server-side", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const upstream = new Error("getaddrinfo ENOTFOUND internal-proxy.corp.example");
+    fetchCollectionsMock.mockRejectedValue(upstream);
 
     const response = await GET(requestFrom("203.0.113.22"));
     expect(response.status).toBe(502);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
     expect(await response.json()).toEqual({ error: "Could not reach Common Crawl from this network" });
+    expect(errorSpy).toHaveBeenCalledWith(expect.any(String), upstream);
+    errorSpy.mockRestore();
   });
 
   it("rate limits a client after the per-minute budget is exhausted", async () => {
@@ -61,7 +77,7 @@ describe("common-crawl collections API route", () => {
     expect(limited.status).toBe(429);
     expect(limited.headers.get("Retry-After")).toBeTruthy();
     expect(await limited.json()).toMatchObject({ error: expect.stringMatching(/too many/i) });
-    // The blocked request must not trigger another upstream fetch.
-    expect(fetchCollectionsMock).toHaveBeenCalledTimes(20);
+    // The route's in-memory cache collapses the successful upstream calls.
+    expect(fetchCollectionsMock).toHaveBeenCalledTimes(1);
   });
 });

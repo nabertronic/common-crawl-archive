@@ -2,6 +2,12 @@ export const COMMON_CRAWL_USER_AGENT = "CCBot";
 export const COMMON_CRAWL_USER_AGENT_STRING = "CCBot/2.0";
 const ROBOTS_TIMEOUT_MS = 12_000;
 
+// Work caps for hostile robots.txt files. Content past the byte cap is ignored,
+// over-long rule paths are dropped, and only the first MAX_RULES rules count.
+const MAX_ROBOTS_BYTES = 512 * 1024;
+const MAX_RULE_PATH_LENGTH = 2048;
+const MAX_RULES = 10_000;
+
 export type RobotsRule = {
   directive: "allow" | "disallow";
   path: string;
@@ -91,17 +97,19 @@ export async function fetchRobotsStatus(
       };
     }
 
+    // The remote status code is deliberately not echoed back: the client only
+    // learns that the file could not be read, not what the remote host answered.
     if (!response.ok) {
       return {
         status: "unavailable",
         robotsUrl: target.robotsUrl,
         userAgent: COMMON_CRAWL_USER_AGENT,
-        error: `robots.txt returned HTTP ${response.status}.`,
+        error: "robots.txt could not be read from the target site.",
         checkedAt: Date.now()
       };
     }
 
-    const parsed = parseRobotsTxt(await response.text());
+    const parsed = parseRobotsTxt(await readCappedText(response));
     return evaluateRobots(parsed, target.targetPath, target.robotsUrl, Date.now());
   } catch (error) {
     if (signal?.aborted) throw error;
@@ -115,10 +123,16 @@ export async function fetchRobotsStatus(
   }
 }
 
+async function readCappedText(response: Response): Promise<string> {
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  return new TextDecoder().decode(bytes.subarray(0, MAX_ROBOTS_BYTES));
+}
+
 export function parseRobotsTxt(text: string): ParsedRobots {
   const groups: RobotsGroup[] = [];
   let current: RobotsGroup | undefined;
   let sawRuleInCurrentGroup = false;
+  let ruleCount = 0;
 
   text.split(/\r?\n/).forEach((rawLine, index) => {
     const line = rawLine.replace(/#.*/, "").trim();
@@ -143,6 +157,8 @@ export function parseRobotsTxt(text: string): ParsedRobots {
 
     if (field === "allow" || field === "disallow") {
       sawRuleInCurrentGroup = true;
+      if (value.length > MAX_RULE_PATH_LENGTH || ruleCount >= MAX_RULES) return;
+      ruleCount += 1;
       current.rules.push({
         directive: field,
         path: value,
@@ -201,16 +217,35 @@ function strongestRule(rules: RobotsRule[], targetPath: string): RobotsRule | un
     })[0];
 }
 
+/**
+ * Matches a robots.txt path pattern (`*` wildcard, trailing `$` anchor) without
+ * a RegExp, so hostile patterns cannot cause catastrophic backtracking.
+ * Segments between wildcards are located greedily: taking the leftmost match
+ * for each middle segment is always safe, and the final segment is checked
+ * against the end of the path when anchored.
+ */
 function robotsPatternMatches(pattern: string, targetPath: string) {
   if (!pattern) return false;
   const anchoredToEnd = pattern.endsWith("$");
-  const body = anchoredToEnd ? pattern.slice(0, -1) : pattern;
-  const escaped = body
-    .split("*")
-    .map((part) => part.replace(/[|\\{}()[\]^$+?.]/g, "\\$&"))
-    .join(".*");
-  const regex = new RegExp(`^${escaped}${anchoredToEnd ? "$" : ""}`);
-  return regex.test(targetPath);
+  const segments = (anchoredToEnd ? pattern.slice(0, -1) : pattern).split("*");
+
+  const head = segments[0] ?? "";
+  if (!targetPath.startsWith(head)) return false;
+  if (segments.length === 1) return !anchoredToEnd || targetPath.length === head.length;
+
+  const tail = segments[segments.length - 1] ?? "";
+  let position = head.length;
+  for (let index = 1; index < segments.length - 1; index += 1) {
+    const segment = segments[index] ?? "";
+    const found = targetPath.indexOf(segment, position);
+    if (found === -1) return false;
+    position = found + segment.length;
+  }
+
+  if (anchoredToEnd) {
+    return targetPath.endsWith(tail) && targetPath.length - tail.length >= position;
+  }
+  return targetPath.indexOf(tail, position) !== -1;
 }
 
 function patternSpecificity(pattern: string) {

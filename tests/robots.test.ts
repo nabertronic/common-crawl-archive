@@ -54,6 +54,52 @@ Allow: /docs/public
     expect(result.matchedRule).toMatchObject({ directive: "allow", path: "/docs/public" });
   });
 
+  it("matches wildcard and end-anchored patterns without catastrophic backtracking", () => {
+    const parsed = parseRobotsTxt(`User-agent: CCBot\nDisallow: /${"*a".repeat(20)}b\n`);
+    const started = performance.now();
+    const result = evaluateRobots(parsed, `/${"a".repeat(5000)}`, "https://example.com/robots.txt", 1);
+    expect(performance.now() - started).toBeLessThan(100);
+    expect(result.status).toBe("allowed");
+  });
+
+  it("keeps wildcard and $ anchor semantics", () => {
+    const parsed = parseRobotsTxt(`
+User-agent: CCBot
+Disallow: /*.php$
+Disallow: /private*/data
+Disallow: /exact$
+`);
+    const blocked = (path: string) => evaluateRobots(parsed, path, "https://example.com/robots.txt", 1).status === "blocked";
+
+    expect(blocked("/index.php")).toBe(true);
+    expect(blocked("/index.php?x=1")).toBe(false);
+    expect(blocked("/private/a/data")).toBe(true);
+    expect(blocked("/private/data")).toBe(true);
+    expect(blocked("/privatedata")).toBe(false);
+    expect(blocked("/exact")).toBe(true);
+    expect(blocked("/exact/more")).toBe(false);
+  });
+
+  it("does not echo the remote HTTP status to the caller", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 503 })));
+
+    const result = await fetchRobotsStatus("https://example.com/page");
+    expect(result.status).toBe("unavailable");
+    if (result.status !== "unavailable") throw new Error("Expected unavailable");
+    expect(result.error).toBe("robots.txt could not be read from the target site.");
+    expect(result.error).not.toMatch(/503/);
+  });
+
+  it("ignores robots.txt content past the byte cap and over-long rules", async () => {
+    const padding = "# " + "x".repeat(1024) + "\n";
+    const body = "User-agent: CCBot\n" + padding.repeat(600) + "Disallow: /late\n";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status: 200 })));
+    await expect(fetchRobotsStatus("https://example.com/late")).resolves.toMatchObject({ status: "allowed" });
+
+    const longRule = parseRobotsTxt(`User-agent: CCBot\nDisallow: /${"a".repeat(3000)}\n`);
+    expect(longRule.groups[0]?.rules).toHaveLength(0);
+  });
+
   it("treats missing robots.txt as allow by default", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 404 })));
 

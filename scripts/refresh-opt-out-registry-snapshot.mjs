@@ -7,7 +7,8 @@ const url =
 const targetPath = path.join(process.cwd(), "data", "common-crawl-opt-out-registry-snapshot.csv");
 
 const response = await fetch(url, {
-  headers: { Accept: "text/csv" }
+  headers: { Accept: "text/csv" },
+  signal: AbortSignal.timeout(15_000)
 });
 
 if (!response.ok) {
@@ -15,6 +16,9 @@ if (!response.ok) {
 }
 
 const csv = await response.text();
+if (!csv.trim() || csv.length > 2 * 1024 * 1024 || /^\s*</.test(csv)) {
+  throw new Error("Opt-out registry returned an empty, oversized, or HTML response; snapshot was not replaced.");
+}
 await mkdir(path.dirname(targetPath), { recursive: true });
 await writeFile(targetPath, csv, "utf8");
 

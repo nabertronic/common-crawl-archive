@@ -377,8 +377,8 @@ export function HistoryApp() {
     <main className="min-h-screen px-4 py-5 text-zinc-100 md:px-8">
       <div className="mx-auto flex max-w-7xl flex-col gap-4" suppressHydrationWarning>
         <header className="archive-panel relative z-40 rounded-md p-4">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
               <Link
                 href="/"
                 aria-label="Start a new search"
@@ -388,7 +388,7 @@ export function HistoryApp() {
                 <BrandLockup className="translate-y-[1.5px]" wordClassName="text-xl leading-none" />
               </Link>
               <div className="min-w-0">
-                <h1 className="text-xl font-black uppercase leading-none tracking-[0.18em] text-zinc-50">
+                <h1 className="border-l border-zinc-700 pl-3 text-xl font-bold leading-none text-zinc-50">
                   Scan history
                 </h1>
               </div>
@@ -476,13 +476,13 @@ export function HistoryApp() {
 
         <section className="archive-panel rounded-md">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 p-4">
-            <label className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.12em] text-zinc-400">
+            <label className="inline-flex min-h-11 cursor-pointer items-center gap-2.5 text-xs font-semibold uppercase tracking-[0.08em] text-zinc-300">
               <input
                 type="checkbox"
                 checked={allVisibleSelected}
                 onChange={(event) => toggleVisibleSelection(event.target.checked)}
                 aria-label="Select visible history entries"
-                className="h-4 w-4 accent-amber-300"
+                className="h-5 w-5 cursor-pointer accent-amber-300"
               />
               Select visible
             </label>
@@ -694,7 +694,7 @@ function HistoryRow({
           checked={selected}
           onChange={(event) => onSelectedChange(record.key, event.target.checked)}
           aria-label={`Select saved scan for ${record.url}`}
-          className="h-4 w-4 accent-amber-300"
+          className="h-5 w-5 cursor-pointer accent-amber-300"
         />
       </label>
       <div className={HISTORY_STATUS_COL_CLASS}>
@@ -1152,19 +1152,19 @@ function CachedHtmlSearchPanel() {
   }, [query]);
 
   return (
-    <section className="archive-panel rounded-md p-4">
+    <section className="archive-panel rounded-md px-4 py-1">
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
-        className="flex w-full items-center gap-2 text-left text-xs font-bold uppercase tracking-[0.14em] text-zinc-200"
+        className="flex min-h-12 w-full items-center gap-2 text-left text-xs font-bold uppercase tracking-[0.1em] text-zinc-200 transition hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300"
       >
         <Search size={14} />
         Full-text search (cached pages)
         {open ? <ChevronUp size={14} className="ml-auto" /> : <ChevronDown size={14} className="ml-auto" />}
       </button>
       {open ? (
-        <div className="mt-3">
+        <div className="mt-1 pb-3">
           <form
             onSubmit={(event) => {
               event.preventDefault();

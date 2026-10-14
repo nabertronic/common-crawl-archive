@@ -116,6 +116,10 @@ summary:active {
 
 .history-col-select {
   grid-area: select;
+  display: grid;
+  min-height: 2.75rem;
+  place-items: center;
+  cursor: pointer;
 }
 
 .history-col-status {

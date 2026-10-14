@@ -30,6 +30,7 @@ function securityResponse(request: NextRequest) {
     // from a blob: URL, which worker-src must permit (it does not inherit the
     // strict-dynamic script-src, only default-src, which is 'self').
     "worker-src 'self' blob:",
+    "manifest-src 'self'",
     "font-src 'self'",
     "media-src 'self'",
     "connect-src 'self' https://index.commoncrawl.org https://data.commoncrawl.org",
@@ -43,6 +44,13 @@ function securityResponse(request: NextRequest) {
 
   const response = NextResponse.next({ request: { headers: requestHeaders } });
   response.headers.set("content-security-policy", csp);
+  // Trusted Types is report-only on purpose: React/Next DOM sinks have not been
+  // verified against it. Once a real browser shows zero violations on the
+  // prod build (see SECURITY.md §5), promote this to an enforcing
+  // Content-Security-Policy header and remove this report-only copy. Keep it
+  // the only Trusted Types directive; the enforcing CSP above stays the single
+  // enforcing policy.
+  response.headers.set("content-security-policy-report-only", "require-trusted-types-for 'script'");
   return response;
 }
 

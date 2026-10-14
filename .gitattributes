@@ -1,0 +1,2 @@
+# Keep the published registry's original CSV bytes, including CRLF and spaces.
+data/common-crawl-opt-out-registry-snapshot.csv -text whitespace=-blank-at-eol

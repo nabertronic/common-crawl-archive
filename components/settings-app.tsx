@@ -242,8 +242,8 @@ export function SettingsApp() {
     <main className="min-h-screen px-4 py-5 text-zinc-100 md:px-8">
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-4">
         <header className="archive-panel relative z-40 rounded-md p-4">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
               <Link
                 href="/"
                 aria-label="Start a new search"
@@ -253,7 +253,7 @@ export function SettingsApp() {
                 <BrandLockup className="translate-y-[1.5px]" wordClassName="text-xl leading-none" />
               </Link>
               <div className="min-w-0">
-                <h1 className="text-xl font-black uppercase leading-none tracking-[0.18em] text-zinc-50">Settings</h1>
+                <h1 className="border-l border-zinc-700 pl-3 text-xl font-bold leading-none text-zinc-50">Settings</h1>
               </div>
             </div>
             <div className="flex items-center justify-end">
@@ -724,11 +724,11 @@ function NumberField({
         onKeyDown={(event) => {
           if (event.key === "Enter") event.currentTarget.blur();
         }}
-        className={`h-10 w-full pr-14 text-right font-mono tabular-nums sm:w-36 ${
+        className={`h-11 w-full pr-[4.25rem] text-right font-mono tabular-nums sm:w-40 ${
           disabled ? "cursor-not-allowed opacity-50" : ""
         }`}
       />
-      <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold uppercase tracking-[0.14em] text-zinc-400">
+      <span className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-xs font-bold uppercase tracking-[0.06em] text-zinc-400">
         {unit}
       </span>
     </div>
@@ -751,13 +751,13 @@ function Switch({
       aria-checked={checked}
       aria-label={ariaLabel}
       onClick={() => onChange(!checked)}
-      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 ${
+      className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full border transition-colors duration-200 before:absolute before:-inset-2 before:content-[''] focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 ${
         checked ? "border-amber-300/70 bg-amber-300" : "border-zinc-700 bg-zinc-800"
       }`}
     >
       <span
-        className={`inline-block h-4 w-4 transform rounded-full transition ${
-          checked ? "translate-x-[22px] bg-zinc-950" : "translate-x-1 bg-zinc-400"
+        className={`inline-block h-5 w-5 transform rounded-full shadow-sm transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+          checked ? "translate-x-[23px] bg-zinc-950" : "translate-x-[3px] bg-zinc-300"
         }`}
       />
     </button>

@@ -150,7 +150,7 @@ vi.mock("@/lib/common-crawl", async () => {
 
 import { ArchiveSearchApp, mergePersistedScanLog, persistedSearchDurationMs, restoredCoverageDurationMs } from "@/components/archive-search-app";
 import { ensureScanSession, findOrCreateLegacySession, getCoverage, getScanSession, putSearch, startCoverageRun, upsertCoverageResult } from "@/lib/capture-store";
-import { queryCollection, resetCommonCrawlRateLimitState } from "@/lib/common-crawl";
+import { fetchCollections, queryCollection, resetCommonCrawlRateLimitState } from "@/lib/common-crawl";
 import { robotsCacheKey } from "@/lib/robots-cache";
 import { grantStorageConsent } from "@/lib/website-preferences";
 
@@ -488,6 +488,18 @@ describe("ArchiveSearchApp", () => {
     rerender(<ArchiveSearchApp initialParams={{ mock: "1", url: "second.example" }} />);
 
     await waitFor(() => expect(screen.getByLabelText("Scanned URL")).toHaveTextContent("https://second.example/"));
+  });
+
+  it("exits the initial searching state when loading collections fails", async () => {
+    vi.mocked(fetchCollections).mockRejectedValueOnce(
+      new Error("Could not reach Common Crawl from this network")
+    );
+
+    render(<ArchiveSearchApp autoStart initialParams={{ url: "example.org" }} />);
+
+    expect(await screen.findByText("Could not reach Common Crawl from this network")).toBeInTheDocument();
+    expect(screen.queryByText("Searching")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /try again/i })).toBeInTheDocument();
   });
 
   it("updates result filters when search route params change without a full reload", async () => {

@@ -26,8 +26,8 @@ export default function ImprintPage() {
           Information pursuant to Section 5 DDG
         </h2>
         <div className="mt-5">
-          <p className="font-mono text-sm text-zinc-100">Crawlback</p>
-          <p className="mt-1 text-sm text-zinc-400">Alexander Nabert</p>
+          <p className="text-base font-semibold text-zinc-50">Crawlback</p>
+          <p className="mt-1 text-base text-zinc-200">Alexander Nabert</p>
           <img
             src="/legal/address.png"
             width="111"
@@ -35,7 +35,7 @@ export default function ImprintPage() {
             alt="Postal address: c/o GAM, Pappelallee 64, 10437 Berlin"
             className="mt-3 block h-auto w-[111px] max-w-full"
           />
-          <p className="mt-2 font-mono text-xs text-zinc-500">Germany</p>
+          <p className="mt-2 text-base text-zinc-200">Germany</p>
         </div>
       </section>
 

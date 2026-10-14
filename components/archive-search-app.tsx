@@ -1910,10 +1910,10 @@ export function ArchiveSearchApp({
     }
   }
 
-  async function loadSessionById(scanId: string) {
+  async function loadSessionById(scanId: string, signal?: AbortSignal) {
     const session = await getScanSession(scanId);
     if (!session) return false;
-    const loadedCollections = collections.length > 0 ? collections : await fetchCollections();
+    const loadedCollections = collections.length > 0 ? collections : await fetchCollections(signal);
     applySessionIdentity(session);
     await applyCoverageToState(session, loadedCollections);
     return true;
@@ -3054,36 +3054,46 @@ export function ArchiveSearchApp({
   useEffect(() => {
     if (initialScanId && autoStartedSignatureRef.current !== autoStartSignature) {
       autoStartedSignatureRef.current = autoStartSignature;
+      const controller = new AbortController();
       void (async () => {
-        const loaded = await loadSessionById(initialScanId);
-        if (!loaded) {
-          setError("This scan session could not be found.");
-          setState("error");
-          return;
-        }
-        const session = await getScanSession(initialScanId);
-        if (!session || !initialAction) return;
-        if (initialAction === "fresh") {
-          resetCommonCrawlRateLimitState();
-          const loadedCollections = collections.length > 0 ? collections : await fetchCollections();
-          const coverage = await getCoverage(session.targetId);
-          if (hasStoredCoverageHistory(coverage)) {
-            if (!coverageHasPendingSessionWork(coverage, session, loadedCollections)) return;
-            await executeRunSearch("resume", {
-              session,
-              precheckedRobotsStatus: readCachedRobotsStatus(session.url) ?? robotsStatus,
-              reuseStoredPrerequisites: true
-            });
+        try {
+          const loaded = await loadSessionById(initialScanId, controller.signal);
+          if (controller.signal.aborted) return;
+          if (!loaded) {
+            setError("This scan session could not be found.");
+            setState("error");
             return;
           }
-          await executeRunSearch("fresh", { session });
-        } else if (initialAction === "retry-failed") {
-          await runSearch("retry-failed", { url: session.url, matchType: session.matchType, scope: session.scope });
-        } else if (initialAction === "missing") {
-          await runSearch("missing", { url: session.url, matchType: session.matchType, scope: session.scope });
+          const session = await getScanSession(initialScanId);
+          if (controller.signal.aborted || !session || !initialAction) return;
+          if (initialAction === "fresh") {
+            resetCommonCrawlRateLimitState();
+            const loadedCollections = collections.length > 0 ? collections : await fetchCollections(controller.signal);
+            if (controller.signal.aborted) return;
+            const coverage = await getCoverage(session.targetId);
+            if (controller.signal.aborted) return;
+            if (hasStoredCoverageHistory(coverage)) {
+              if (!coverageHasPendingSessionWork(coverage, session, loadedCollections)) return;
+              await executeRunSearch("resume", {
+                session,
+                precheckedRobotsStatus: readCachedRobotsStatus(session.url) ?? robotsStatus,
+                reuseStoredPrerequisites: true
+              });
+              return;
+            }
+            await executeRunSearch("fresh", { session });
+          } else if (initialAction === "retry-failed") {
+            await runSearch("retry-failed", { url: session.url, matchType: session.matchType, scope: session.scope });
+          } else if (initialAction === "missing") {
+            await runSearch("missing", { url: session.url, matchType: session.matchType, scope: session.scope });
+          }
+        } catch (loadError) {
+          if (controller.signal.aborted) return;
+          setError(loadError instanceof Error ? loadError.message : "Could not load this scan.");
+          setState("error");
         }
       })();
-      return;
+      return () => controller.abort();
     }
     if (initialMockMode && autoStartedSignatureRef.current !== autoStartSignature) {
       autoStartedSignatureRef.current = autoStartSignature;
@@ -3113,48 +3123,59 @@ export function ArchiveSearchApp({
     setPersistedScanScope(initialScanScope);
     setCustomDateFrom(initialDateFrom);
     setCustomDateTo(initialDateTo);
+    const controller = new AbortController();
     void (async () => {
-      const loadedCollections = collections.length > 0 ? collections : await fetchCollections();
-      const loadedSession = await loadStoredScan(
-        searchUrl,
-        nextMatchType,
-        initialScanScope,
-        initialDateFrom,
-        initialDateTo,
-        initialSavedKey,
-        loadedCollections
-      );
-      const loadedCoverage = await getCoverage(loadedSession.targetId);
-      const hasStoredCoverage = hasStoredCoverageHistory(loadedCoverage);
-      const shouldResumeStoredScan =
-        hasStoredCoverage && coverageHasPendingSessionWork(loadedCoverage, loadedSession, loadedCollections);
-      if (initialHistoryMode && !initialAction) return;
+      try {
+        const loadedCollections = collections.length > 0 ? collections : await fetchCollections(controller.signal);
+        if (controller.signal.aborted) return;
+        const loadedSession = await loadStoredScan(
+          searchUrl,
+          nextMatchType,
+          initialScanScope,
+          initialDateFrom,
+          initialDateTo,
+          initialSavedKey,
+          loadedCollections
+        );
+        if (controller.signal.aborted) return;
+        const loadedCoverage = await getCoverage(loadedSession.targetId);
+        if (controller.signal.aborted) return;
+        const hasStoredCoverage = hasStoredCoverageHistory(loadedCoverage);
+        const shouldResumeStoredScan =
+          hasStoredCoverage && coverageHasPendingSessionWork(loadedCoverage, loadedSession, loadedCollections);
+        if (initialHistoryMode && !initialAction) return;
 
-      if (initialAction === "retry-failed") {
-        await executeRunSearch("retry-failed", { session: loadedSession, reuseStoredPrerequisites: true });
-        return;
-      }
-      if (initialAction === "missing") {
-        await executeRunSearch("missing", { session: loadedSession, reuseStoredPrerequisites: true });
-        return;
-      }
-      if (shouldResumeStoredScan) {
-        await executeRunSearch("resume", {
-          session: loadedSession,
-          precheckedRobotsStatus: readCachedRobotsStatus(searchUrl) ?? robotsStatus,
-          reuseStoredPrerequisites: true
+        if (initialAction === "retry-failed") {
+          await executeRunSearch("retry-failed", { session: loadedSession, reuseStoredPrerequisites: true });
+          return;
+        }
+        if (initialAction === "missing") {
+          await executeRunSearch("missing", { session: loadedSession, reuseStoredPrerequisites: true });
+          return;
+        }
+        if (shouldResumeStoredScan) {
+          await executeRunSearch("resume", {
+            session: loadedSession,
+            precheckedRobotsStatus: readCachedRobotsStatus(searchUrl) ?? robotsStatus,
+            reuseStoredPrerequisites: true
+          });
+          return;
+        }
+        if (hasStoredCoverage) return;
+        await runSearch("fresh", {
+          url: searchUrl,
+          matchType: nextMatchType,
+          scope: initialScanScope,
+          dateFrom: initialDateFrom,
+          dateTo: initialDateTo
         });
-        return;
+      } catch (loadError) {
+        if (controller.signal.aborted) return;
+        setError(loadError instanceof Error ? loadError.message : "Could not start this search.");
+        setState("error");
       }
-      if (hasStoredCoverage) return;
-      await runSearch("fresh", {
-        url: searchUrl,
-        matchType: nextMatchType,
-        scope: initialScanScope,
-        dateFrom: initialDateFrom,
-        dateTo: initialDateTo
-      });
     })();
+    return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     autoStart,
@@ -3675,7 +3696,7 @@ export function ArchiveSearchApp({
         }
       >
         {hasStartedSearch ? <h1 className="sr-only">Crawlback scan results</h1> : null}
-        <header className={hasStartedSearch ? "archive-panel rounded-md p-4" : "w-full max-w-3xl p-0"}>
+        <header className={hasStartedSearch ? "archive-panel relative rounded-md p-4" : "w-full max-w-3xl p-0"}>
           <div className={hasStartedSearch ? "flex flex-col gap-4 lg:flex-row lg:items-end" : "flex flex-col gap-4"}>
             <div className="flex-1">
               <div className={hasStartedSearch ? "mb-3 flex items-center gap-3" : "mb-8 flex flex-col items-center gap-3 text-center"}>
@@ -3689,6 +3710,11 @@ export function ArchiveSearchApp({
                     >
                       <BrandLockup wordClassName="text-xl leading-none" />
                     </Link>
+                  </div>
+                ) : null}
+                {hasStartedSearch ? (
+                  <div className="ml-auto lg:absolute lg:right-4 lg:top-4">
+                    <TopRightMenu mode="inline" />
                   </div>
                 ) : null}
                 {hasStartedSearch ? null : (
@@ -3784,7 +3810,7 @@ export function ArchiveSearchApp({
             </div>
             {hasStartedSearch ? (
               <div className="flex flex-col items-end gap-2 lg:w-[420px]">
-                <TopRightMenu mode="inline" />
+                <div aria-hidden="true" className="hidden h-11 lg:block" />
                 <div className="flex min-h-11 w-full divide-x divide-zinc-800 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950/60 sm:h-11">
                   <Stat
                     label="Sources"
@@ -3818,7 +3844,7 @@ export function ArchiveSearchApp({
               <button
                 type="button"
                 aria-expanded={scanLogOpen}
-                className="inline-flex items-center gap-1 text-left font-semibold uppercase tracking-[0.12em] text-zinc-400 transition hover:text-zinc-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300"
+                className="-my-2 inline-flex min-h-10 items-center gap-1 text-left font-semibold uppercase tracking-[0.08em] text-zinc-300 transition hover:text-zinc-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300"
                 onClick={() => setScanLogOpen((current) => !current)}
               >
                 <ChevronDown

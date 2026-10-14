@@ -11,6 +11,9 @@ const MAX_REDIRECTS = 4;
 // tiny; 2 MiB is generous headroom. Bodies past the cap abort the request.
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 
+// Idle timeout on the socket. A target that stalls must not hold a worker open.
+const TARGET_TIMEOUT_MS = 10_000;
+
 /**
  * Raised when a request target is rejected by the SSRF guard. Callers can treat
  * the message as user-facing, it never contains resolved addresses.
@@ -34,6 +37,7 @@ const IPV4_BLOCKED_RANGES: Array<[string, number]> = [
   ["172.16.0.0", 12],
   ["192.0.0.0", 24],
   ["192.0.2.0", 24],
+  ["192.88.99.0", 24],
   ["192.168.0.0", 16],
   ["198.18.0.0", 15],
   ["198.51.100.0", 24],
@@ -66,15 +70,110 @@ function isBlockedIpv4(ip: string): boolean {
   });
 }
 
+type Bytes = number[];
+
+/**
+ * Parses an IPv6 literal into its 16 bytes. Handles `::` compression, an
+ * optional `%zone` suffix and an embedded dotted-quad tail. Returns null for
+ * anything malformed.
+ */
+function parseIpv6(input: string): Bytes | null {
+  let address = input.toLowerCase();
+  const zoneIndex = address.indexOf("%");
+  if (zoneIndex !== -1) address = address.slice(0, zoneIndex);
+  if (!address.includes(":")) return null;
+
+  const lastColon = address.lastIndexOf(":");
+  const tail = address.slice(lastColon + 1);
+  if (tail.includes(".")) {
+    const v4 = ipv4ToLong(tail);
+    if (v4 === null) return null;
+    const high = ((v4 >>> 16) & 0xffff).toString(16);
+    const low = (v4 & 0xffff).toString(16);
+    address = `${address.slice(0, lastColon + 1)}${high}:${low}`;
+  }
+
+  const halves = address.split("::");
+  if (halves.length > 2) return null;
+
+  const parseGroups = (part: string): number[] | null => {
+    if (part === "") return [];
+    const groups: number[] = [];
+    for (const group of part.split(":")) {
+      if (!/^[0-9a-f]{1,4}$/.test(group)) return null;
+      groups.push(parseInt(group, 16));
+    }
+    return groups;
+  };
+
+  let groups: number[] | null;
+  if (halves.length === 2) {
+    const head = parseGroups(halves[0] ?? "");
+    const rest = parseGroups(halves[1] ?? "");
+    if (!head || !rest) return null;
+    const fill = 8 - head.length - rest.length;
+    if (fill < 1) return null;
+    groups = [...head, ...new Array<number>(fill).fill(0), ...rest];
+  } else {
+    groups = parseGroups(address);
+  }
+  if (!groups || groups.length !== 8) return null;
+
+  const bytes: Bytes = [];
+  for (const group of groups) bytes.push(group >> 8, group & 0xff);
+  return bytes;
+}
+
+function cidr6(cidr: string): [Bytes, number] {
+  const [base, bits] = cidr.split("/");
+  const bytes = parseIpv6(base ?? "");
+  if (!bytes) throw new Error(`Invalid IPv6 CIDR in source: ${cidr}`);
+  return [bytes, Number(bits)];
+}
+
+function matchesPrefix(bytes: Bytes, base: Bytes, bits: number): boolean {
+  for (let bit = 0; bit < bits; bit += 1) {
+    const index = bit >> 3;
+    const mask = 0x80 >> (bit & 7);
+    if ((bytes[index]! & mask) !== (base[index]! & mask)) return false;
+  }
+  return true;
+}
+
+// IPv6 ranges that are never valid targets. Anything not listed here and not
+// caught by the embedded-IPv4 rules below is treated as public.
+const IPV6_BLOCKED_PREFIXES: Array<[Bytes, number]> = [
+  cidr6("::/128"), // unspecified
+  cidr6("::1/128"), // loopback
+  cidr6("100::/64"), // discard-only
+  cidr6("64:ff9b::/96"), // NAT64 well-known prefix (blocked outright)
+  cidr6("64:ff9b:1::/48"), // NAT64 local-use prefix (blocked outright)
+  cidr6("2001::/23"), // IETF protocol assignments, incl. Teredo 2001::/32
+  cidr6("2001:db8::/32"), // documentation
+  cidr6("fc00::/7"), // unique-local
+  cidr6("fe80::/10"), // link-local
+  cidr6("fec0::/10"), // deprecated site-local
+  cidr6("ff00::/8") // multicast
+];
+
+// Prefixes that embed an IPv4 address; the embedded address is checked with the
+// IPv4 table so e.g. ::ffff:169.254.169.254 is blocked wherever it is written.
+const IPV6_EMBEDDED_IPV4: Array<{ prefix: [Bytes, number]; offset: number }> = [
+  { prefix: cidr6("::ffff:0:0/96"), offset: 12 }, // IPv4-mapped
+  { prefix: cidr6("::/96"), offset: 12 }, // IPv4-compatible (deprecated)
+  { prefix: cidr6("2002::/16"), offset: 2 } // 6to4: IPv4 in bytes 2..5
+];
+
 function isBlockedIpv6(ip: string): boolean {
-  const normalized = ip.toLowerCase().split("%")[0];
-  const mapped = normalized.match(/^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-  if (mapped) return isBlockedIpv4(mapped[1]);
-  if (normalized === "::1" || normalized === "::") return true; // loopback / unspecified
-  if (/^fe[89ab]/.test(normalized)) return true; // fe80::/10 link-local
-  if (/^f[cd]/.test(normalized)) return true; // fc00::/7 unique-local
-  if (normalized.startsWith("ff")) return true; // ff00::/8 multicast
-  return false;
+  const bytes = parseIpv6(ip);
+  if (!bytes) return true; // unparseable is blocked
+
+  for (const { prefix: [base, bits], offset } of IPV6_EMBEDDED_IPV4) {
+    if (matchesPrefix(bytes, base, bits)) {
+      return isBlockedIpv4(bytes.slice(offset, offset + 4).join("."));
+    }
+  }
+  return IPV6_BLOCKED_PREFIXES.some(([base, bits]) => matchesPrefix(bytes, base, bits));
 }
 
 export function isBlockedAddress(address: string): boolean {
@@ -86,12 +185,19 @@ export function isBlockedAddress(address: string): boolean {
 
 /**
  * Resolve a target URL and return a single validated address to connect to.
- * Throws {@link SsrfError} for non-http(s) schemes, missing hosts, or any
- * hostname that resolves (wholly or partly) to a private/reserved address.
+ * Throws {@link SsrfError} for non-http(s) schemes, non-standard ports, missing
+ * hosts, or any hostname that resolves (wholly or partly) to a private/reserved
+ * address.
  */
 async function resolveAllowedTarget(url: URL): Promise<string> {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new SsrfError("Only http and https URLs can be checked.");
+  }
+
+  const defaultPort = url.protocol === "https:" ? 443 : 80;
+  const effectivePort = url.port === "" ? defaultPort : Number(url.port);
+  if (effectivePort !== defaultPort) {
+    throw new SsrfError("Only standard web ports can be checked.");
   }
 
   const hostname = url.hostname.replace(/^\[/, "").replace(/\]$/, "");
@@ -116,7 +222,7 @@ async function resolveAllowedTarget(url: URL): Promise<string> {
       throw new SsrfError("Target resolves to a private or reserved address.");
     }
   }
-  return resolved[0].address;
+  return resolved[0]!.address;
 }
 
 /** Network primitive used by {@link safeFetch}. Injectable for testing. */
@@ -140,7 +246,8 @@ function toAbortError(signal: AbortSignal): Error {
  * rebinding window — the address is validated *and* connected to, so a
  * second DNS answer cannot swap in an internal host between check and connect.
  * The Host header and TLS SNI keep the original hostname so certificates still
- * validate.
+ * validate. The promise always settles: size-cap, socket timeout, abort and
+ * transport errors all reject it.
  */
 function nodePinnedTransport(url: URL, pinnedIp: string, init: RequestInit): Promise<Response> {
   return new Promise<Response>((resolve, reject) => {
@@ -152,6 +259,15 @@ function nodePinnedTransport(url: URL, pinnedIp: string, init: RequestInit): Pro
       if (options && options.all) callback(null, [{ address: pinnedIp, family }]);
       else callback(null, pinnedIp, family);
     }) as unknown as RequestOptions["lookup"];
+
+    let settled = false;
+    let responded = false;
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      req.destroy();
+      reject(error);
+    };
 
     const req = requestImpl(
       {
@@ -165,17 +281,20 @@ function nodePinnedTransport(url: URL, pinnedIp: string, init: RequestInit): Pro
         lookup: pinnedLookup
       },
       (res) => {
+        responded = true;
         const chunks: Buffer[] = [];
         let received = 0;
         res.on("data", (chunk: Buffer) => {
           received += chunk.length;
           if (received > MAX_RESPONSE_BYTES) {
-            req.destroy(new SsrfError("Target response exceeded the size limit."));
+            fail(new SsrfError("Target response exceeded the size limit."));
             return;
           }
           chunks.push(chunk);
         });
         res.on("end", () => {
+          if (settled) return;
+          settled = true;
           const status = res.statusCode ?? 502;
           const headers = new Headers();
           for (const [key, value] of Object.entries(res.headers)) {
@@ -185,26 +304,33 @@ function nodePinnedTransport(url: URL, pinnedIp: string, init: RequestInit): Pro
           const nullBody = status === 204 || status === 205 || status === 304;
           resolve(new Response(nullBody ? null : Buffer.concat(chunks), { status, headers }));
         });
-        res.on("error", reject);
+        res.on("aborted", () => fail(new SsrfError("Target closed the connection early.")));
+        res.on("error", (error: Error) => fail(error));
       }
     );
 
+    req.setTimeout(TARGET_TIMEOUT_MS, () => fail(new SsrfError("Target did not respond in time.")));
+    req.on("error", (error: Error) => fail(error));
+    req.on("close", () => {
+      if (!responded) fail(new SsrfError("Target closed the connection early."));
+    });
+
     const signal = init.signal ?? undefined;
     if (signal) {
-      if (signal.aborted) req.destroy(toAbortError(signal));
-      else signal.addEventListener("abort", () => req.destroy(toAbortError(signal)), { once: true });
+      if (signal.aborted) fail(toAbortError(signal));
+      else signal.addEventListener("abort", () => fail(toAbortError(signal)), { once: true });
     }
 
-    req.on("error", reject);
     req.end();
   });
 }
 
 /**
  * fetch()-style helper that blocks SSRF. The scheme is restricted to http(s),
- * the host is DNS-resolved and validated against private/reserved ranges, the
- * connection is pinned to the validated address (anti DNS-rebinding), and
- * redirects are followed manually so every hop is re-validated.
+ * only the standard port (80/443) is allowed, the host is DNS-resolved and
+ * validated against private/reserved ranges, the connection is pinned to the
+ * validated address (anti DNS-rebinding), and redirects are followed manually
+ * so every hop is re-validated.
  */
 export async function safeFetch(
   input: string,

@@ -730,10 +730,14 @@ function shouldRetryCollectionError(errorKind: CollectionErrorKind) {
   );
 }
 
-function commonCrawlHost(input: RequestInfo | URL): string | undefined {
+// Exact host allowlist. A suffix match would also accept lookalikes such as
+// "evilcommoncrawl.org". Only these origins are paced/recognised as Common Crawl.
+const COMMON_CRAWL_HOSTS = new Set(["index.commoncrawl.org", "data.commoncrawl.org", "commoncrawl.org"]);
+
+export function commonCrawlHost(input: RequestInfo | URL): string | undefined {
   try {
     const url = typeof input === "string" || input instanceof URL ? new URL(input) : new URL(input.url);
-    if (url.hostname.endsWith("commoncrawl.org")) return url.hostname;
+    if (url.protocol === "https:" && COMMON_CRAWL_HOSTS.has(url.hostname)) return url.hostname;
   } catch {
     return undefined;
   }
@@ -1351,6 +1355,36 @@ function cdxCacheKey(
   )}`;
 }
 
+function isStoredCapture(value: unknown): value is CommonCrawlCapture {
+  if (!value || typeof value !== "object") return false;
+  const raw = value as Record<string, unknown>;
+  return (
+    typeof raw.collectionId === "string" &&
+    typeof raw.collectionName === "string" &&
+    typeof raw.collectionFrom === "string" &&
+    typeof raw.collectionTo === "string" &&
+    typeof raw.timestamp === "string" &&
+    typeof raw.url === "string" &&
+    typeof raw.status === "string" &&
+    typeof raw.mime === "string" &&
+    (raw.digest === undefined || typeof raw.digest === "string") &&
+    isSafeWarcFilename(raw.filename) &&
+    typeof raw.offset === "string" &&
+    typeof raw.length === "string" &&
+    (raw.redirect === undefined || typeof raw.redirect === "string")
+  );
+}
+
+function isStoredCdxResult(value: unknown): value is CollectionCheckResult {
+  if (!value || typeof value !== "object") return false;
+  const raw = value as Record<string, unknown>;
+  return (
+    raw.status === "checked" &&
+    Array.isArray(raw.captures) &&
+    raw.captures.every(isStoredCapture)
+  );
+}
+
 function readCachedCdxResult(
   targetUrl: string,
   collection: CommonCrawlCollection,
@@ -1359,10 +1393,19 @@ function readCachedCdxResult(
   dateWindow?: ScanDateWindow
 ): CollectionCheckResult | undefined {
   const record = readJsonStorage<CdxResultCacheRecord>(cdxCacheKey(targetUrl, collection, matchType, maxCaptures, dateWindow));
-  if (!record || record.version !== CACHE_VERSION || Date.now() - record.fetchedAt > CDX_RESULT_CACHE_TTL_MS) {
+  if (
+    !record ||
+    record.version !== CACHE_VERSION ||
+    typeof record.fetchedAt !== "number" ||
+    !Number.isFinite(record.fetchedAt) ||
+    Date.now() - record.fetchedAt > CDX_RESULT_CACHE_TTL_MS
+  ) {
     return undefined;
   }
   if (record.result?.status !== "checked") return undefined;
+  // localStorage is untrusted (SECURITY.md §6): drop the entry unless it has the
+  // expected shape. A later successful query overwrites it.
+  if (!isStoredCdxResult(record.result)) return undefined;
   return {
     ...record.result,
     collection,
@@ -1663,6 +1706,27 @@ function parseComparableUrl(value: string) {
   }
 }
 
+// Real CDX filenames look like "crawl-data/CC-MAIN-2024-10/segments/…/warc/….warc.gz".
+const WARC_FILENAME_PATTERN = /^crawl-data\/[A-Za-z0-9._\/-]+\.warc\.gz$/;
+// Mock captures use a local, non-network filename; they never reach the network.
+const MOCK_WARC_FILENAME_PREFIX = "mock/snapshot-search/";
+
+export function isSafeWarcFilename(filename: unknown): filename is string {
+  return (
+    typeof filename === "string" &&
+    WARC_FILENAME_PATTERN.test(filename) &&
+    !filename.split("/").includes("..")
+  );
+}
+
 export function warcRecordUrl(filename: string): string {
-  return new URL(filename, DATA_BASE_URL).toString();
+  // Mock captures are displayed and exported as their local filename; they have
+  // no Common Crawl record URL.
+  if (filename.startsWith(MOCK_WARC_FILENAME_PREFIX)) return filename;
+  if (!isSafeWarcFilename(filename)) throw new Error("Invalid WARC filename.");
+  const url = new URL(filename, DATA_BASE_URL);
+  if (url.protocol !== "https:" || url.hostname !== "data.commoncrawl.org") {
+    throw new Error("Invalid WARC filename.");
+  }
+  return url.toString();
 }

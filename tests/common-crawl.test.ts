@@ -5,6 +5,7 @@ import {
   buildCdxjUrl,
   buildRangeHeader,
   commonCrawlFetch,
+  commonCrawlHost,
   fetchCollections,
   filterCollectionsByRecentMonths,
   filterCollectionsByDateRange,
@@ -20,7 +21,8 @@ import {
   resultCoversWindow,
   searchCollections,
   searchUrlCoversTarget,
-  type CommonCrawlCollection
+  type CommonCrawlCollection,
+  warcRecordUrl
 } from "@/lib/common-crawl";
 import { grantStorageConsent } from "@/lib/website-preferences";
 
@@ -1230,3 +1232,95 @@ describe("Common Crawl client", () => {
     expect(stopReason).toBe("completed");
   });
 });
+
+describe("WARC record URLs", () => {
+  it("accepts real Common Crawl WARC filenames", () => {
+    expect(
+      warcRecordUrl(
+        "crawl-data/CC-MAIN-2024-10/segments/1707947473347.0/warc/CC-MAIN-20240221002544-20240221032544-00001.warc.gz"
+      )
+    ).toBe(
+      "https://data.commoncrawl.org/crawl-data/CC-MAIN-2024-10/segments/1707947473347.0/warc/CC-MAIN-20240221002544-20240221032544-00001.warc.gz"
+    );
+    expect(warcRecordUrl("crawl-data/test.warc.gz")).toBe("https://data.commoncrawl.org/crawl-data/test.warc.gz");
+  });
+
+  it.each([
+    "//evil.example/x",
+    "https://evil.example/x.warc.gz",
+    "crawl-data/../x.warc.gz",
+    "crawl-data/a/../../x.warc.gz",
+    "crawl-data/x.warc",
+    "crawl-data/x y.warc.gz",
+    "../crawl-data/x.warc.gz"
+  ])("rejects unsafe filename %s", (filename) => {
+    expect(() => warcRecordUrl(filename)).toThrow("Invalid WARC filename.");
+  });
+});
+
+describe("Common Crawl host allowlist", () => {
+  it("recognises only the exact Common Crawl hosts over https", () => {
+    expect(commonCrawlHost("https://index.commoncrawl.org/collinfo.json")).toBe("index.commoncrawl.org");
+    expect(commonCrawlHost("https://data.commoncrawl.org/crawl-data/x.warc.gz")).toBe("data.commoncrawl.org");
+    expect(commonCrawlHost("https://commoncrawl.org/")).toBe("commoncrawl.org");
+  });
+
+  it("does not treat lookalike hosts as Common Crawl", () => {
+    expect(commonCrawlHost("https://evilcommoncrawl.org/x")).toBeUndefined();
+    expect(commonCrawlHost("https://data.commoncrawl.org.evil.example/x")).toBeUndefined();
+    expect(commonCrawlHost("https://index.commoncrawl.org.evil.example/x")).toBeUndefined();
+  });
+
+  it("requires https for Common Crawl hosts", () => {
+    expect(commonCrawlHost("http://data.commoncrawl.org/x")).toBeUndefined();
+  });
+});
+
+describe("cached CDX results", () => {
+  it("ignores a cached result whose captures fail validation", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const requested = typeof input === "string" ? input : input.toString();
+      if (requested.includes("page=0")) {
+        return new Response(
+          JSON.stringify({
+            timestamp: "20260508112233",
+            url: "https://example.com/",
+            status: "200",
+            mime: "text/html",
+            filename: "crawl-data/test.warc.gz",
+            offset: "10",
+            length: "90"
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response("", { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await queryCollection("https://example.com/tamper", collection, undefined, 1000, 0, undefined, undefined, "host");
+
+    // Tamper with the stored cache entry the way a hostile localStorage edit could.
+    const storage = globalThis.localStorage;
+    let tampered = 0;
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (!key) continue;
+      const parsed = JSON.parse(storage.getItem(key) ?? "null") as { result?: { captures?: Array<Record<string, unknown>> } } | null;
+      const capture = parsed?.result?.captures?.[0];
+      if (!parsed || !capture) continue;
+      capture.filename = "//evil.example/x.warc.gz";
+      storage.setItem(key, JSON.stringify(parsed));
+      tampered += 1;
+    }
+    expect(tampered).toBe(1);
+
+    const callsBeforeSecond = fetchMock.mock.calls.length;
+    const second = await queryCollection("https://example.com/tamper", collection, undefined, 1000, 0, undefined, undefined, "host");
+
+    expect(second.fromCache).toBeUndefined();
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(callsBeforeSecond);
+    expect(second.captures.every((capture) => capture.filename === "crawl-data/test.warc.gz")).toBe(true);
+  });
+});
+

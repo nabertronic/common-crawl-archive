@@ -102,8 +102,9 @@ export function HtmlPrivacyWarningDialog({
 
         <div id="html-privacy-warning-description" className="space-y-3 px-5 py-4 text-sm leading-6 text-zinc-300">
           <p>
-            If you open that HTML in a browser, those external assets may be requested from their current hosts. Those
-            hosts can see your IP address and request details.
+            {actionLabel === "Download HTML"
+              ? "The downloaded file carries a content policy that blocks scripts and remote requests when you open it locally, so its external assets are not requested. Copied HTML has no such policy."
+              : "If you open that HTML in a browser, those external assets may be requested from their current hosts. Those hosts can see your IP address and request details."}
           </p>
           <p className="text-xs leading-5 text-zinc-500">
             For private review, open exported HTML offline or in an isolated browser profile.

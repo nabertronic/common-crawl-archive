@@ -37,6 +37,12 @@ function respondWithChunks(chunks: Buffer[], status = 200, headers: Record<strin
         (reqListeners[event] ??= []).push(cb);
         return req;
       },
+      // The pinned transport sets an idle socket timeout; record it so a test can fire it.
+      setTimeout(ms: number, cb: Listener) {
+        lastRequest.timeoutMs = ms;
+        lastRequest.onTimeout = cb;
+        return req;
+      },
       end() {
         callback(res);
         queueMicrotask(() => {
@@ -49,6 +55,7 @@ function respondWithChunks(chunks: Buffer[], status = 200, headers: Record<strin
       },
       destroy(err?: Error) {
         destroyed = true;
+        lastRequest.destroyed = true;
         if (err) reqListeners.error?.forEach((cb) => cb(err));
       }
     };
@@ -56,9 +63,20 @@ function respondWithChunks(chunks: Buffer[], status = 200, headers: Record<strin
   });
 }
 
+// State of the most recent fake request, so tests can inspect the socket timeout
+// and fire it the way node would after an idle period.
+const lastRequest: {
+  timeoutMs?: number;
+  onTimeout?: Listener;
+  destroyed: boolean;
+} = { destroyed: false };
+
 describe("safeFetch pinned node transport", () => {
   beforeEach(() => {
     httpsRequestMock.mockReset();
+    lastRequest.timeoutMs = undefined;
+    lastRequest.onTimeout = undefined;
+    lastRequest.destroyed = false;
   });
   afterEach(() => {
     vi.restoreAllMocks();
@@ -90,5 +108,40 @@ describe("safeFetch pinned node transport", () => {
     const response = await safeFetch("https://example.com/big");
     expect(response.status).toBe(200);
     expect((await response.arrayBuffer()).byteLength).toBe(2 * 1024 * 1024);
+  });
+
+  it("sets a 10 s socket timeout on the outgoing request", async () => {
+    respondWithChunks([Buffer.from("ok")]);
+
+    await safeFetch("https://example.com/robots.txt");
+
+    expect(lastRequest.timeoutMs).toBe(10_000);
+  });
+
+  it("rejects with an SsrfError and destroys the request when the socket times out", async () => {
+    // Stalled target: the request is sent but no response ever arrives.
+    httpsRequestMock.mockImplementation(() => ({
+      on() {
+        return this;
+      },
+      setTimeout(ms: number, cb: Listener) {
+        lastRequest.timeoutMs = ms;
+        lastRequest.onTimeout = cb;
+        return this;
+      },
+      end() {},
+      destroy() {
+        lastRequest.destroyed = true;
+      }
+    }));
+
+    const pending = safeFetch("https://example.com/stalled");
+    await vi.waitFor(() => expect(lastRequest.onTimeout).toBeTypeOf("function"));
+
+    lastRequest.onTimeout?.();
+
+    await expect(pending).rejects.toThrowError(SsrfError);
+    await expect(pending).rejects.toThrow(/did not respond in time/i);
+    expect(lastRequest.destroyed).toBe(true);
   });
 });
