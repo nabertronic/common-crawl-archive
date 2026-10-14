@@ -27,6 +27,11 @@ const nextConfig: NextConfig = {
       {
         source: "/:path*",
         headers: securityHeaders
+      },
+      {
+        // Legal notice pages are kept out of search indexes and archives.
+        source: "/:path(imprint|impressum)",
+        headers: [{ key: "X-Robots-Tag", value: "noindex, nofollow, noarchive, nosnippet, noimageindex" }]
       }
     ];
   }

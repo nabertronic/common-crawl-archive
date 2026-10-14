@@ -1071,7 +1071,7 @@ function searchHref(record: HistoryRecord, action?: "missing" | "retry-failed") 
   params.set("url", record.url);
   if (action) params.set("action", action);
   params.set("saved", (record.storageKeys ?? [record.key]).join(","));
-  if (record.scanScope === "all" || record.scanScope === "custom") params.set("scope", record.scanScope);
+  if (record.scanScope === "recent" || record.scanScope === "custom") params.set("scope", record.scanScope);
   if (record.dateFrom) params.set("from", record.dateFrom);
   if (record.dateTo) params.set("to", record.dateTo);
   params.set("history", "1");

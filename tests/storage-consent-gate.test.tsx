@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useEffect } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -60,6 +60,22 @@ describe("StorageConsentGate", () => {
     render(<><StorageConsentGate><p>Public privacy information</p></StorageConsentGate><WebsitePreferences /></>);
     expect(await screen.findByText("Public privacy information")).toBeInTheDocument();
     expect(hasStorageConsent()).toBe(false);
+  });
+
+  it("explains the storage choice on settings instead of an empty page and mounts settings after Allow", async () => {
+    navigation.pathname = "/settings";
+    const mounted = vi.fn();
+    function SettingsConsumer() { useEffect(() => mounted(), []); return <p>Settings controls</p>; }
+    render(<><StorageConsentGate><SettingsConsumer /></StorageConsentGate><WebsitePreferences /></>);
+    expect(await screen.findByRole("heading", { name: "App settings" })).toBeInTheDocument();
+    expect(screen.getByText("Available after you allow storage")).toBeInTheDocument();
+    expect(screen.queryByText("Settings controls")).not.toBeInTheDocument();
+    expect(mounted).not.toHaveBeenCalled();
+    const storage = screen.getByRole("region", { name: "Browser storage" });
+    expect(storage).toHaveTextContent("search history, scan results, cached pages, and settings");
+    fireEvent.click(within(storage).getByRole("button", { name: "Allow browser storage" }));
+    expect(await screen.findByText("Settings controls")).toBeInTheDocument();
+    expect(mounted).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the original centered home search and guide visible without mounting the app", async () => {

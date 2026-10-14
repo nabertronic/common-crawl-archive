@@ -27,6 +27,7 @@ export const DEFAULT_HTML_CACHE_LIMIT_BYTES = 500 * 1024 * 1024;
 export const DEFAULT_SEARCH_PAGE_SIZE = 100;
 export const DEFAULT_HISTORY_PAGE_SIZE = 25;
 export const DEFAULT_LARGE_CAPTURE_LIMIT_BYTES = 15 * 1024 * 1024;
+export const DEFAULT_SCAN_SCOPE: ScanScope = "all";
 
 export type AppViewMode = "list" | "calendar";
 export type AppCaptureColumnKey =
@@ -173,6 +174,8 @@ export type AppSettings = {
   robotsTxtChecksEnabled: boolean;
   defaultMatchType: MatchType;
   defaultScanScope: ScanScope;
+  /** True once the user picks a scope in settings; untouched records use DEFAULT_SCAN_SCOPE. */
+  defaultScanScopeChosen?: boolean;
   defaultCustomDateFrom?: string;
   defaultCustomDateTo?: string;
   defaultViewMode: AppViewMode;
@@ -1496,6 +1499,7 @@ export async function updateSettings(
     robotsTxtChecksEnabled: input.robotsTxtChecksEnabled ?? current.robotsTxtChecksEnabled ?? true,
     defaultMatchType: input.defaultMatchType ?? current.defaultMatchType,
     defaultScanScope: input.defaultScanScope ?? current.defaultScanScope,
+    defaultScanScopeChosen: input.defaultScanScope !== undefined ? true : current.defaultScanScopeChosen,
     defaultCustomDateFrom: input.defaultCustomDateFrom ?? current.defaultCustomDateFrom,
     defaultCustomDateTo: input.defaultCustomDateTo ?? current.defaultCustomDateTo,
     defaultViewMode: input.defaultViewMode ?? current.defaultViewMode,
@@ -1931,7 +1935,8 @@ function defaultSettings(activeUserId: string): AppSettings {
     showHtmlPrivacyWarning: true,
     robotsTxtChecksEnabled: true,
     defaultMatchType: "exact",
-    defaultScanScope: "recent",
+    defaultScanScope: DEFAULT_SCAN_SCOPE,
+    defaultScanScopeChosen: false,
     defaultViewMode: "list",
     defaultSort: DEFAULT_CAPTURE_SORT,
     searchPageSize: DEFAULT_SEARCH_PAGE_SIZE,
@@ -1942,8 +1947,9 @@ function defaultSettings(activeUserId: string): AppSettings {
   };
 }
 
-function normalizeSettings(settings: AppSettings): AppSettings {
-  const normalizedScope = normalizeScanScope(settings.defaultScanScope);
+export function normalizeSettings(settings: AppSettings): AppSettings {
+  const scanScopeChosen = settings.defaultScanScopeChosen === true;
+  const normalizedScope = normalizeScanScope(settings.defaultScanScope, scanScopeChosen);
   const normalizedDateFrom = normalizeDateSetting(settings.defaultCustomDateFrom);
   const normalizedDateTo = normalizeDateSetting(settings.defaultCustomDateTo);
   return {
@@ -1956,6 +1962,7 @@ function normalizeSettings(settings: AppSettings): AppSettings {
     robotsTxtChecksEnabled: settings.robotsTxtChecksEnabled ?? true,
     defaultMatchType: normalizeMatchType(settings.defaultMatchType),
     defaultScanScope: normalizedScope,
+    defaultScanScopeChosen: scanScopeChosen,
     defaultCustomDateFrom: normalizedScope === "custom" ? normalizedDateFrom : undefined,
     defaultCustomDateTo: normalizedScope === "custom" ? normalizedDateTo : undefined,
     defaultViewMode: settings.defaultViewMode === "calendar" ? "calendar" : "list",
@@ -1972,8 +1979,12 @@ function normalizeMatchType(value: unknown): MatchType {
   return value === "host" || value === "domain" || value === "exact" ? value : "exact";
 }
 
-function normalizeScanScope(value: unknown): ScanScope {
-  return value === "all" || value === "custom" || value === "recent" ? value : "recent";
+// "recent" was the old default, so it is only kept when the user explicitly chose it.
+// Records written before the choice was tracked never store that choice, so they get the current default.
+function normalizeScanScope(value: unknown, chosen: boolean): ScanScope {
+  if (value === "all" || value === "custom") return value;
+  if (value === "recent" && chosen) return "recent";
+  return DEFAULT_SCAN_SCOPE;
 }
 
 function normalizeDateSetting(value: unknown): string | undefined {

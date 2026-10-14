@@ -1622,7 +1622,7 @@ export function appendResultsBackContext(params: URLSearchParams, context: Resul
   if (context.url) params.set("back_url", context.url);
   if (context.match) params.set("back_match", context.match);
   if (context.mock) params.set("back_mock", context.mock);
-  if (context.scope === "all" || context.scope === "custom") params.set("back_scope", context.scope);
+  if (context.scope === "all" || context.scope === "recent" || context.scope === "custom") params.set("back_scope", context.scope);
   if (context.dateFrom) params.set("back_from", context.dateFrom);
   if (context.dateTo) params.set("back_to", context.dateTo);
   if (context.history === "1") params.set("back_history", context.history);
@@ -1642,7 +1642,8 @@ export function buildResultsBackHref(context: ResultsBackContext): string | null
   const params = new URLSearchParams();
   if (context.mock) params.set("mock", context.mock);
   if (context.match) params.set("match", context.match);
-  if (context.scope === "all" || context.scope === "custom") params.set("scope", context.scope);
+  // Full scan is the default, so only non-default scopes are written to the URL.
+  if (context.scope === "recent" || context.scope === "custom") params.set("scope", context.scope);
   if (context.dateFrom) params.set("from", context.dateFrom);
   if (context.dateTo) params.set("to", context.dateTo);
   if (context.history === "1") params.set("history", context.history);

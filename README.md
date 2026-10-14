@@ -7,7 +7,7 @@ A Next.js webapp for searching URLs, hosts, and domains across public Common Cra
 - Query Common Crawl from the user's browser with exact URL, host, or domain matching.
 - Check the current target site's `robots.txt` for Common Crawl's `CCBot` through the app server, avoiding browser CORS limits.
 - Check the Common Crawl opt-out registry and surface likely exclusions before or during a scan.
-- Search all collections returned by `https://index.commoncrawl.org/collinfo.json`.
+- Search all collections returned by `https://index.commoncrawl.org/collinfo.json`. A full scan is the default scope. The `scope` URL parameter is omitted for full scans, so `/search?url=...` runs a full scan; `scope=recent` (written explicitly) limits the search to recent collections, and `scope=custom` with `from`/`to` limits it to a date range.
 - Store scan history, coverage, settings, and optional cached HTML locally in IndexedDB.
 - Keep routes stable for future PastPage provider integration:
   - `/search?url=https://example.com/page`
@@ -50,12 +50,17 @@ API request limits, SSRF protection, and the sandboxed capture viewer remain act
 
 ## Privacy and legal information
 
-The interface and legal pages are in English. `/how-it-works` explains the
-research workflow; `/privacy` describes browser storage, search requests, and
-technical access data; `/terms` contains the terms of use; `/imprint` provides
-the operator's contact information and postal address as a local image.
-`/impressum` redirects to `/imprint`. The privacy notice describes Vercel
-hosting.
+The interface and legal pages are in English. The research workflow is explained
+on the landing page in the `How it works` section (`/#how-it-works`), and the
+questions are answered in the FAQ section (`/#faq`). The old `/how-it-works`
+path issues a permanent redirect to `/#how-it-works`. `/privacy` describes
+browser storage, search requests, and technical access data; `/terms` contains
+the terms of use; `/imprint` provides the operator's contact information and
+postal address as a local image. `/imprint` is marked `noindex, nofollow,
+noarchive, nosnippet, noimageindex` both in the page metadata and through an
+`X-Robots-Tag` response header, and it is excluded from `app/sitemap.ts`. Footer
+links to it use `rel="nofollow"`. `/impressum` redirects to `/imprint`. The
+privacy notice describes Vercel hosting.
 
 Crawlback's own code sets no cookies and uses no advertising or analytics
 tracking. Before app routes that use browser storage load, visitors can choose

@@ -21,10 +21,15 @@ const linkClass = "text-amber-300 underline decoration-amber-300/40 underline-of
 
 export default function TermsPage() {
   return (
-    <LegalPage title="Terms of use" eyebrow="Using Crawlback · Germany">
+    <LegalPage title="Terms of use" eyebrow="Using Crawlback">
+      <section className={sectionClass} aria-labelledby="terms-agreement">
+        <h2 id="terms-agreement" className={headingClass}>Agreement to these terms</h2>
+        <p><strong className="font-semibold text-zinc-50">By using Crawlback you agree to these terms.</strong> If you do not agree, do not use the service. This applies every time you use Crawlback, including when you only run a search or open a capture.</p>
+      </section>
+
       <section className={sectionClass} aria-labelledby="terms-scope">
         <h2 id="terms-scope" className={headingClass}>What Crawlback does</h2>
-        <p>Crawlback is a free, independent tool operated by Alexander Nabert. It helps you search Common Crawl’s public catalogs of archived pages and inspect matching copies in your browser. It is not operated by, sponsored by, or affiliated with the Internet Archive or Common Crawl Foundation. The operator’s details are in the <Link href="/imprint" className={linkClass}>legal notice</Link>.</p>
+        <p>Crawlback is a free, independent tool operated by Alexander Nabert. It helps you search Common Crawl’s public catalogs of archived pages and inspect matching copies in your browser. It is not operated by, sponsored by, or affiliated with the Internet Archive or Common Crawl Foundation. The operator’s details are in the <Link href="/imprint" rel="nofollow" className={linkClass}>legal notice</Link>.</p>
         <p>These terms explain the conditions for using Crawlback. They do not change rights that the law does not allow us to limit. Common Crawl and other third-party services have their own terms and policies.</p>
       </section>
 

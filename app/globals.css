@@ -614,20 +614,51 @@ summary:active {
   overflow: hidden;
 }
 
-.landing-faq-answer {
-  max-height: var(--answer-height);
+/* FAQ accordion: animate the row count (0fr -> 1fr) so the height is
+   measured by the browser, not by a stored pixel value. */
+.landing-faq-trigger {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.landing-faq-chevron {
+  transform-origin: center;
+  transition: transform 220ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+.landing-faq-trigger[aria-expanded="true"] .landing-faq-chevron {
+  transform: rotate(180deg);
+}
+
+.landing-faq-panel {
+  display: grid;
+  grid-template-rows: 0fr;
+  visibility: hidden;
+  transition:
+    grid-template-rows 240ms cubic-bezier(0.2, 0.7, 0.2, 1),
+    visibility 240ms;
+}
+
+.landing-faq-panel[data-open="true"] {
+  grid-template-rows: 1fr;
+  visibility: visible;
+}
+
+.landing-faq-panel__inner {
+  min-height: 0;
   overflow: hidden;
+}
+
+.landing-faq-panel__inner > p {
   opacity: 0;
   transform: translateY(-0.25rem);
   transition:
-    max-height 280ms cubic-bezier(0.2, 0.7, 0.2, 1),
-    opacity 220ms ease,
-    transform 220ms ease;
+    opacity 180ms ease,
+    transform 240ms cubic-bezier(0.2, 0.7, 0.2, 1);
 }
 
-.landing-faq-item[open] .landing-faq-answer {
+.landing-faq-panel[data-open="true"] .landing-faq-panel__inner > p {
   opacity: 1;
-  transform: translateY(0);
+  transform: none;
 }
 
 /* Scroll-triggered reveal for below-fold landing sections. */
@@ -773,7 +804,9 @@ html {
   .landing-mini-header,
   .landing-glow-card,
   .landing-glow-card::before,
-  .landing-faq-answer {
+  .landing-faq-chevron,
+  .landing-faq-panel,
+  .landing-faq-panel__inner > p {
     transition: none;
   }
   .landing-scroll-top {

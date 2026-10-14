@@ -11,7 +11,10 @@ export const metadata: Metadata = {
     url: "/imprint",
     siteName: "Crawlback",
     type: "website"
-  }
+  },
+  // Mirrors the reference site's legal notice: kept out of search indexes and
+  // archives. It stays out of the sitemap and robots.txt, and footer links use nofollow.
+  robots: { index: false, follow: false, noarchive: true, nosnippet: true, noimageindex: true }
 };
 
 const sectionClass = "py-8 sm:py-9";
@@ -20,10 +23,10 @@ const textClass = "mt-3 max-w-2xl text-base leading-7 text-zinc-300";
 
 export default function ImprintPage() {
   return (
-    <LegalPage title="Legal notice" eyebrow="Imprint · Germany">
+    <LegalPage title="Legal notice" eyebrow="Provider information">
       <section className={sectionClass} aria-labelledby="provider-heading">
         <h2 id="provider-heading" className={headingClass}>
-          Information pursuant to Section 5 DDG
+          Information pursuant to Section 5 DDG (Germany)
         </h2>
         <div className="mt-5">
           <p className="text-base font-semibold text-zinc-50">Crawlback</p>

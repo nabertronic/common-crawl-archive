@@ -90,6 +90,7 @@ import {
   ensureTarget,
   findOrCreateLegacySession,
   DEFAULT_CAPTURE_EXPORT_COLUMNS,
+  DEFAULT_SCAN_SCOPE,
   DEFAULT_SEARCH_PAGE_SIZE,
   getCoverage,
   getSettings,
@@ -340,9 +341,10 @@ function normalizeInitialMatchType(value: string | null): MatchType | undefined 
   return undefined;
 }
 
+// Missing or unknown scope means full scan; "recent" is only used when written explicitly.
 function normalizeInitialScanScope(value: string | null): ScanScope {
-  if (value === "all" || value === "custom") return value;
-  return "recent";
+  if (value === "recent" || value === "custom") return value;
+  return "all";
 }
 
 function normalizeDateInput(value: string | null | undefined): string {
@@ -1629,7 +1631,7 @@ export function ArchiveSearchApp({
     if (autoStart || initialUrl) return;
     const input = targetUrlInputRef.current;
     if (input && document.activeElement === input && input.value.trim()) return;
-    const defaultScope = appSettings?.defaultScanScope ?? "recent";
+    const defaultScope = appSettings?.defaultScanScope ?? DEFAULT_SCAN_SCOPE;
     abortRef.current?.abort();
     setTargetUrl("");
     setMatchType(appSettings?.defaultMatchType ?? DEFAULT_MATCH_TYPE);

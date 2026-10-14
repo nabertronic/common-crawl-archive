@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 
-export default function ImpressumAliasPage() {
+// Legacy German path kept as a redirect so old links still reach /imprint.
+export default function LegacyImprintRedirectPage() {
   redirect("/imprint");
 }

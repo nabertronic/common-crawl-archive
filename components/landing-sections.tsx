@@ -1,26 +1,7 @@
 "use client";
 
-import {
-  useEffect,
-  useId,
-  useRef,
-  useState,
-  type ComponentType,
-  type CSSProperties,
-  type PointerEvent,
-  type ReactNode
-} from "react";
-import {
-  Archive,
-  ChevronDown,
-  Download,
-  Eye,
-  FileSearch,
-  HardDrive,
-  Radar,
-  Terminal
-} from "lucide-react";
-import Link from "next/link";
+import { useId, useEffect, useRef, useState, type ComponentType, type PointerEvent, type ReactNode } from "react";
+import { Archive, ChevronDown, Download, Eye, FileSearch, HardDrive, Radar, Terminal } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { BrandWordmark } from "@/components/brand";
 import { TopRightMenu } from "@/components/top-right-menu";
@@ -126,10 +107,7 @@ function LandingMiniHeader() {
   }, []);
 
   return (
-    <nav
-      aria-label="Landing sections"
-      className={cn("landing-mini-header", visible && "is-visible")}
-    >
+    <nav aria-label="Landing sections" className={cn("landing-mini-header", visible && "is-visible")}>
       <a className="landing-mini-header__brand" href="#top" aria-label="Start scan">
         <BrandWordmark className="text-base leading-none" />
       </a>
@@ -152,13 +130,7 @@ function LandingMiniHeader() {
   );
 }
 
-function GlowPanel({
-  children,
-  className = ""
-}: {
-  children: ReactNode;
-  className?: string;
-}) {
+function GlowPanel({ children, className = "" }: { children: ReactNode; className?: string }) {
   const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
     if (event.pointerType === "touch") return;
     const rect = event.currentTarget.getBoundingClientRect();
@@ -169,10 +141,7 @@ function GlowPanel({
   };
 
   return (
-    <div
-      className={cn("archive-panel landing-glow-card rounded-md", className)}
-      onPointerMove={handlePointerMove}
-    >
+    <div className={cn("archive-panel landing-glow-card rounded-md", className)} onPointerMove={handlePointerMove}>
       {children}
     </div>
   );
@@ -190,19 +159,19 @@ const HOW_IT_WORKS_STEPS: StepCard[] = [
     number: "01",
     icon: Terminal,
     title: "Enter a URL",
-    body: "Paste in a page or website address to start your search."
+    body: "Paste a page address to search for that page, or a site address to search more broadly."
   },
   {
     number: "02",
     icon: Radar,
     title: "Scan the archive",
-    body: "Crawlback looks for saved versions of that page."
+    body: "Crawlback checks Common Crawl's index for saved versions, with their capture dates. An empty result does not prove a page never existed."
   },
   {
     number: "03",
     icon: FileSearch,
     title: "View snapshots",
-    body: "Open matching snapshots and save the results if you want."
+    body: "Open matching snapshots, check them against other sources, and save the results if you want."
   }
 ];
 
@@ -211,18 +180,20 @@ function HowItWorksSection() {
     <section id="how-it-works" aria-labelledby="how-it-works-title" className="scroll-mt-28">
       <Reveal>
         <SectionHeading label="How it works" title="Three steps to a lost page" titleId="how-it-works-title" />
-        <div className="mt-6 grid gap-3 sm:grid-cols-3">
+        <ol className="mt-6 grid list-none gap-3 p-0 sm:grid-cols-3">
           {HOW_IT_WORKS_STEPS.map((step) => (
-            <GlowPanel key={step.number} className="p-5">
-              <div className="flex items-center justify-between">
-                <span className="font-mono text-sm font-bold text-amber-300">{step.number}</span>
-                <step.icon size={18} aria-hidden="true" className="text-zinc-400" />
-              </div>
-              <h3 className="mt-3 text-base font-bold text-zinc-50">{step.title}</h3>
-              <p className="mt-1.5 text-[0.9375rem] leading-relaxed text-zinc-300">{step.body}</p>
-            </GlowPanel>
+            <li key={step.number}>
+              <GlowPanel className="h-full p-5">
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-sm font-bold text-amber-300">{step.number}</span>
+                  <step.icon size={18} aria-hidden="true" className="text-zinc-400" />
+                </div>
+                <h3 className="mt-3 text-base font-bold text-zinc-50">{step.title}</h3>
+                <p className="mt-1.5 text-[0.9375rem] leading-relaxed text-zinc-300">{step.body}</p>
+              </GlowPanel>
+            </li>
           ))}
-        </div>
+        </ol>
       </Reveal>
     </section>
   );
@@ -237,12 +208,10 @@ function DataSourceSection() {
           <p className="text-[0.9375rem] leading-relaxed text-zinc-300">
             Common Crawl is a nonprofit that has been crawling the web since 2008 and publishes everything it
             collects as open data. Its archive spans more than 300 billion pages across 100+ crawl collections.
-            Crawlback uses those crawls to find individual pages inside the archive.
           </p>
           <p className="mt-3 text-[0.9375rem] leading-relaxed text-zinc-300">
-            Common Crawl is not the Wayback Machine. It doesn&apos;t archive on demand and it doesn&apos;t replay
-            full pages, but it often captures pages archive.org never saved, or catches them at different points
-            in time. That makes Crawlback a useful alternative for finding snapshots you won&apos;t see elsewhere.
+            Crawlback uses those crawls to find individual pages inside the archive. Results are captured HTML,
+            not live replays of the page.
           </p>
           <a
             href="https://commoncrawl.org"
@@ -273,7 +242,7 @@ const BENEFITS: BenefitCard[] = [
   {
     icon: HardDrive,
     title: "Local-first privacy",
-    body: "Searches and requests run from your browser, and your history stays there. No server-side storage."
+    body: "Searches run from your browser, and your history stays there with no server-side storage. You can wipe everything from Settings."
   },
   {
     icon: Eye,
@@ -296,17 +265,20 @@ function BenefitsSection() {
           title="A web archive that stays out of your way"
           titleId="why-crawlback-title"
         />
-        <div className="mt-6 grid gap-3 sm:grid-cols-2">
+        <LandingBookmarkHint />
+        <ul className="mt-6 grid list-none gap-3 p-0 sm:grid-cols-2">
           {BENEFITS.map((benefit) => (
-            <GlowPanel key={benefit.title} className="p-5">
-              <div className="flex items-center gap-2">
-                <benefit.icon size={18} aria-hidden="true" className="shrink-0 text-amber-300" />
-                <h3 className="text-base font-bold text-zinc-50">{benefit.title}</h3>
-              </div>
-              <p className="mt-2 text-[0.9375rem] leading-relaxed text-zinc-300">{benefit.body}</p>
-            </GlowPanel>
+            <li key={benefit.title}>
+              <GlowPanel className="h-full p-5">
+                <div className="flex items-center gap-2">
+                  <benefit.icon size={18} aria-hidden="true" className="shrink-0 text-amber-300" />
+                  <h3 className="text-base font-bold text-zinc-50">{benefit.title}</h3>
+                </div>
+                <p className="mt-2 text-[0.9375rem] leading-relaxed text-zinc-300">{benefit.body}</p>
+              </GlowPanel>
+            </li>
           ))}
-        </div>
+        </ul>
       </Reveal>
     </section>
   );
@@ -319,24 +291,19 @@ const FAQ_ITEMS: { question: string; answer: string }[] = [
       "The Wayback Machine archives on demand and replays full pages. Crawlback searches Common Crawl, a separate archive built by broad crawls since 2008. The two overlap only partially. Common Crawl often holds captures the Wayback Machine is missing, which is exactly when Crawlback is useful."
   },
   {
-    question: "What is Common Crawl?",
-    answer:
-      "A nonprofit that crawls the web and publishes the results as free, open data: over 300 billion pages across 100+ collections. Researchers, search engines, and language models use it. Crawlback gives it a page-level search interface."
-  },
-  {
     question: "Why can a scan take so long?",
     answer:
-      "Some scans can take 20 minutes or more. The archive services behind Crawlback are often busy and heavily rate-limited, so Crawlback slows down on purpose to avoid getting your search blocked. The goal is to keep the scan going and get you results, even when that means waiting longer."
+      "Common Crawl limits request rates, and everyone on the same network can share one public IP address and its limit. Crawlback slows down on purpose to avoid getting your search blocked, so some scans take 20 minutes or more. If you get an HTTP 503 response, slow down. If Common Crawl temporarily blocks your IP address, wait 24 hours before trying again. Avoid parallel requests, and do not rotate IP addresses or use proxies to get around limits."
   },
   {
-    question: "Why can't I see images and styles?",
+    question: "Why is the preview incomplete?",
     answer:
-      "Common Crawl stores captured HTML, but reconstructing a page also needs its images, stylesheets, and scripts from the same moment, which mostly aren't in the archive. Crawlback renders the raw HTML in a sandbox instead of pretending to replay the page."
+      "Common Crawl stores captured HTML, but a page also needs the images, stylesheets, and scripts from the same moment, which mostly aren't in the archive. Crawlback shows the captured HTML in a sandbox instead of pretending to replay the page, and archived scripts never run."
   },
   {
-    question: "Is my search history uploaded anywhere?",
+    question: "How should I verify a capture before publishing?",
     answer:
-      "No. Scans run from your browser, and history, coverage data, settings, and saved HTML stay in your browser. There is no server-side storage. You can wipe everything from Settings."
+      "Keep the exact URL and the capture date. The capture date is when Common Crawl saved the page, not when it was first published. Compare the capture with other captures and independent sources. A capture alone does not prove who wrote a page or that its claims are true."
   },
   {
     question: "Why does a URL show as blocked or opted out?",
@@ -346,38 +313,52 @@ const FAQ_ITEMS: { question: string; answer: string }[] = [
   {
     question: "Does a scan hit the target website?",
     answer:
-      "Almost never. Searches go to Common Crawl's index and data servers, not to the site you're researching. The only exception is a single robots.txt check to determine crawl permissions. For sensitive research targets, you can turn that off in Settings so the website is not contacted at all."
-  },
+      "Almost never. Your browser sends archive searches straight to Common Crawl's public index and data servers, not to the site you're researching. Crawlback's server makes one request to the target, a robots.txt check. For sensitive research targets, you can turn that off in Settings so the website is not contacted at all."
+  }
 ];
+
+const FAQ_JSON_LD = JSON.stringify({
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  mainEntity: FAQ_ITEMS.map((item) => ({
+    "@type": "Question",
+    name: item.question,
+    acceptedAnswer: { "@type": "Answer", text: item.answer }
+  }))
+}).replace(/</g, "\\u003c");
 
 function FaqItem({ item }: { item: { question: string; answer: string } }) {
   const [open, setOpen] = useState(false);
-  const contentRef = useRef<HTMLDivElement | null>(null);
-  const answerId = useId();
-  const maxHeight = open ? `${contentRef.current?.scrollHeight ?? 0}px` : "0px";
+  const buttonId = useId();
+  const panelId = useId();
 
   return (
-    <details
-      open={open}
-      className="group archive-panel landing-faq-item rounded-md"
-      onToggle={(event) => setOpen(event.currentTarget.open)}
-    >
-      <summary
-        aria-controls={answerId}
-        className="flex min-h-14 cursor-pointer list-none items-center justify-between gap-3 px-4 py-3.5 text-[0.9375rem] font-semibold leading-snug text-zinc-100 transition hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-amber-300 sm:px-5 [&::-webkit-details-marker]:hidden"
-      >
-        {item.question}
-        <ChevronDown size={18} aria-hidden="true" className="shrink-0 text-zinc-400 transition-transform duration-300 group-open:rotate-180" />
-      </summary>
+    <div className="archive-panel landing-faq-item rounded-md">
+      <h3 className="m-0">
+        <button
+          type="button"
+          id={buttonId}
+          aria-expanded={open}
+          aria-controls={panelId}
+          onClick={() => setOpen((value) => !value)}
+          className="landing-faq-trigger flex w-full min-h-14 cursor-pointer items-center justify-between gap-3 rounded-md px-4 py-3.5 text-left text-[0.9375rem] font-semibold leading-snug text-zinc-100 transition hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-amber-300 sm:px-5"
+        >
+          <span>{item.question}</span>
+          <ChevronDown size={18} aria-hidden="true" className="landing-faq-chevron shrink-0 text-zinc-400" />
+        </button>
+      </h3>
       <div
-        id={answerId}
-        ref={contentRef}
-        className="landing-faq-answer"
-        style={{ "--answer-height": maxHeight } as CSSProperties}
+        id={panelId}
+        role="region"
+        aria-labelledby={buttonId}
+        data-open={open ? "true" : "false"}
+        className="landing-faq-panel"
       >
-        <p className="px-4 pb-5 text-[0.9375rem] leading-relaxed text-zinc-300 sm:px-5">{item.answer}</p>
+        <div className="landing-faq-panel__inner">
+          <p className="px-4 pb-5 text-[0.9375rem] leading-relaxed text-zinc-300 sm:px-5">{item.answer}</p>
+        </div>
       </div>
-    </details>
+    </div>
   );
 }
 
@@ -385,16 +366,20 @@ function FaqSection() {
   return (
     <section id="faq" aria-labelledby="faq-title" className="scroll-mt-28">
       <Reveal>
-        <SectionHeading label="FAQ" title="Questions" titleId="faq-title" />
+        <SectionHeading label="FAQ" title="Frequently asked questions" titleId="faq-title" />
         <div className="mt-6 space-y-2.5">
           {FAQ_ITEMS.map((item) => (
             <FaqItem key={item.question} item={item} />
           ))}
         </div>
       </Reveal>
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: FAQ_JSON_LD }} />
     </section>
   );
 }
+
+const guideLinkClass =
+  "inline-flex min-h-11 items-center gap-1.5 text-[0.9375rem] font-semibold text-zinc-100 underline decoration-zinc-600 underline-offset-4 transition hover:text-amber-200 hover:decoration-amber-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-300";
 
 export function LandingSections() {
   return (
@@ -402,26 +387,17 @@ export function LandingSections() {
       <LandingMiniHeader />
       <div className="relative z-10 mx-auto w-full max-w-3xl space-y-20 px-5 pb-10 pt-8 sm:space-y-24 md:px-8">
         <nav aria-label="Research guide" className="flex flex-wrap items-center gap-x-6 gap-y-1">
-          <Link
-            href="/how-it-works#how-it-works"
-            className="inline-flex min-h-11 items-center gap-1.5 text-[0.9375rem] font-semibold text-zinc-100 underline decoration-zinc-600 underline-offset-4 transition hover:text-amber-200 hover:decoration-amber-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-300"
-          >
+          <a href="#how-it-works" className={guideLinkClass}>
             How it works <span aria-hidden="true" className="text-amber-300">→</span>
-          </Link>
-          <Link
-            href="/how-it-works#faq"
-            className="inline-flex min-h-11 items-center gap-1.5 text-[0.9375rem] font-semibold text-zinc-100 underline decoration-zinc-600 underline-offset-4 transition hover:text-amber-200 hover:decoration-amber-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-300"
-          >
+          </a>
+          <a href="#faq" className={guideLinkClass}>
             FAQ <span aria-hidden="true" className="text-amber-300">→</span>
-          </Link>
+          </a>
         </nav>
         <HowItWorksSection />
         <BenefitsSection />
         <DataSourceSection />
         <FaqSection />
-        <div className="border-t border-zinc-800 pt-6">
-          <LandingBookmarkHint />
-        </div>
       </div>
     </>
   );

@@ -57,7 +57,8 @@ export function createLegacySearchHref(input: {
   const params = new URLSearchParams();
   if (input.mock) params.set("mock", "1");
   params.set("match", input.matchType);
-  if (input.scope === "all" || input.scope === "custom") params.set("scope", input.scope);
+  // Full scan is the default, so only non-default scopes are written to the URL.
+  if (input.scope !== "all") params.set("scope", input.scope);
   if (input.dateFrom) params.set("from", input.dateFrom);
   if (input.dateTo) params.set("to", input.dateTo);
   if (input.action) params.set("action", input.action);
@@ -136,7 +137,7 @@ function appendLegacyBackContext(params: URLSearchParams, context: ResultsBackCo
   if (context.url) params.set("back_url", context.url);
   if (context.match) params.set("back_match", context.match);
   if (context.mock) params.set("back_mock", context.mock);
-  if (context.scope === "all" || context.scope === "custom") params.set("back_scope", context.scope);
+  if (context.scope === "all" || context.scope === "recent" || context.scope === "custom") params.set("back_scope", context.scope);
   if (context.dateFrom) params.set("back_from", context.dateFrom);
   if (context.dateTo) params.set("back_to", context.dateTo);
   if (context.history === "1") params.set("back_history", context.history);
@@ -155,10 +156,12 @@ function normalizeMatchType(value: string | null): MatchType {
   return "exact";
 }
 
+// A missing scope param means full scan ("all"); "recent" must be written explicitly.
 function normalizeScope(scope: string | null, dateFrom: string | null, dateTo: string | null): ScanScope {
   if (scope === "all") return "all";
-  if (scope === "custom" || dateFrom || dateTo) return "custom";
-  return "recent";
+  if (scope === "recent" && !dateFrom && !dateTo) return "recent";
+  if (scope === "custom" || scope === "recent" || dateFrom || dateTo) return "custom";
+  return "all";
 }
 
 function normalizePage(value: string | null): number | undefined {

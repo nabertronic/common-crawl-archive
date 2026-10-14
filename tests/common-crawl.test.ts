@@ -160,7 +160,7 @@ describe("Common Crawl client", () => {
         page: 3
       })
     ).toBe(
-      "/search?match=domain&scope=all&history=1&year=2024&status=200&filter=blog&sort=url-asc&view=calendar&page=3&url=https%3A%2F%2Fexample.com%2F"
+      "/search?match=domain&history=1&year=2024&status=200&filter=blog&sort=url-asc&view=calendar&page=3&url=https%3A%2F%2Fexample.com%2F"
     );
   });
 
@@ -179,19 +179,22 @@ describe("Common Crawl client", () => {
         view: viewParams.get("back_view")
       })
     ).toBe(
-      "/search?match=exact&scope=all&history=1&sort=timestamp-desc&view=calendar&url=hutt.io"
+      "/search?match=exact&history=1&sort=timestamp-desc&view=calendar&url=hutt.io"
     );
   });
 
-  it("omits default scan scope from capture viewer back context and href", () => {
+  it("writes recent scope explicitly and omits full scope from capture viewer back context and href", () => {
     const params = appendResultsBackContext(new URLSearchParams(), {
       url: "https://example.com/",
       match: "domain",
       scope: "recent"
     });
 
-    expect(params.has("back_scope")).toBe(false);
+    expect(params.get("back_scope")).toBe("recent");
     expect(buildResultsBackHref({ url: "https://example.com/", match: "domain", scope: "recent" })).toBe(
+      "/search?match=domain&scope=recent&url=https%3A%2F%2Fexample.com%2F"
+    );
+    expect(buildResultsBackHref({ url: "https://example.com/", match: "domain", scope: "all" })).toBe(
       "/search?match=domain&url=https%3A%2F%2Fexample.com%2F"
     );
   });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createViewerHref, parseSearchRoute, viewerBackHref } from "@/lib/navigation-state";
+import { createLegacySearchHref, createViewerHref, parseSearchRoute, viewerBackHref } from "@/lib/navigation-state";
 import type { CommonCrawlCapture } from "@/lib/common-crawl";
 
 const capture: CommonCrawlCapture = {
@@ -50,5 +50,24 @@ describe("navigation state", () => {
       view: undefined,
       page: undefined
     });
+  });
+
+  it("treats a missing scope param as a full scan", () => {
+    expect(parseSearchRoute(new URLSearchParams("url=hutt.io"))).toMatchObject({ kind: "legacy", scope: "all" });
+    expect(parseSearchRoute(new URLSearchParams("url=hutt.io&scope=bogus"))).toMatchObject({ kind: "legacy", scope: "all" });
+    expect(parseSearchRoute(new URLSearchParams("url=hutt.io&scope=all"))).toMatchObject({ kind: "legacy", scope: "all" });
+  });
+
+  it("only treats recent as recent when it is written explicitly", () => {
+    expect(parseSearchRoute(new URLSearchParams("url=hutt.io&scope=recent"))).toMatchObject({ kind: "legacy", scope: "recent" });
+  });
+
+  it("omits the scope param for full scans and writes recent explicitly", () => {
+    const base = { url: "hutt.io", matchType: "domain" as const };
+    expect(createLegacySearchHref({ ...base, scope: "all" })).toBe("/search?match=domain&url=hutt.io");
+    expect(createLegacySearchHref({ ...base, scope: "recent" })).toBe("/search?match=domain&scope=recent&url=hutt.io");
+    expect(createLegacySearchHref({ ...base, scope: "custom", dateFrom: "2020-01-01", dateTo: "2020-12-31" })).toBe(
+      "/search?match=domain&scope=custom&from=2020-01-01&to=2020-12-31&url=hutt.io"
+    );
   });
 });

@@ -8,6 +8,7 @@ import {
   DEFAULT_HTML_CACHE_LIMIT_BYTES,
   DEFAULT_HISTORY_PAGE_SIZE,
   DEFAULT_LARGE_CAPTURE_LIMIT_BYTES,
+  DEFAULT_SCAN_SCOPE,
   DEFAULT_SEARCH_PAGE_SIZE,
   historySummaryFromStoredSearch,
   legacyScanSearchKey,
@@ -15,10 +16,12 @@ import {
   legacyUnscopedScanSearchKey,
   mergeStoredSearchRecords,
   normalizeScanUrl,
+  normalizeSettings,
   scanSearchKey,
   scanLogDurationMs,
   stampMissingOwner,
   targetIdFor,
+  type AppSettings,
   type StoredSearch
 } from "@/lib/capture-store";
 import type { CollectionCheckResult, CommonCrawlCapture, CommonCrawlCollection, ScanLogEvent } from "@/lib/common-crawl";
@@ -95,6 +98,26 @@ describe("capture store keys", () => {
 
   it("uses a 500 MB default HTML cache limit", () => {
     expect(DEFAULT_HTML_CACHE_LIMIT_BYTES).toBe(500 * 1024 * 1024);
+  });
+
+  it("defaults the search scope to a full scan", () => {
+    expect(DEFAULT_SCAN_SCOPE).toBe("all");
+    const settings = normalizeSettings(storedSettings({ defaultScanScope: undefined as unknown as AppSettings["defaultScanScope"] }));
+    expect(settings.defaultScanScope).toBe("all");
+    expect(settings.defaultScanScopeChosen).toBe(false);
+  });
+
+  it("does not keep the old recent default for records that never stored an explicit choice", () => {
+    // Older records persisted "recent" as a side effect of saving another setting.
+    expect(normalizeSettings(storedSettings({ defaultScanScope: "recent" })).defaultScanScope).toBe("all");
+    expect(normalizeSettings(storedSettings({ defaultScanScope: "recent", defaultScanScopeChosen: false })).defaultScanScope).toBe("all");
+  });
+
+  it("keeps a scope the user explicitly chose", () => {
+    expect(normalizeSettings(storedSettings({ defaultScanScope: "recent", defaultScanScopeChosen: true })).defaultScanScope).toBe("recent");
+    expect(normalizeSettings(storedSettings({ defaultScanScope: "custom", defaultScanScopeChosen: true, defaultCustomDateFrom: "2026-01-01", defaultCustomDateTo: "2026-02-01" })))
+      .toMatchObject({ defaultScanScope: "custom", defaultCustomDateFrom: "2026-01-01", defaultCustomDateTo: "2026-02-01" });
+    expect(normalizeSettings(storedSettings({ defaultScanScope: "all", defaultScanScopeChosen: true })).defaultScanScope).toBe("all");
   });
 
   it("exposes stable defaults for configurable UI preferences", () => {
@@ -432,3 +455,25 @@ describe("capture store keys", () => {
     ])).toBe(130_000);
   });
 });
+
+function storedSettings(overrides: Partial<AppSettings>): AppSettings {
+  return {
+    id: "active",
+    activeUserId: "local",
+    htmlCacheEnabled: true,
+    htmlCacheLimitBytes: DEFAULT_HTML_CACHE_LIMIT_BYTES,
+    autoPruneEnabled: true,
+    showHtmlPrivacyWarning: true,
+    robotsTxtChecksEnabled: true,
+    defaultMatchType: "exact",
+    defaultScanScope: "recent",
+    defaultViewMode: "list",
+    defaultSort: DEFAULT_CAPTURE_SORT,
+    searchPageSize: DEFAULT_SEARCH_PAGE_SIZE,
+    historyPageSize: DEFAULT_HISTORY_PAGE_SIZE,
+    defaultExportColumns: DEFAULT_CAPTURE_EXPORT_COLUMNS,
+    largeCaptureLimitBytes: DEFAULT_LARGE_CAPTURE_LIMIT_BYTES,
+    updatedAt: 1,
+    ...overrides
+  };
+}

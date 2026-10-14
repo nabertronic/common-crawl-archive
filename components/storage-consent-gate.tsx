@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { BrandLockup } from "@/components/brand";
 import { LandingSections } from "@/components/landing-sections";
 import { TopRightMenu } from "@/components/top-right-menu";
-import { hasStorageConsent, openWebsitePreferences, subscribeStorageConsent } from "@/lib/website-preferences";
+import { grantStorageConsent, hasStorageConsent, openWebsitePreferences, subscribeStorageConsent } from "@/lib/website-preferences";
 
 const STORAGE_ROUTES = new Set(["/", "/search", "/history", "/settings", "/view"]);
 
@@ -95,10 +95,10 @@ export function StorageConsentGate({ children }: { children: React.ReactNode }) 
       <LandingSections />
     </>;
   }
+  if (pathname === "/settings") return <SettingsStoragePlaceholder />;
   const pageActions: Record<string, { title: string; action: string }> = {
     "/search": { title: "Search", action: "Start search" },
     "/history": { title: "Scan history", action: "View saved searches" },
-    "/settings": { title: "App settings", action: "Open settings" },
     "/view": { title: "Archived page", action: "Open archived page" }
   };
   const page = pageActions[pathname] ?? { title: "Crawlback", action: "Continue" };
@@ -106,6 +106,45 @@ export function StorageConsentGate({ children }: { children: React.ReactNode }) 
     <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 border-b border-zinc-800 pb-4">
       <h1 className="text-xl font-bold">{page.title}</h1>
       <Button variant="secondary" onClick={blocked}>{page.action}</Button>
+    </div>
+  </main>;
+}
+
+const LOCKED_SETTINGS = ["Scan settings", "Results defaults", "Viewer", "Export defaults", "Danger zone"];
+
+/** Settings need saved preferences, so without consent the page explains the choice and lists what unlocks. */
+function SettingsStoragePlaceholder() {
+  const [storageError, setStorageError] = useState("");
+  const allowStorage = () => {
+    setStorageError("");
+    if (!grantStorageConsent()) setStorageError("Your browser did not allow storage. Check your browser settings and try again.");
+  };
+
+  return <main className="min-h-[55vh] px-5 py-10 text-zinc-100 md:px-8">
+    <div className="mx-auto flex max-w-3xl flex-col gap-4">
+      <header className="archive-panel rounded-md p-5">
+        <p className="text-xs font-bold uppercase tracking-[0.2em] text-amber-300">Your browser, your choice</p>
+        <h1 className="mt-2 text-xl font-bold">App settings</h1>
+        <p className="mt-2 text-sm leading-6 text-zinc-300">Your app settings are saved in this browser. The app will not save or load your data here until you allow browser storage.</p>
+      </header>
+      <section id="storage" aria-labelledby="storage-choice-title" className="archive-panel scroll-mt-5 rounded-md p-5">
+        <h2 id="storage-choice-title" className="text-sm font-bold uppercase tracking-[0.14em] text-zinc-100">Browser storage</h2>
+        <p className="mt-3 text-sm leading-6 text-zinc-300">Status: <span className="font-semibold text-zinc-100">off</span>. If you allow it, Crawlback saves your search history, scan results, cached pages, and settings on this device.</p>
+        <p className="mt-2 text-sm leading-6 text-zinc-400">You can turn storage off later in Website settings. That stops app features from using it but does not delete saved data.</p>
+        {storageError && <p role="alert" className="mt-3 text-sm text-red-300">{storageError}</p>}
+        <div className="mt-4 flex flex-wrap items-center gap-4">
+          <Button onClick={allowStorage}>Allow browser storage</Button>
+          <a className="text-xs text-zinc-400 underline decoration-zinc-600 underline-offset-4 hover:text-amber-200" href="/privacy">Privacy</a>
+        </div>
+      </section>
+      <section aria-labelledby="locked-settings-title" className="archive-panel rounded-md p-5">
+        <h2 id="locked-settings-title" className="text-sm font-bold uppercase tracking-[0.14em] text-zinc-100">Available after you allow storage</h2>
+        <ul className="mt-3 grid gap-2 sm:grid-cols-2">
+          {LOCKED_SETTINGS.map((label) => (
+            <li key={label} aria-disabled="true" className="rounded-md border border-zinc-800 px-3 py-2 text-sm text-zinc-500">{label}</li>
+          ))}
+        </ul>
+      </section>
     </div>
   </main>;
 }

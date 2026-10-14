@@ -3,13 +3,11 @@ import sitemap from "@/app/sitemap";
 import robots from "@/app/robots";
 
 describe("search indexing routes", () => {
-  it("lists only the public site and guide pages in the sitemap", () => {
+  it("lists only the landing, privacy, and terms pages in the sitemap", () => {
     expect(sitemap().map(({ url }) => url)).toEqual([
       "https://crawlback.cc/",
-      "https://crawlback.cc/how-it-works",
       "https://crawlback.cc/privacy",
-      "https://crawlback.cc/terms",
-      "https://crawlback.cc/imprint"
+      "https://crawlback.cc/terms"
     ]);
   });
 

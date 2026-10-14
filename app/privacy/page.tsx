@@ -31,7 +31,7 @@ export default function PrivacyPage() {
 
       <section className={sectionClass} aria-labelledby="privacy-controller">
         <h2 id="privacy-controller" className={headingClass}>Controller and contact</h2>
-        <p>The controller for Crawlback is Alexander Nabert. The postal address is listed in the <Link href="/imprint" className={linkClass}>legal notice (Impressum)</Link>.</p>
+        <p>The controller for Crawlback is Alexander Nabert. The postal address is listed in the <Link href="/imprint" rel="nofollow" className={linkClass}>legal notice</Link>.</p>
         <p>For privacy questions and requests, email <a href="mailto:nabert@pm.me" className={linkClass}>nabert@pm.me</a>.</p>
       </section>
 

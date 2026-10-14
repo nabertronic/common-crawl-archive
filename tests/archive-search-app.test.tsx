@@ -1252,6 +1252,15 @@ describe("ArchiveSearchApp", () => {
     expect(screen.getAllByText(optOutMessage)).toHaveLength(1);
   });
 
+  it("starts a full scan when the search URL has no scope param", async () => {
+    vi.mocked(getCoverage).mockResolvedValue(undefined);
+
+    render(<ArchiveSearchApp autoStart initialParams={{ url: "example.org" }} />);
+
+    await waitFor(() => expect(findOrCreateLegacySession).toHaveBeenCalled());
+    expect(vi.mocked(findOrCreateLegacySession).mock.calls[0][3]).toBe("all");
+  });
+
   it("does not show stored-progress for a clean fresh scan", async () => {
     vi.mocked(getCoverage).mockResolvedValue(undefined);
 

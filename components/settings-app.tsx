@@ -24,6 +24,7 @@ import {
   clearHtmlCache,
   DEFAULT_CAPTURE_EXPORT_COLUMNS,
   DEFAULT_HISTORY_PAGE_SIZE,
+  DEFAULT_SCAN_SCOPE,
   DEFAULT_HTML_CACHE_LIMIT_BYTES,
   DEFAULT_LARGE_CAPTURE_LIMIT_BYTES,
   DEFAULT_SEARCH_PAGE_SIZE,
@@ -39,6 +40,7 @@ import {
 } from "@/lib/capture-store";
 import { getCollectionCacheInfo, refreshCollections, type CollectionCacheInfo } from "@/lib/common-crawl";
 import { markPerformance, measureAsync } from "@/lib/performance";
+import { revokeStorageConsent } from "@/lib/website-preferences";
 
 const SORT_OPTIONS = [
   ["timestamp-desc", "Date (newest first)"],
@@ -240,7 +242,7 @@ export function SettingsApp() {
 
   return (
     <main className="min-h-screen px-4 py-5 text-zinc-100 md:px-8">
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-4">
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-4">
         <header className="archive-panel relative z-40 rounded-md p-4">
           <div className="flex items-center justify-between gap-3">
             <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
@@ -318,7 +320,7 @@ export function SettingsApp() {
               <SettingRow label="Default scan window" description="Which collections a new scan covers.">
                 <SelectField
                   ariaLabel="Default scan window"
-                  value={settings?.defaultScanScope ?? "recent"}
+                  value={settings?.defaultScanScope ?? DEFAULT_SCAN_SCOPE}
                   onChange={(value) => void saveSettings({ defaultScanScope: value as AppSettings["defaultScanScope"] })}
                   options={[
                     ["recent", "Last 12 months"],
@@ -461,6 +463,14 @@ export function SettingsApp() {
             </Panel>
 
             <Panel id="storage" icon={<Database size={16} />} title="Storage">
+              <SettingRow
+                label="Browser storage"
+                description="Allowed. Turning it off stops app features from using it. Saved data stays until you clear it."
+              >
+                <Button type="button" size="sm" variant="secondary" onClick={() => revokeStorageConsent()}>
+                  Turn storage off
+                </Button>
+              </SettingRow>
               <div className="py-3">
                 <div className="grid grid-cols-3 divide-x divide-zinc-800 overflow-hidden rounded-md border border-zinc-800 bg-zinc-950">
                   <Stat label="Cached files" value={String(stats.count)} />
