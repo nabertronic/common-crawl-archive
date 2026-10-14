@@ -31,12 +31,35 @@ describe("LandingSections", () => {
     expect(document.querySelector('a[href^="/how-it-works"]')).toBeNull();
   });
 
-  it("keeps the worked example and the Common Crawl guidance links from the old guide", () => {
+  it("omits the local government notice example and keeps the Common Crawl guidance links", () => {
     render(<LandingSections />);
-    expect(screen.getByText("Example · Local government notice")).toBeInTheDocument();
-    expect(screen.getByText(/does not tell you when the city first published the notice/)).toBeInTheDocument();
+    expect(screen.queryByText(/Local government notice/)).toBeNull();
+    expect(screen.queryByText(/Suppose a city removes a notice/)).toBeNull();
     expect(screen.getByRole("link", { name: "Common Crawl FAQ →" })).toHaveAttribute("href", "https://www.commoncrawl.org/faq");
     expect(screen.getByRole("link", { name: "Terms of Use →" })).toHaveAttribute("href", "https://www.commoncrawl.org/terms-of-use");
+  });
+
+  it("answers the scan, preview, and FAQ questions with the updated guidance", () => {
+    render(<LandingSections />);
+    const script = document.querySelector('script[type="application/ld+json"]');
+    const data = JSON.parse(script?.innerHTML ?? "{}");
+    const answers: Record<string, string> = Object.fromEntries(
+      data.mainEntity.map((entry: { name: string; acceptedAnswer: { text: string } }) => [entry.name, entry.acceptedAnswer.text])
+    );
+
+    const scan = answers["Why can a scan take so long?"];
+    expect(scan).toContain("Common Crawl's public index API is often overloaded, so if you get many errors, simply try again later.");
+    expect(scan).not.toMatch(/rotate|proxies|proxy|VPN|different (IP|network)/i);
+
+    const preview = answers["Why is the preview incomplete?"];
+    expect(preview).toContain("for security and privacy reasons");
+    expect(preview).toContain("archived scripts never run");
+    expect(preview).toContain("does not load external resources");
+    expect(preview).toContain("reveal your visit or IP address");
+
+    for (const answer of Object.values(answers)) {
+      expect(answer).not.toMatch(/OSINT|rotate IP|use proxies|VPN/i);
+    }
   });
 
   it("links the open-source repository in a new tab", () => {
@@ -83,8 +106,8 @@ describe("LandingSections", () => {
     const data = JSON.parse(script?.innerHTML ?? "{}");
     expect(data["@type"]).toBe("FAQPage");
     const questions = data.mainEntity.map((entry: { name: string }) => entry.name);
-    expect(questions).toHaveLength(7);
-    expect(questions).toContain("What does OSINT mean here?");
+    expect(questions).toHaveLength(6);
+    expect(questions).not.toContain("What does OSINT mean here?");
     for (const question of questions) {
       expect(screen.getByRole("button", { name: question })).toBeInTheDocument();
     }

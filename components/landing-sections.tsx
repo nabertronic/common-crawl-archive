@@ -195,15 +195,6 @@ function HowItWorksSection() {
             </li>
           ))}
         </ol>
-        <div className="mt-6 border-l border-amber-300/50 pl-4">
-          <p className="font-mono text-xs font-bold uppercase tracking-[0.16em] text-amber-300">Example · Local government notice</p>
-          <p className="mt-2 text-[0.9375rem] leading-relaxed text-zinc-300">
-            Suppose a city removes a notice about a road closure. Search the notice&apos;s URL, open an earlier
-            capture, and note the date Common Crawl saved it. Compare the wording with the city&apos;s later notice
-            and another independent record before reporting what changed. The saved date does not tell you when
-            the city first published the notice.
-          </p>
-        </div>
       </Reveal>
     </section>
   );
@@ -320,19 +311,14 @@ const FAQ_ITEMS: { question: string; answer: string }[] = [
       "The Wayback Machine archives on demand and replays full pages. Crawlback searches Common Crawl, a separate archive built by broad crawls since 2008. The two overlap only partially. Common Crawl often holds captures the Wayback Machine is missing, which is exactly when Crawlback is useful."
   },
   {
-    question: "What does OSINT mean here?",
-    answer:
-      "OSINT means open-source intelligence: research and analysis using information available to the public. An archived page can be one useful source among many. It does not by itself establish who published a page or whether its claims were true."
-  },
-  {
     question: "Why can a scan take so long?",
     answer:
-      "Common Crawl limits request rates, and everyone on the same network can share one public IP address and its limit. Crawlback slows down on purpose to avoid getting your search blocked, so some scans take 20 minutes or more. If you get an HTTP 503 response, slow down. If Common Crawl temporarily blocks your IP address, wait 24 hours before trying again. Avoid parallel requests, and do not rotate IP addresses or use proxies to get around limits."
+      "Common Crawl limits request rates, and everyone on the same network can share one public IP address and its limit. Crawlback slows down on purpose to avoid getting your search blocked, so some scans take 20 minutes or more. If you get an HTTP 503 response, slow down. If Common Crawl temporarily blocks your IP address, wait 24 hours before trying again. Avoid parallel requests. Common Crawl's public index API is often overloaded, so if you get many errors, simply try again later."
   },
   {
     question: "Why is the preview incomplete?",
     answer:
-      "Common Crawl stores captured HTML, but a page also needs the images, stylesheets, and scripts from the same moment, which mostly aren't in the archive. Crawlback shows the captured HTML in a sandbox instead of pretending to replay the page, and archived scripts never run."
+      "The preview is incomplete for security and privacy reasons. Common Crawl mostly stores the captured HTML, not the images, stylesheets, and scripts that were loaded with it at that moment. Crawlback shows the captured HTML in a sandbox: archived scripts never run, so a capture cannot execute code. The preview also does not load external resources from the original site or third-party servers, so opening a capture does not contact those servers or reveal your visit or IP address to them."
   },
   {
     question: "How should I verify a capture before publishing?",
