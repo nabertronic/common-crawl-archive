@@ -289,7 +289,7 @@ export function SettingsApp() {
                             : "border-transparent text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200"
                         }`}
                       >
-                        <span className={`font-mono text-[10px] tabular-nums ${active ? "opacity-80" : "text-zinc-600"}`}>
+                        <span className={`font-mono text-xs tabular-nums ${active ? "opacity-80" : "text-zinc-500"}`}>
                           {String(index + 1).padStart(2, "0")}
                         </span>
                         {section.label}
@@ -728,7 +728,7 @@ function NumberField({
           disabled ? "cursor-not-allowed opacity-50" : ""
         }`}
       />
-      <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-400">
+      <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold uppercase tracking-[0.14em] text-zinc-400">
         {unit}
       </span>
     </div>
@@ -767,7 +767,7 @@ function Switch({
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="grid gap-1 px-3 py-2">
-      <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-400">{label}</span>
+      <span className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-400">{label}</span>
       <span className="truncate font-mono text-sm font-bold text-zinc-100" title={value}>{value}</span>
     </div>
   );

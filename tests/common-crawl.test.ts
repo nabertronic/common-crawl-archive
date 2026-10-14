@@ -22,6 +22,7 @@ import {
   searchUrlCoversTarget,
   type CommonCrawlCollection
 } from "@/lib/common-crawl";
+import { grantStorageConsent } from "@/lib/website-preferences";
 
 const collection: CommonCrawlCollection = {
   id: "CC-MAIN-2026-21",
@@ -64,6 +65,7 @@ describe("Common Crawl client", () => {
         return storage.size;
       }
     });
+    grantStorageConsent();
     resetCommonCrawlRateLimitState();
   });
 

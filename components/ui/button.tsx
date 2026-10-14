@@ -17,7 +17,7 @@ const buttonVariants = cva(
           "border-red-500/40 bg-red-500/15 text-red-100 hover:bg-red-500/25 focus-visible:outline-red-400"
       },
       size: {
-        sm: "h-8 px-3 text-xs",
+        sm: "h-9 px-3 text-[0.8125rem]",
         md: "h-10 px-4",
         lg: "h-12 px-5"
       }

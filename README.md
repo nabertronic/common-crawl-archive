@@ -50,15 +50,24 @@ API request limits, SSRF protection, and the sandboxed capture viewer remain act
 
 ## Privacy and legal information
 
-The interface and legal pages are in English. `/privacy` explains the actual
-browser storage and network requests; `/imprint` provides the operator's contact
-information and the postal address as a local image. `/impressum` redirects to
-`/imprint`. The privacy notice describes Vercel hosting.
+The interface and legal pages are in English. `/how-it-works` explains the
+research workflow; `/privacy` describes browser storage, search requests, and
+technical access data; `/terms` contains the terms of use; `/imprint` provides
+the operator's contact information and postal address as a local image.
+`/impressum` redirects to `/imprint`. The privacy notice describes Vercel
+hosting.
 
-A first-visit cookie and storage notice explains that the app sets no cookies and
-uses no tracking. Continue acknowledges the notice; it does not grant consent to
-analytics. The shared footer reopens it through **Website settings**. This
-acknowledgement is stored locally and works without an external consent service.
+Crawlback's own code sets no cookies and uses no advertising or analytics
+tracking. Before app routes that use browser storage load, visitors can choose
+**Allow browser storage** or **No thanks**. App features remain disabled until
+storage is explicitly allowed. A minimal versioned consent record is saved in
+local storage only after the visitor allows it; declining is remembered only in
+memory for the current session. Read-only information pages remain available
+without allowing storage. The footer's **Website settings** control can reopen
+the choice or withdraw consent. Withdrawal disables app storage features,
+unregisters service workers, and deletes Crawlback Cache Storage caches. It does
+not delete saved IndexedDB data or other app local-storage data; browser site-data
+controls can be used to remove those remaining items.
 
 ## Opt-out Registry
 

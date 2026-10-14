@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { HistoryApp } from "@/components/history-app";
 import type { CollectionCheckResult, CommonCrawlCapture, CommonCrawlCollection } from "@/lib/common-crawl";
@@ -100,7 +100,7 @@ function setNativeInputValue(input: HTMLInputElement, value: string) {
 function dispatchPageShow(persisted: boolean) {
   const event = new Event("pageshow") as PageTransitionEvent;
   Object.defineProperty(event, "persisted", { value: persisted });
-  window.dispatchEvent(event);
+  act(() => window.dispatchEvent(event));
 }
 
 describe("HistoryApp", () => {

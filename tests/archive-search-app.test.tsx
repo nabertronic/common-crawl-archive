@@ -152,8 +152,10 @@ import { ArchiveSearchApp, mergePersistedScanLog, persistedSearchDurationMs, res
 import { ensureScanSession, findOrCreateLegacySession, getCoverage, getScanSession, putSearch, startCoverageRun, upsertCoverageResult } from "@/lib/capture-store";
 import { queryCollection, resetCommonCrawlRateLimitState } from "@/lib/common-crawl";
 import { robotsCacheKey } from "@/lib/robots-cache";
+import { grantStorageConsent } from "@/lib/website-preferences";
 
 vi.mock("next/navigation", () => ({
+  usePathname: () => "/",
   useRouter: () => ({
     replace: vi.fn()
   }),
@@ -210,7 +212,7 @@ describe("ArchiveSearchApp", () => {
       updatedAt: 1
     };
     const storage = new Map<string, string>();
-    vi.stubGlobal("localStorage", {
+    const localStorageMock = {
       getItem: vi.fn((key: string) => storage.get(key) ?? null),
       setItem: vi.fn((key: string, value: string) => {
         storage.set(key, value);
@@ -221,7 +223,10 @@ describe("ArchiveSearchApp", () => {
       clear: vi.fn(() => {
         storage.clear();
       })
-    });
+    };
+    vi.stubGlobal("localStorage", localStorageMock);
+    Object.defineProperty(window, "localStorage", { configurable: true, value: localStorageMock });
+    grantStorageConsent();
     commonCrawlMocks.collections = [
       {
         id: "CC-MAIN-2026-21",

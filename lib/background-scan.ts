@@ -1,4 +1,5 @@
 import { buildCdxjUrl, type CommonCrawlCollection, type MatchType, type ScanDateWindow } from "@/lib/common-crawl";
+import { hasStorageConsent } from "@/lib/website-preferences";
 
 // Message protocol shared with public/sw.js. Keep the string literals in sync.
 export const SCAN_PREFETCH = "scan:prefetch";
@@ -42,7 +43,7 @@ export function backgroundScanSupported(): boolean {
 }
 
 export async function registerScanServiceWorker(): Promise<ServiceWorkerRegistration | undefined> {
-  if (!backgroundScanSupported()) return undefined;
+  if (!hasStorageConsent() || !backgroundScanSupported()) return undefined;
   try {
     return await navigator.serviceWorker.register(SERVICE_WORKER_URL);
   } catch {
@@ -57,7 +58,7 @@ export async function registerScanServiceWorker(): Promise<ServiceWorkerRegistra
  * page. Best-effort; never throws.
  */
 export function prefetchScanInBackground(urls: string[], spacingMs = 1100): boolean {
-  if (!backgroundScanSupported() || urls.length === 0) return false;
+  if (!hasStorageConsent() || !backgroundScanSupported() || urls.length === 0) return false;
   const controller = navigator.serviceWorker.controller;
   if (!controller) return false;
   controller.postMessage({ type: SCAN_PREFETCH, urls, spacingMs });

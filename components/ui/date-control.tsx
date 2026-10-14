@@ -21,7 +21,7 @@ export function DateControl({
 }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">{label}</span>
+      <span className="mb-1 block text-xs font-bold uppercase tracking-[0.14em] text-zinc-500">{label}</span>
       <input
         ref={inputRef}
         type="date"

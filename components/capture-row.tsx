@@ -158,7 +158,7 @@ function CaptureRowImpl({ capture, backContext, scanId }: CaptureRowProps) {
           </div>
         ) : null}
         {!isHtml ? (
-          <p className="mt-0.5 text-[10px] uppercase tracking-[0.12em] text-zinc-500">
+          <p className="mt-0.5 text-xs uppercase tracking-[0.12em] text-zinc-500">
             {capture.mime}
           </p>
         ) : null}

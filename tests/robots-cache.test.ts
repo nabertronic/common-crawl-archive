@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   readCachedRobotsStatus,
   ROBOTS_CACHE_TTL_MS,
@@ -6,6 +6,7 @@ import {
   writeCachedRobotsStatus
 } from "@/lib/robots-cache";
 import type { RobotsCheckResult } from "@/lib/robots";
+import { grantStorageConsent, resetStorageConsentSession } from "@/lib/website-preferences";
 
 function memoryStorage() {
   const store = new Map<string, string>();
@@ -18,6 +19,16 @@ function memoryStorage() {
 }
 
 describe("robots cache", () => {
+  beforeEach(() => {
+    const values = new Map<string, string>();
+    Object.defineProperty(window, "localStorage", { configurable: true, value: {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key), clear: () => values.clear()
+    } });
+    resetStorageConsentSession();
+    grantStorageConsent();
+  });
   it("caches robots status by robots URL and target path", () => {
     const storage = memoryStorage();
     const result: RobotsCheckResult = {

@@ -352,7 +352,7 @@ export function CaptureViewerApp() {
                   ? "Loading the full WARC range from Common Crawl."
                   : "Checking local cache before requesting Common Crawl."}
               </p>
-              <p className="mt-1 text-xs text-zinc-600">{isMockCaptureFilename(filename) ? filename : warcRecordUrl(filename)}</p>
+              <p className="mt-1 text-xs text-zinc-500">{isMockCaptureFilename(filename) ? filename : warcRecordUrl(filename)}</p>
             </div>
           </section>
         ) : null}
@@ -503,7 +503,7 @@ function HeaderBlock({ title, headers }: { title: string; headers: Record<string
       <dl className="space-y-2">
         {Object.entries(headers).map(([key, value]) => (
           <div key={key}>
-            <dt className="text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">{key}</dt>
+            <dt className="text-xs font-bold uppercase tracking-[0.14em] text-zinc-500">{key}</dt>
             <dd className="break-all text-xs text-zinc-300">{value}</dd>
           </div>
         ))}

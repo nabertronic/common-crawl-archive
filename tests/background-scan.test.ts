@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   backgroundScanSupported,
   cancelBackgroundScan,
@@ -9,6 +9,7 @@ import {
   SCAN_PREFETCH
 } from "@/lib/background-scan";
 import type { CommonCrawlCollection } from "@/lib/common-crawl";
+import { grantStorageConsent, resetStorageConsentSession, revokeStorageConsent } from "@/lib/website-preferences";
 
 function collection(id: string): CommonCrawlCollection {
   return {
@@ -22,6 +23,16 @@ function collection(id: string): CommonCrawlCollection {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+beforeEach(() => {
+  const values = new Map<string, string>();
+  Object.defineProperty(window, "localStorage", { configurable: true, value: {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+    removeItem: (key: string) => values.delete(key), clear: () => values.clear()
+  } });
+  resetStorageConsentSession();
+  grantStorageConsent();
 });
 
 describe("planScanFetches", () => {
@@ -100,6 +111,14 @@ describe("prefetchScanInBackground", () => {
     vi.stubGlobal("navigator", { serviceWorker: { controller: { postMessage } } });
     expect(prefetchScanInBackground([])).toBe(false);
     expect(postMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not prefetch after consent is revoked", () => {
+    const postMessage = vi.fn();
+    vi.stubGlobal("navigator", { serviceWorker: { controller: { postMessage } } });
+    revokeStorageConsent();
+    expect(prefetchScanInBackground(["https://index.commoncrawl.org/x"])).toBe(false);
+    expect(postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: SCAN_PREFETCH }));
   });
 
   it("cancelBackgroundScan posts a cancel message", () => {

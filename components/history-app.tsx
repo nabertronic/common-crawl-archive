@@ -497,7 +497,7 @@ export function HistoryApp() {
                     type="button"
                     aria-pressed={exportFormat === format}
                     onClick={() => setExportFormat(format)}
-                    className={`h-8 px-2.5 text-[11px] font-semibold uppercase tracking-wide transition ${
+                    className={`h-8 px-2.5 text-xs font-semibold uppercase tracking-wide transition ${
                       exportFormat === format
                         ? "bg-amber-300/10 text-amber-200"
                         : "bg-zinc-950 text-zinc-400 hover:text-zinc-200"
@@ -596,14 +596,14 @@ export function HistoryApp() {
                   <div className={HISTORY_SNAPSHOTS_COL_CLASS}>
                     <SortHeader label="Snapshots" sortKey="captures" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
                   </div>
-                  <span className={`${HISTORY_CACHED_COL_CLASS} text-right text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500`}>Cached</span>
+                  <span className={`${HISTORY_CACHED_COL_CLASS} text-right text-xs font-bold uppercase tracking-[0.14em] text-zinc-500`}>Cached</span>
                   <div className={HISTORY_SOURCES_COL_CLASS}>
                     <SortHeader label="Sources" sortKey="sources" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
                   </div>
                   <div className={HISTORY_FAILED_COL_CLASS}>
                     <SortHeader label="Failed" sortKey="failed" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
                   </div>
-                  <span className={`${HISTORY_ACTIONS_COL_CLASS} text-right text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500`}>Actions</span>
+                  <span className={`${HISTORY_ACTIONS_COL_CLASS} text-right text-xs font-bold uppercase tracking-[0.14em] text-zinc-500`}>Actions</span>
                 </div>
                 <div className="divide-y divide-zinc-800/70">
                   {visibleRecords.map((record) => (
@@ -828,7 +828,7 @@ function SortHeader({
     <button
       type="button"
       onClick={() => onSort(sortKey)}
-      className={`group flex w-full items-center gap-1 p-0 text-[10px] font-bold uppercase tracking-[0.14em] transition ${justify} ${color}`}
+      className={`group flex w-full items-center gap-1 p-0 text-xs font-bold uppercase tracking-[0.14em] transition ${justify} ${color}`}
     >
       <span>{label}</span>
       {active ? (
@@ -858,7 +858,7 @@ function SelectControl({
   const renderedOptions = fullValueOptions ?? options.map(([optionValue, optionLabel]) => ({ value: optionValue, label: optionLabel }));
   return (
     <label className="block">
-      <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">{label}</span>
+      <span className="mb-1 block text-xs font-bold uppercase tracking-[0.14em] text-zinc-500">{label}</span>
       <select
         ref={selectRef}
         value={value}
@@ -879,7 +879,7 @@ function EmptyState({ text }: { text: string }) {
   return (
     <div className="grid min-h-80 place-items-center p-8 text-center">
       <div>
-        <History className="mx-auto mb-3 text-zinc-600" size={30} />
+        <History className="mx-auto mb-3 text-zinc-500" size={30} />
         <p className="font-semibold text-zinc-300">{text}</p>
       </div>
     </div>
@@ -1184,7 +1184,7 @@ function CachedHtmlSearchPanel() {
               {searching ? "Searching…" : "Search"}
             </Button>
           </form>
-          <p className="mt-2 text-[11px] text-zinc-500">
+          <p className="mt-2 text-xs text-zinc-500">
             Only pages you have opened or exported are cached locally and searchable here.
           </p>
           {results !== null ? (
@@ -1200,7 +1200,7 @@ function CachedHtmlSearchPanel() {
                     >
                       <div className="flex items-center justify-between gap-2">
                         <span className="truncate text-sm font-semibold text-amber-200">{match.url || "(unknown URL)"}</span>
-                        <span className="shrink-0 text-[11px] text-zinc-500">{formatMatchTimestamp(match.timestamp)}</span>
+                        <span className="shrink-0 text-xs text-zinc-500">{formatMatchTimestamp(match.timestamp)}</span>
                       </div>
                       <p className="mt-1 line-clamp-2 text-xs text-zinc-400">
                         {match.inUrl && !match.snippet ? "Matched in the URL." : match.snippet}

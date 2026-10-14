@@ -131,6 +131,7 @@ import { robotsUrlForTarget, type RobotsCheckResult } from "@/lib/robots";
 import { readCachedRobotsStatus, writeCachedRobotsStatus } from "@/lib/robots-cache";
 import { findOptOutMatch, type OptOutMatch } from "@/lib/opt-out-registry";
 import { createLegacySearchHref, createSearchHref, createViewerHref } from "@/lib/navigation-state";
+import { hasStorageConsent, requireStorageConsent, subscribeStorageConsent } from "@/lib/website-preferences";
 
 type ViewMode = "list" | "calendar" | "grouped";
 type ScanScope = "recent" | "all" | "custom";
@@ -1228,7 +1229,7 @@ function readAutoRetryState(
   dateTo?: string
 ): AutoRetryState | undefined {
   try {
-    if (typeof window === "undefined") return undefined;
+    if (typeof window === "undefined" || !requireStorageConsent()) return undefined;
     const value = window.localStorage.getItem(autoRetryStateKey(url, matchType, mock, scope, dateFrom, dateTo));
     if (!value) return undefined;
     const record = JSON.parse(value) as Partial<AutoRetryState>;
@@ -1251,7 +1252,7 @@ function writeAutoRetryState(
   state: AutoRetryState
 ) {
   try {
-    if (typeof window === "undefined") return;
+    if (typeof window === "undefined" || !requireStorageConsent()) return;
     window.localStorage.setItem(autoRetryStateKey(url, matchType, mock, scope, dateFrom, dateTo), JSON.stringify(state));
   } catch {
     // Auto-retry persistence is best-effort.
@@ -1267,7 +1268,7 @@ function clearAutoRetryState(
   dateTo?: string
 ) {
   try {
-    if (typeof window === "undefined") return;
+    if (typeof window === "undefined" || !requireStorageConsent()) return;
     window.localStorage.removeItem(autoRetryStateKey(url, matchType, mock, scope, dateFrom, dateTo));
   } catch {
     // Auto-retry persistence is best-effort.
@@ -1382,12 +1383,12 @@ function scanLogRowClass(withDate: boolean) {
 
 function LandingStatsFooter() {
   return (
-    <div
-      className="reveal-fade pointer-events-none absolute inset-x-0 top-0 z-10 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 px-4 pt-7 text-sm tracking-wide text-zinc-300"
-      style={{ animationDelay: "560ms" }}
+    <p
+      className="reveal text-balance text-center text-lg leading-snug text-zinc-300 sm:text-xl"
+      style={{ animationDelay: "200ms" }}
     >
-      <span>Find archived versions of web pages.</span>
-    </div>
+      Find archived versions of web pages.
+    </p>
   );
 }
 
@@ -1513,6 +1514,18 @@ export function ArchiveSearchApp({
   const targetUrlInputRef = useRef<HTMLInputElement | null>(null);
   const loggedAutoRetryAtRef = useRef<number | undefined>(undefined);
   const scanLogRef = useRef<ScanLogEntry[]>([]);
+  useEffect(() => {
+    const stop = () => {
+      abortRef.current?.abort();
+      robotsAbortRef.current?.abort();
+      htmlZipAbortRef.current?.abort();
+      warcAbortRef.current?.abort();
+    };
+    const unsubscribe = subscribeStorageConsent(() => {
+      if (!hasStorageConsent()) stop();
+    });
+    return () => { unsubscribe(); stop(); };
+  }, []);
   const autoStartSignature = [
     initialMockMode ? "mock" : "live",
     initialUrl,
@@ -1540,6 +1553,7 @@ export function ArchiveSearchApp({
   }, []);
 
   const hasBlockedRobotsApproval = useCallback((session: Pick<ScanSession, "scanId" | "targetId">) => {
+    if (!requireStorageConsent()) return false;
     if (session.scanId && blockedRobotsApprovedScanIdsRef.current.has(session.scanId)) return true;
     if (!session.targetId || typeof window === "undefined") return false;
     try {
@@ -1550,6 +1564,7 @@ export function ArchiveSearchApp({
   }, []);
 
   const rememberBlockedRobotsApproval = useCallback((session: Pick<ScanSession, "scanId" | "targetId">) => {
+    if (!requireStorageConsent()) return;
     if (session.scanId) blockedRobotsApprovedScanIdsRef.current.add(session.scanId);
     if (!session.targetId || typeof window === "undefined") return;
     try {
@@ -3652,12 +3667,11 @@ export function ArchiveSearchApp({
     >
       {hasStartedSearch ? null : <LandingAtmosphere />}
       {hasStartedSearch ? null : <LandingHeroMenu />}
-      {hasStartedSearch ? null : <LandingStatsFooter />}
       <div
         className={
           hasStartedSearch
             ? "mx-auto flex max-w-7xl flex-col gap-4"
-            : "relative z-10 grid min-h-[100svh] w-full place-items-center px-4 py-8 md:px-8"
+            : "relative z-10 grid min-h-[100svh] w-full place-items-center px-5 pb-24 pt-20 md:px-8"
         }
       >
         {hasStartedSearch ? <h1 className="sr-only">Crawlback scan results</h1> : null}
@@ -3686,11 +3700,12 @@ export function ArchiveSearchApp({
                         wordClassName="leading-none decode-in"
                       />
                     </h1>
+                    <LandingStatsFooter />
                   </>
                 )}
               </div>
               <div
-                className={`flex gap-2${hasStartedSearch ? " flex-col sm:flex-row" : " flex-row reveal"}`}
+                className={`flex gap-2${hasStartedSearch ? " flex-col sm:flex-row" : " flex-col reveal sm:flex-row"}`}
                 style={hasStartedSearch ? undefined : { animationDelay: "260ms" }}
                 suppressHydrationWarning
               >
@@ -3707,7 +3722,7 @@ export function ArchiveSearchApp({
                     <div className="relative">
                       <span
                         aria-hidden
-                        className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 font-mono text-sm font-bold leading-none text-amber-300"
+                        className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 font-mono text-base font-bold leading-none text-amber-300"
                       >
                         &gt;
                       </span>
@@ -3718,7 +3733,7 @@ export function ArchiveSearchApp({
                         value={targetUrl}
                         placeholder="whitehouse.gov/administration"
                         autoComplete="off"
-                        className="terminal-input pl-8 font-mono"
+                        className="terminal-input h-12 rounded-xl pl-9 font-mono"
                         onChange={(event) => setTargetUrl(event.target.value)}
                         onKeyDown={(event) => {
                           if (event.key === "Enter") void runSearch("fresh", { url: event.currentTarget.value, scope: scanScope });
@@ -3729,7 +3744,7 @@ export function ArchiveSearchApp({
                 )}
                 {!hasStartedSearch ? (
                   <Button
-                    className="h-11 shrink-0 whitespace-nowrap transition-transform hover:-translate-y-0.5 active:translate-y-0"
+                    className="h-12 w-full shrink-0 whitespace-nowrap rounded-xl px-5 text-[0.9375rem] transition-transform hover:-translate-y-0.5 active:translate-y-0 sm:w-auto"
                     disabled={!canStartFresh}
                     onClick={() => void runSearch("fresh", { url: targetUrlInputRef.current?.value, scope: scanScope })}
                   >
@@ -3770,7 +3785,7 @@ export function ArchiveSearchApp({
             {hasStartedSearch ? (
               <div className="flex flex-col items-end gap-2 lg:w-[420px]">
                 <TopRightMenu mode="inline" />
-                <div className="flex h-11 w-full divide-x divide-zinc-800 overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/60">
+                <div className="flex min-h-11 w-full divide-x divide-zinc-800 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950/60 sm:h-11">
                   <Stat
                     label="Sources"
                     value={`${successfulCount}/${displayedSourceTotal}`}
@@ -3923,7 +3938,7 @@ export function ArchiveSearchApp({
                         ? ` · ZIP ${htmlZipDownload.part ?? 1}/${htmlZipDownload.parts}`
                         : ""}
                     </p>
-                    <p className="mt-1 text-[11px] text-zinc-500">
+                    <p className="mt-1 text-xs text-zinc-500">
                       {htmlZipDownload.bytes ? formatBytes(htmlZipDownload.bytes) : "0 B"} exported
                       {htmlZipDownload.failed ? ` · ${htmlZipDownload.failed} failed` : ""}
                     </p>
@@ -4019,7 +4034,7 @@ export function ArchiveSearchApp({
                 ) : null}
 
                 {!canExport ? (
-                  <p className="mt-2 text-[11px] text-zinc-500">
+                  <p className="mt-2 text-xs text-zinc-500">
                     {exportScope === "all"
                       ? "No captures to export yet — run a search first."
                       : "No captures in the current filter view — loosen the filters."}
@@ -4030,7 +4045,7 @@ export function ArchiveSearchApp({
                   type="button"
                   onClick={() => setExportOptionsOpen((open) => !open)}
                   aria-expanded={exportOptionsOpen}
-                  className="mt-3 flex w-full items-center justify-between gap-2 text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-400 transition hover:text-zinc-200"
+                  className="mt-3 flex w-full items-center justify-between gap-2 text-xs font-bold uppercase tracking-[0.14em] text-zinc-400 transition hover:text-zinc-200"
                 >
                   <span className="inline-flex items-center gap-1.5">
                     <SlidersHorizontal size={12} />
@@ -4045,7 +4060,7 @@ export function ArchiveSearchApp({
                 {exportOptionsOpen ? (
                   <div className="mt-3 space-y-3 border-t border-zinc-800 pt-3">
                     <div>
-                      <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">
+                      <span className="mb-1 block text-xs font-bold uppercase tracking-[0.14em] text-zinc-500">
                         Scope
                       </span>
                       <SegmentedToggle
@@ -4060,7 +4075,7 @@ export function ArchiveSearchApp({
                     </div>
 
                     <div>
-                      <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">
+                      <span className="mb-1 block text-xs font-bold uppercase tracking-[0.14em] text-zinc-500">
                         CSV columns
                       </span>
                       <div className="grid grid-cols-2 gap-1.5">
@@ -4080,7 +4095,7 @@ export function ArchiveSearchApp({
                         ))}
                       </div>
                       {exportColumns.length === 0 ? (
-                        <p className="mt-1 text-[10px] text-amber-200">Select at least one column.</p>
+                        <p className="mt-1 text-xs text-amber-200">Select at least one column.</p>
                       ) : null}
                     </div>
                   </div>
@@ -4101,7 +4116,7 @@ export function ArchiveSearchApp({
               {filteredCaptures.length === 0 ? (
                 <div className="grid min-h-80 place-items-center p-8 text-center">
                   <div>
-                    <Ban className="mx-auto mb-3 text-zinc-600" size={28} />
+                    <Ban className="mx-auto mb-3 text-zinc-500" size={28} />
                     <p className="font-semibold text-zinc-300">No captures in the current view.</p>
                     <p className="mt-1 text-sm text-zinc-500">Start a search or loosen the filters.</p>
                   </div>
@@ -4146,7 +4161,7 @@ export function ArchiveSearchApp({
           <a
             href="#how-it-works"
             aria-label="Learn how Crawlback works"
-            className="reveal-fade group absolute bottom-6 left-1/2 flex h-14 w-14 -translate-x-1/2 items-center justify-center rounded-full border border-amber-300/55 bg-zinc-950/70 text-amber-200 shadow-[0_0_0_1px_rgba(250,204,21,0.12)] backdrop-blur-sm transition hover:border-amber-200 hover:bg-amber-300/10 hover:text-amber-100 hover:shadow-[0_0_0_1px_rgba(250,204,21,0.22)]"
+            className="reveal-fade group absolute bottom-[max(1.5rem,env(safe-area-inset-bottom))] left-1/2 flex h-14 w-14 -translate-x-1/2 items-center justify-center rounded-full border border-amber-300/55 bg-zinc-950/70 text-amber-200 shadow-[0_0_0_1px_rgba(250,204,21,0.12)] backdrop-blur-sm transition hover:border-amber-200 hover:bg-amber-300/10 hover:text-amber-100 hover:shadow-[0_0_0_1px_rgba(250,204,21,0.22)]"
             style={{ animationDelay: "700ms" }}
           >
             <span className="scroll-hint block">
@@ -4270,9 +4285,9 @@ function Stat({ label, value, tone = "neutral" }: { label: string; value: string
       ? "text-red-300"
       : "text-zinc-100";
   return (
-    <div className="flex min-w-0 flex-1 items-center justify-between gap-2 px-3 leading-none">
-      <span className="min-w-0 truncate text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">{label}</span>
-      <span className={`shrink-0 font-mono text-sm font-bold tabular-nums ${valueColor}`}>{value}</span>
+    <div className="flex min-w-0 flex-1 flex-col justify-center gap-1 px-3 py-2 leading-none sm:flex-row sm:items-center sm:justify-between sm:gap-2 sm:py-0">
+      <span className="min-w-0 truncate text-xs font-semibold uppercase tracking-[0.08em] text-zinc-400">{label}</span>
+      <span className={`shrink-0 font-mono text-base font-bold tabular-nums sm:text-sm ${valueColor}`}>{value}</span>
     </div>
   );
 }
@@ -4350,7 +4365,7 @@ function EmptyScanOutcome({
       ? "mx-auto mb-3 animate-spin text-amber-200"
       : summary.phase === "paused"
         ? "mx-auto mb-3 text-amber-200"
-        : "mx-auto mb-3 text-zinc-600";
+        : "mx-auto mb-3 text-zinc-500";
   const Icon = summary.phase === "loading" || summary.phase === "searching" ? Loader2 : summary.phase === "paused" ? Clock : Ban;
   const isLoadingStoredScan = summary.phase === "loading";
   // While this section is on screen it is the single home for the scan's action
@@ -4585,7 +4600,7 @@ function RobotsScanLogEntry({ status, withDate = false }: { status: RobotsUiStat
   const detail = robotsStatusDetail(status);
   return (
     <div className={scanLogRowClass(withDate)}>
-      <p className="whitespace-nowrap font-mono text-[11px] text-zinc-500">{formatLogTimestamp(status.checkedAt, withDate)}</p>
+      <p className="whitespace-nowrap font-mono text-xs text-zinc-500">{formatLogTimestamp(status.checkedAt, withDate)}</p>
       <p className="whitespace-nowrap font-semibold text-zinc-200">CCBot robots.txt</p>
       <p className={robotsStatusTone(status)}>
         {robotsStatusHeadline(status)}
@@ -4606,7 +4621,7 @@ function OptOutScanLogEntry({
 }) {
   return (
     <div className={scanLogRowClass(withDate)}>
-      <p className="whitespace-nowrap font-mono text-[11px] text-zinc-500">{formatLogTimestamp(checkedAt, withDate)}</p>
+      <p className="whitespace-nowrap font-mono text-xs text-zinc-500">{formatLogTimestamp(checkedAt, withDate)}</p>
       <p className="whitespace-nowrap font-semibold text-zinc-200">Opt-out registry</p>
       <p className="text-red-200">
         {cachedCount > 0
@@ -4678,7 +4693,7 @@ function ScanLog({
 function ScanLogEventEntry({ event, withDate }: { event: ScanLogEvent; withDate: boolean }) {
   return (
     <div className={scanLogRowClass(withDate)}>
-      <p className="whitespace-nowrap font-mono text-[11px] text-zinc-500">{formatLogTimestamp(event.checkedAt, withDate)}</p>
+      <p className="whitespace-nowrap font-mono text-xs text-zinc-500">{formatLogTimestamp(event.checkedAt, withDate)}</p>
       <p className="whitespace-nowrap font-semibold text-zinc-200">Scan</p>
       <p className={scanLogEventTone(event)}>{event.message}</p>
     </div>
@@ -4698,7 +4713,7 @@ function ScanLogCollectionEntry({
 }) {
   return (
     <div className={scanLogRowClass(withDate)}>
-      <p className="whitespace-nowrap font-mono text-[11px] text-zinc-500">{formatLogTimestamp(call.checkedAt ?? result.checkedAt, withDate)}</p>
+      <p className="whitespace-nowrap font-mono text-xs text-zinc-500">{formatLogTimestamp(call.checkedAt ?? result.checkedAt, withDate)}</p>
       <p className="whitespace-nowrap font-semibold text-zinc-200">{result.collection.id}</p>
       <p className={scanLogCallTone(call)}>{`${attemptLabel((call.attemptNumber ?? attemptIndex + 1) - 1)} · ${scanLogCallMessage(call, result)}`}</p>
     </div>
@@ -4708,7 +4723,7 @@ function ScanLogCollectionEntry({
 function SortSelect({ value, onChange }: { value: SortOption; onChange: (value: SortOption) => void }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">Sort by</span>
+      <span className="mb-1 block text-xs font-bold uppercase tracking-[0.14em] text-zinc-500">Sort by</span>
       <select
         value={value}
         onChange={(event) => onChange(event.target.value as SortOption)}
@@ -4766,7 +4781,7 @@ function SegmentedToggle<T extends string>({
 function Filter({ label, value, options, onChange }: { label: string; value: string; options: string[]; onChange: (value: string) => void }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">{label}</span>
+      <span className="mb-1 block text-xs font-bold uppercase tracking-[0.14em] text-zinc-500">{label}</span>
       <select
         value={value}
         onChange={(event) => onChange(event.target.value)}
@@ -4837,7 +4852,7 @@ function GroupedCaptureList({
               <Badge tone="neutral" className="shrink-0">
                 {group.versions.length} version{group.versions.length === 1 ? "" : "s"}
               </Badge>
-              <span className="hidden shrink-0 font-mono text-[11px] tabular-nums text-zinc-500 sm:inline">
+              <span className="hidden shrink-0 font-mono text-xs tabular-nums text-zinc-500 sm:inline">
                 {formatVersionTimestamp(group.latestTimestamp)}
               </span>
             </button>
@@ -4860,10 +4875,10 @@ function GroupedCaptureList({
                         <span className="shrink-0 font-mono text-xs tabular-nums text-zinc-300">
                           {formatVersionTimestamp(capture.timestamp)}
                         </span>
-                        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-500">
+                        <span className="min-w-0 flex-1 truncate font-mono text-xs text-zinc-500">
                           {capture.collectionId}
                         </span>
-                        <span className="shrink-0 font-mono text-[11px] tabular-nums text-zinc-400">
+                        <span className="shrink-0 font-mono text-xs tabular-nums text-zinc-400">
                           {formatBytes(capture.length)}
                         </span>
                       </Link>
@@ -4971,7 +4986,7 @@ function AdvancedSettings({
           type="button"
           aria-expanded={open}
           onClick={onToggle}
-          className="inline-flex items-center gap-1.5 text-xs font-semibold text-zinc-400 transition hover:text-zinc-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300"
+          className="inline-flex min-h-11 items-center gap-1.5 text-sm font-semibold text-zinc-300 transition hover:text-zinc-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300"
         >
           Advanced search
           <ChevronDown
@@ -4981,10 +4996,10 @@ function AdvancedSettings({
         </button>
       </div>
       {open ? (
-        <div className="mt-3 rounded-md border border-zinc-800 bg-zinc-950/60 p-4">
+        <div className="mt-2 rounded-xl border border-zinc-800 bg-zinc-950/70 p-4">
           <div className="flex flex-col gap-4">
             <div className="flex flex-col gap-1">
-              <span id="advanced-match-type-label" className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-400">
+              <span id="advanced-match-type-label" className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-[0.14em] text-zinc-400">
                 Mode
                 <Tooltip
                   side="top"
@@ -5007,9 +5022,9 @@ function AdvancedSettings({
                   <button
                     type="button"
                     aria-label="What is mode?"
-                    className="grid h-4 w-4 place-items-center rounded-full text-zinc-500 transition hover:text-zinc-200 focus:outline-none focus-visible:text-zinc-200"
+                    className="-m-1.5 grid h-7 w-7 place-items-center rounded-full text-zinc-400 transition hover:text-zinc-100 focus:outline-none focus-visible:text-zinc-100 focus-visible:ring-2 focus-visible:ring-amber-300"
                   >
-                    <Info size={12} />
+                    <Info size={14} />
                   </button>
                 </Tooltip>
               </span>
@@ -5018,7 +5033,7 @@ function AdvancedSettings({
                 value={matchType}
                 disabled={disabled}
                 onChange={(event) => onMatchTypeChange(event.target.value as MatchType)}
-                className="h-10 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm font-semibold text-zinc-100 outline-none focus:border-amber-300 disabled:cursor-not-allowed disabled:opacity-50"
+                className="h-11 rounded-lg border border-zinc-700 bg-zinc-950 px-3 text-base font-semibold text-zinc-100 outline-none focus:border-amber-300 disabled:cursor-not-allowed disabled:opacity-50 sm:text-sm"
               >
                 <option value="exact">exact URL</option>
                 <option value="host">host (all paths)</option>
@@ -5026,7 +5041,7 @@ function AdvancedSettings({
               </select>
             </div>
             <div className="flex flex-col gap-1">
-              <span id="advanced-scope-label" className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-400">
+              <span id="advanced-scope-label" className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-[0.14em] text-zinc-400">
                 Scope
                 <Tooltip
                   side="top"
@@ -5049,9 +5064,9 @@ function AdvancedSettings({
                   <button
                     type="button"
                     aria-label="What is scope?"
-                    className="grid h-4 w-4 place-items-center rounded-full text-zinc-500 transition hover:text-zinc-200 focus:outline-none focus-visible:text-zinc-200"
+                    className="-m-1.5 grid h-7 w-7 place-items-center rounded-full text-zinc-400 transition hover:text-zinc-100 focus:outline-none focus-visible:text-zinc-100 focus-visible:ring-2 focus-visible:ring-amber-300"
                   >
-                    <Info size={12} />
+                    <Info size={14} />
                   </button>
                 </Tooltip>
               </span>
@@ -5060,7 +5075,7 @@ function AdvancedSettings({
                 value={scope}
                 disabled={disabled}
                 onChange={(event) => onScopeChange(event.target.value as ScanScope)}
-                className="h-10 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm font-semibold text-zinc-100 outline-none focus:border-amber-300 disabled:cursor-not-allowed disabled:opacity-50"
+                className="h-11 rounded-lg border border-zinc-700 bg-zinc-950 px-3 text-base font-semibold text-zinc-100 outline-none focus:border-amber-300 disabled:cursor-not-allowed disabled:opacity-50 sm:text-sm"
               >
                 <option value="recent">last 12 months</option>
                 <option value="all">full scan (entire archive, since {earliestArchiveYear})</option>

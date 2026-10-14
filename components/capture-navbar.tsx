@@ -90,7 +90,7 @@ export function CaptureNavBar({ url, timestamp, captures, sortedCaptures, curren
         {hasList ? (
           <>
             <div aria-hidden />
-            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-1 text-[10px] font-bold uppercase tracking-[0.18em] text-zinc-500">
+            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-1 text-xs font-bold uppercase tracking-[0.18em] text-zinc-500">
               <span className="text-amber-200/90">{counterLabel}</span>
               {dateLabel ? <span className="text-zinc-300">{dateLabel}</span> : null}
             </div>
@@ -110,7 +110,7 @@ export function CaptureNavBar({ url, timestamp, captures, sortedCaptures, curren
                 title="Previous capture (←)"
               >
                 <ChevronLeft size={15} />
-                <span className="hidden text-[10px] font-bold uppercase tracking-[0.18em] sm:inline">Prev</span>
+                <span className="hidden text-xs font-bold uppercase tracking-[0.18em] sm:inline">Prev</span>
               </NavButton>
             </div>
 
@@ -127,7 +127,7 @@ export function CaptureNavBar({ url, timestamp, captures, sortedCaptures, curren
                 onClick={() => navigateBySorted(nextIndex)}
                 title="Next capture (→)"
               >
-                <span className="hidden text-[10px] font-bold uppercase tracking-[0.18em] sm:inline">Next</span>
+                <span className="hidden text-xs font-bold uppercase tracking-[0.18em] sm:inline">Next</span>
                 <ChevronRight size={15} />
               </NavButton>
               <NavButton
@@ -330,12 +330,12 @@ function CaptureTimeline({
               </div>
               <span
                 className={cn(
-                  "inline-flex justify-center px-1 text-[11px] tabular-nums",
+                  "inline-flex justify-center px-1 text-xs tabular-nums",
                   isSelected
                     ? "bg-amber-300 font-bold text-zinc-950"
                     : hasCount
                       ? "font-semibold text-zinc-300"
-                      : "text-zinc-600"
+                      : "text-zinc-500"
                 )}
               >
                 {year}
@@ -372,15 +372,15 @@ function CaptureTickHover({
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between gap-3">
-        <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-amber-200">
+        <p className="text-xs font-bold uppercase tracking-[0.18em] text-amber-200">
           Capture {sortedIndex + 1}
         </p>
-        <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-400">
+        <p className="text-xs font-bold uppercase tracking-[0.14em] text-zinc-400">
           {capture.collectionId}
         </p>
       </div>
-      <p className="break-all font-mono text-[11px] leading-5 text-zinc-100">{capture.url}</p>
-      <div className="space-y-0.5 text-[11px] text-zinc-300">
+      <p className="break-all font-mono text-xs leading-5 text-zinc-100">{capture.url}</p>
+      <div className="space-y-0.5 text-xs text-zinc-300">
         <p>
           Time: <span className="font-mono text-zinc-100">{formatTimestamp(capture.timestamp)}</span>
         </p>

@@ -3,9 +3,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
-  acknowledgeWebsitePreferences,
-  hasWebsitePreferencesAcknowledgement,
-  OPEN_WEBSITE_PREFERENCES_EVENT
+  declineStorageConsent,
+  grantStorageConsent,
+  hasStorageConsent,
+  hasStorageConsentDecision,
+  OPEN_WEBSITE_PREFERENCES_EVENT,
+  revokeStorageConsent,
+  subscribeStorageConsent
 } from "@/lib/website-preferences";
 
 const FOCUSABLE = 'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -13,6 +17,8 @@ const FOCUSABLE = 'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1
 export function WebsitePreferences() {
   const [ready, setReady] = useState(false);
   const [acknowledged, setAcknowledged] = useState(false);
+  const [bannerVisible, setBannerVisible] = useState(false);
+  const [storageError, setStorageError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -23,8 +29,13 @@ export function WebsitePreferences() {
   }, []);
 
   useEffect(() => {
-    setAcknowledged(hasWebsitePreferencesAcknowledgement());
+    setAcknowledged(hasStorageConsent());
+    setBannerVisible(!hasStorageConsentDecision());
     setReady(true);
+    return subscribeStorageConsent(() => {
+      setAcknowledged(hasStorageConsent());
+      setBannerVisible(!hasStorageConsentDecision());
+    });
   }, []);
 
   useEffect(() => {
@@ -75,27 +86,34 @@ export function WebsitePreferences() {
     return () => { document.body.style.overflow = previousOverflow; };
   }, [settingsOpen]);
 
-  const continueAndAcknowledge = () => {
-    acknowledgeWebsitePreferences();
-    setAcknowledged(true);
+  const allowStorage = () => {
+    setStorageError("");
+    if (!grantStorageConsent()) {
+      setStorageError("Your browser did not allow storage. Check your browser settings and try again.");
+      return;
+    }
+    setAcknowledged(hasStorageConsent());
+    setBannerVisible(false);
     if (settingsOpen) closeSettings();
   };
+  const decline = () => { declineStorageConsent(); setAcknowledged(false); setBannerVisible(false); };
+  const revoke = () => { revokeStorageConsent(); setAcknowledged(false); closeSettings(); };
 
   if (!ready) return null;
 
   return (
     <>
-      {!acknowledged && !settingsOpen && (
+      {!acknowledged && bannerVisible && !settingsOpen && (
         <aside
           aria-labelledby="website-storage-title"
           className="fixed inset-x-3 bottom-3 z-[80] mx-auto max-h-[calc(100dvh-1.5rem)] max-w-3xl overflow-y-auto rounded-xl border border-zinc-700 bg-zinc-950/95 p-5 text-zinc-100 shadow-[0_20px_70px_rgba(0,0,0,0.55)] backdrop-blur-md sm:inset-x-6 sm:bottom-6 sm:max-h-[calc(100dvh-3rem)] sm:p-6"
         >
           <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
             <div className="max-w-2xl">
-              <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.2em] text-amber-300">A note about this browser</p>
-              <h2 id="website-storage-title" className="text-lg font-semibold tracking-tight">Cookies &amp; local storage</h2>
+              <p className="mb-2 text-xs font-bold uppercase tracking-[0.2em] text-amber-300">Your browser, your choice</p>
+              <h2 id="website-storage-title" className="text-lg font-semibold tracking-tight">Allow browser storage?</h2>
               <p className="mt-2 text-sm leading-6 text-zinc-300">
-                We do not set cookies. Necessary browser storage keeps your settings, search history, saved captures, and browser cache on this device. We do not use analytics or advertising cookies.
+                This app needs storage in your browser to search, save results, and remember settings. Your data stays on this device. You can change your choice later in Website settings.
               </p>
               <p className="mt-2 text-xs text-zinc-400">
                 <a className="underline decoration-zinc-600 underline-offset-4 hover:text-amber-200" href="/privacy" onClick={closeSettings}>Privacy</a>
@@ -103,7 +121,11 @@ export function WebsitePreferences() {
                 <a className="underline decoration-zinc-600 underline-offset-4 hover:text-amber-200" href="/settings#storage" onClick={closeSettings}>Manage stored data</a>
               </p>
             </div>
-            <Button onClick={continueAndAcknowledge} className="shrink-0 px-5">Continue</Button>
+            <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
+              <Button variant="secondary" onClick={decline}>No thanks</Button>
+              <Button onClick={allowStorage} className="px-5">Allow browser storage</Button>
+            </div>
+            {storageError && <p role="alert" className="mt-3 text-sm text-red-300">{storageError}</p>}
           </div>
         </aside>
       )}
@@ -121,15 +143,12 @@ export function WebsitePreferences() {
             tabIndex={-1}
             className="w-full max-h-[calc(100dvh-1.5rem)] max-w-xl overflow-y-auto rounded-xl border border-zinc-700 bg-zinc-950 p-5 text-zinc-100 shadow-[0_24px_90px_rgba(0,0,0,0.65)] sm:max-h-[calc(100dvh-3rem)] sm:p-7"
           >
-            <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-amber-300">Website settings</p>
-            <h2 id="website-preferences-title" className="mt-2 text-xl font-semibold tracking-tight">Your data, on this device</h2>
+            <p className="text-xs font-bold uppercase tracking-[0.2em] text-amber-300">Website settings</p>
+            <h2 id="website-preferences-title" className="mt-2 text-xl font-semibold tracking-tight">Browser storage</h2>
             <p id="website-preferences-description" className="mt-3 text-sm leading-6 text-zinc-300">
-              We do not set cookies. Crawlback uses necessary browser storage for your settings, search history, saved captures, and browser cache. You can manage app history and saved captures in App settings. Use your browser controls to clear all site data.
+              Crawlback uses storage in this browser for searches, saved pages, and settings. This information stays on this device. Turning storage off stops app features from using it, but does not delete saved data. You can allow it again whenever you need those features.
             </p>
-            <div className="mt-5 rounded-lg border border-zinc-800 bg-zinc-900/70 p-4">
-              <p className="text-sm font-semibold text-zinc-100">Analytics and advertising</p>
-              <p className="mt-1 text-sm leading-5 text-zinc-400">We do not use analytics or advertising cookies, or any other cookies.</p>
-            </div>
+            {storageError && <p role="alert" className="mt-3 text-sm text-red-300">{storageError}</p>}
             <p className="mt-4 text-xs text-zinc-400">
               <a className="underline decoration-zinc-600 underline-offset-4 hover:text-amber-200" href="/privacy" onClick={closeSettings}>Privacy</a>
               <span aria-hidden="true"> · </span>
@@ -137,7 +156,7 @@ export function WebsitePreferences() {
             </p>
             <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <Button variant="secondary" onClick={closeSettings}>Close settings</Button>
-              {!acknowledged && <Button onClick={continueAndAcknowledge}>Continue</Button>}
+              {!acknowledged ? <Button onClick={allowStorage}>Allow browser storage</Button> : <Button onClick={revoke}>Turn storage off</Button>}
             </div>
           </div>
         </div>

@@ -1,9 +1,28 @@
 @import "tailwindcss";
 
+@theme {
+  /* Proportional face for reading, mono reserved for URLs, data and labels. */
+  --font-sans: var(--font-sans-family), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-mono-family), ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  /* Legibility floor: the smallest step is 12.5px, captions read at 13–14px. */
+  --text-xs: 0.78125rem;
+  --text-xs--line-height: 1.45;
+  --text-sm: 0.90625rem;
+  --text-sm--line-height: 1.55;
+
+  /* Lift the two darkest text greys so secondary copy clears WCAG AA (4.5:1)
+     on the near-black canvas. zinc-500 ≈ 6.1:1; zinc-600 stays for borders and disabled states. */
+  --color-zinc-500: #8e8e99;
+  --color-zinc-600: #6a6a74;
+}
+
 :root {
   color-scheme: dark;
-  --background: #09090b;
+  --background: #0a0a0c;
   --foreground: #f4f4f5;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 * {
@@ -13,14 +32,52 @@
 body {
   margin: 0;
   min-height: 100vh;
+  min-height: 100dvh;
   background:
-    linear-gradient(90deg, rgba(250, 204, 21, 0.05) 1px, transparent 1px),
-    linear-gradient(rgba(250, 204, 21, 0.035) 1px, transparent 1px),
-    radial-gradient(circle at 20% 0%, rgba(245, 158, 11, 0.16), transparent 30%),
-    #09090b;
-  background-size: 44px 44px, 44px 44px, auto, auto;
+    radial-gradient(120% 60% at 18% -10%, rgba(245, 158, 11, 0.13), transparent 55%),
+    linear-gradient(90deg, rgba(250, 204, 21, 0.03) 1px, transparent 1px),
+    linear-gradient(rgba(250, 204, 21, 0.022) 1px, transparent 1px),
+    var(--background);
+  background-size: auto, 48px 48px, 48px 48px, auto;
   color: var(--foreground);
-  font-family: ui-monospace, "SFMono-Regular", "Cascadia Code", "Liberation Mono", Menlo, monospace;
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  line-height: 1.55;
+  font-optical-sizing: auto;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  overflow-x: clip;
+}
+
+/* Size-specific tracking: big display type tightens, tiny labels open up. */
+h1,
+h2,
+h3 {
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+}
+
+p,
+li,
+dd {
+  text-wrap: pretty;
+}
+
+/* Tap feedback on press, not on release; no grey flash on iOS. */
+button,
+a,
+summary,
+[role="button"] {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+button:not(:disabled):active,
+a[class*="inline-flex"]:active,
+summary:active {
+  transform: scale(0.97);
+  transition: transform 90ms ease-out;
 }
 
 ::selection {
@@ -41,9 +98,12 @@ body {
 
 .archive-panel {
   border: 1px solid rgba(63, 63, 70, 0.85);
-  background: rgba(9, 9, 11, 0.84);
-  box-shadow: 0 18px 70px rgba(0, 0, 0, 0.28);
-  backdrop-filter: blur(18px);
+  background: linear-gradient(180deg, rgba(24, 24, 27, 0.72), rgba(12, 12, 14, 0.9));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 18px 70px rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
 }
 
 .history-grid {
@@ -247,8 +307,8 @@ body {
   inset: 0;
   background: repeating-linear-gradient(
     to bottom,
-    rgba(255, 255, 255, 0.025) 0px,
-    rgba(255, 255, 255, 0.025) 1px,
+    rgba(255, 255, 255, 0.014) 0px,
+    rgba(255, 255, 255, 0.014) 1px,
     transparent 1px,
     transparent 3px
   );
@@ -259,7 +319,7 @@ body {
 .landing-grain {
   position: absolute;
   inset: 0;
-  opacity: 0.4;
+  opacity: 0.22;
   mix-blend-mode: overlay;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.4'/%3E%3C/svg%3E");
   background-size: 150px 150px;
@@ -387,7 +447,7 @@ body {
 
 .landing-mini-header {
   position: fixed;
-  top: clamp(0.75rem, 2vw, 1rem);
+  top: max(clamp(0.5rem, 2vw, 1rem), env(safe-area-inset-top));
   left: 50%;
   z-index: 40;
   display: flex;
@@ -396,29 +456,27 @@ body {
   align-items: center;
   gap: 0.5rem;
   overflow: visible;
-  border: 1px solid rgba(250, 204, 21, 0.24);
-  border-radius: 0.5rem;
-  background:
-    linear-gradient(180deg, rgba(24, 24, 27, 0.88), rgba(9, 9, 11, 0.82)),
-    rgba(9, 9, 11, 0.84);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-top-color: rgba(255, 255, 255, 0.14);
+  border-radius: 0.875rem;
+  background: rgba(16, 16, 19, 0.72);
   box-shadow:
-    0 0 0 1px rgba(250, 204, 21, 0.08),
-    0 18px 60px rgba(0, 0, 0, 0.38);
+    0 0 0 1px rgba(0, 0, 0, 0.4),
+    0 18px 50px rgba(0, 0, 0, 0.45);
   opacity: 0;
   pointer-events: none;
-  transform: translate(-50%, -0.6rem);
+  transform: translate(-50%, -0.75rem) scale(0.98);
   transition:
-    opacity 180ms ease,
-    transform 180ms ease,
-    border-color 180ms ease,
-    box-shadow 180ms ease;
-  backdrop-filter: blur(18px);
+    opacity 220ms ease,
+    transform 420ms cubic-bezier(0.22, 1, 0.36, 1);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
 }
 
 .landing-mini-header.is-visible {
   opacity: 1;
   pointer-events: auto;
-  transform: translate(-50%, 0);
+  transform: translate(-50%, 0) scale(1);
 }
 
 .landing-mini-header__brand {
@@ -446,17 +504,17 @@ body {
 
 .landing-mini-header__links a {
   display: inline-flex;
-  height: 2.35rem;
+  height: 2.5rem;
   min-width: max-content;
   align-items: center;
   justify-content: center;
   gap: 0.35rem;
   border: 1px solid transparent;
-  border-radius: 0.375rem;
+  border-radius: 0.625rem;
   color: #d4d4d8;
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.005em;
   text-decoration: none;
   transition:
     background 160ms ease,
@@ -466,7 +524,8 @@ body {
 }
 
 .landing-mini-header__links a {
-  padding: 0 0.65rem;
+  padding: 0 0.75rem;
+  scroll-margin-inline: 0.5rem;
 }
 
 .landing-mini-header__links a:hover,
@@ -478,10 +537,9 @@ body {
 
 .landing-mini-header__links a.is-active,
 .landing-mini-header__links a[aria-current="true"] {
-  border-color: rgba(250, 204, 21, 0.42);
-  background: rgba(250, 204, 21, 0.12);
-  color: #fde68a;
-  box-shadow: inset 0 0 18px rgba(250, 204, 21, 0.07);
+  border-color: rgba(250, 204, 21, 0.3);
+  background: rgba(250, 204, 21, 0.14);
+  color: #fef3c7;
 }
 
 .landing-mini-header__menu {
@@ -494,8 +552,15 @@ body {
 }
 
 .landing-mini-header__menu button {
-  height: 2.35rem;
-  width: 2.35rem;
+  height: 2.5rem;
+  width: 2.5rem;
+}
+
+/* Fade the scrollable link strip at its edges instead of a hard cut. */
+@media (max-width: 679px) {
+  .landing-mini-header__links {
+    mask-image: linear-gradient(90deg, #000 calc(100% - 1.5rem), transparent);
+  }
 }
 
 .landing-glow-card {
@@ -578,8 +643,8 @@ body {
 .landing-scroll-top {
   --scroll-progress: 0%;
   position: fixed;
-  right: clamp(1rem, 2.5vw, 1.75rem);
-  bottom: clamp(1rem, 2.5vw, 1.75rem);
+  right: max(clamp(1rem, 2.5vw, 1.75rem), env(safe-area-inset-right));
+  bottom: max(clamp(1rem, 2.5vw, 1.75rem), env(safe-area-inset-bottom));
   z-index: 30;
   display: grid;
   width: 3.25rem;
@@ -712,5 +777,70 @@ html {
   }
   html {
     scroll-behavior: auto;
+  }
+}
+
+/* App menu popover: grows out of its trigger (top-right), not from its centre. */
+@keyframes menu-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.94) translateY(-4px);
+    filter: blur(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
+
+.menu-popover {
+  transform-origin: top right;
+  animation: menu-pop 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .menu-popover {
+    animation: menu-fade 160ms ease both;
+  }
+  button:not(:disabled):active,
+  a[class*="inline-flex"]:active,
+  summary:active {
+    transform: none;
+  }
+}
+
+@keyframes menu-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .archive-panel,
+  .landing-mini-header,
+  .menu-popover,
+  .landing-scroll-top {
+    background: #141417;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  .landing-grain,
+  .landing-scanlines {
+    display: none;
+  }
+}
+
+@media (prefers-contrast: more) {
+  :root {
+    --color-zinc-400: #c4c4cc;
+    --color-zinc-500: #a8a8b2;
+  }
+  .archive-panel,
+  .landing-mini-header {
+    background: #0c0c0e;
+    border-color: #71717a;
   }
 }

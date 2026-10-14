@@ -318,10 +318,10 @@ function YearStrip({
               <span
                 className={
                   isSelected
-                    ? "inline-flex justify-center bg-amber-300 px-1 text-[11px] font-bold text-zinc-950"
+                    ? "inline-flex justify-center bg-amber-300 px-1 text-xs font-bold text-zinc-950"
                     : count > 0
-                      ? "inline-flex justify-center px-1 text-[11px] font-semibold text-zinc-300 transition group-hover:font-bold group-hover:text-amber-300/70"
-                      : "inline-flex justify-center px-1 text-[11px] text-zinc-600 transition group-hover:font-bold group-hover:text-amber-300/70"
+                      ? "inline-flex justify-center px-1 text-xs font-semibold text-zinc-300 transition group-hover:font-bold group-hover:text-amber-300/70"
+                      : "inline-flex justify-center px-1 text-xs text-zinc-500 transition group-hover:font-bold group-hover:text-amber-300/70"
                 }
               >
                 {year}
@@ -375,7 +375,7 @@ function MonthGrid({
       <p className="mb-2 text-center text-xs font-bold uppercase tracking-[0.18em] text-zinc-400">
         {MONTH_LABELS[month - 1]}
       </p>
-      <div className="grid grid-cols-7 gap-y-1 text-center text-[11px]">
+      <div className="grid grid-cols-7 gap-y-1 text-center text-xs">
         {cells.map((day, idx) => {
           if (day === null) {
             return <span key={`empty-${idx}`} className="h-6" />;
@@ -410,7 +410,7 @@ function MonthGrid({
             );
           }
           return (
-            <span key={key} className="grid h-6 place-items-center text-zinc-600">
+            <span key={key} className="grid h-6 place-items-center text-zinc-500">
               {day}
             </span>
           );
@@ -518,7 +518,7 @@ function DayPopover({
                 key={`${capture.collectionId}:${capture.timestamp}:${capture.filename}:${capture.offset}`}
                 className="flex items-center gap-2 text-sm leading-6"
               >
-                <span className="text-zinc-600">•</span>
+                <span className="text-zinc-500">•</span>
                 <a
                   href={viewerUrl}
                   target="_blank"

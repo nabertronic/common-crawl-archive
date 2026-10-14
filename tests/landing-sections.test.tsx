@@ -6,14 +6,16 @@ import { SiteFooter } from "@/components/site-footer";
 import { WebsitePreferences } from "@/components/website-preferences";
 
 describe("LandingSections", () => {
-  it("renders all four landing sections", () => {
+  it("preserves all four original landing sections and adds links to the full guide", () => {
     render(<LandingSections />);
     expect(screen.getByRole("heading", { name: "Three steps to a lost page" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Built on Common Crawl" })).toBeInTheDocument();
-    expect(
-      screen.getByRole("heading", { name: "A web archive that stays out of your way" })
-    ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "A web archive that stays out of your way" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Questions" })).toBeInTheDocument();
+
+    const guideNav = screen.getByRole("navigation", { name: "Research guide" });
+    expect(guideNav.querySelector('a[href="/how-it-works#how-it-works"]')).toHaveTextContent("How it works");
+    expect(guideNav.querySelector('a[href="/how-it-works#faq"]')).toHaveTextContent("FAQ");
   });
 
   it("opens an FAQ entry on click", () => {
@@ -27,7 +29,7 @@ describe("LandingSections", () => {
     expect(screen.getByText(/Common Crawl often holds captures the Wayback Machine is missing/)).toBeVisible();
   });
 
-  it("keeps landing navigation and makes legal information and website settings accessible in the shared footer", async () => {
+  it("keeps native landing anchors, guide links, and legal information accessible", async () => {
     render(<><LandingSections /><SiteFooter /><WebsitePreferences /></>);
     const nav = screen.getByRole("navigation", { name: "Landing sections" });
     expect(nav.querySelector('a[href="#top"]')).not.toBeNull();
@@ -38,10 +40,13 @@ describe("LandingSections", () => {
     expect(screen.getByRole("button", { name: "Open menu" })).toBeInTheDocument();
 
     const footer = screen.getByRole("contentinfo");
+    expect(footer.querySelector('a[href="/how-it-works#how-it-works"]')).not.toBeNull();
+    expect(footer.querySelector('a[href="/how-it-works#faq"]')).not.toBeNull();
     expect(footer.querySelector('a[href="/privacy"]')).not.toBeNull();
+    expect(footer.querySelector('a[href="/terms"]')).not.toBeNull();
     expect(footer.querySelector('a[href="/imprint"]')).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Website settings" }));
-    expect(await screen.findByRole("dialog", { name: "Your data, on this device" })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "Browser storage" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
     expect(footer.querySelector('a[href="/history"]')).toBeNull();
     expect(footer.querySelector('a[href="/settings"]')).toBeNull();

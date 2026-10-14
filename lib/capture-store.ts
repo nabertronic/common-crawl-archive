@@ -2,6 +2,7 @@ import { shouldPersistScanLogEntry } from "./common-crawl";
 import type { CollectionCheckResult, CommonCrawlCapture, CommonCrawlCollection, MatchType, ScanLogEntry } from "./common-crawl";
 import { markPerformance, measureAsync, measurePerformance } from "./performance";
 import { dedupeCaptures, mergeCollectionResult, mergeCollectionResults } from "./scan-results";
+import { hasStorageConsent, requireStorageConsent, subscribeStorageConsent } from "./website-preferences";
 
 const DB_NAME = "wayback-fallback";
 const DB_VERSION = 6;
@@ -307,6 +308,37 @@ function newStableId(): string {
 // (another tab upgrading) or an unexpected close, which resets the cache so the
 // next call reopens cleanly.
 let cachedDbPromise: Promise<IDBDatabase> | undefined;
+const activeTransactions = new Set<IDBTransaction>();
+const CONSENT_REQUIRED = new Error("Allow browser storage before using saved app data");
+
+function assertStorageConsent(): void {
+  if (!requireStorageConsent()) throw CONSENT_REQUIRED;
+}
+
+function trackTransaction(tx: IDBTransaction): IDBTransaction {
+  activeTransactions.add(tx);
+  const remove = () => activeTransactions.delete(tx);
+  tx.addEventListener("complete", remove, { once: true });
+  tx.addEventListener("abort", remove, { once: true });
+  tx.addEventListener("error", remove, { once: true });
+  return tx;
+}
+
+function openTransaction(db: IDBDatabase, stores: string | string[], mode?: IDBTransactionMode): IDBTransaction {
+  assertStorageConsent();
+  return trackTransaction(db.transaction(stores, mode));
+}
+
+subscribeStorageConsent(() => {
+  if (hasStorageConsent()) return;
+  cachedSettings = undefined;
+  cachedLocalUser = undefined;
+  for (const tx of activeTransactions) { try { tx.abort(); } catch { /* It may already be complete. */ } }
+  activeTransactions.clear();
+  const pending = cachedDbPromise;
+  cachedDbPromise = undefined;
+  if (pending) void pending.then((db) => db.close()).catch(() => undefined);
+});
 
 function releaseDb(_db: IDBDatabase): void {
   // No-op: the connection is pooled in `cachedDbPromise` and stays open for reuse.
@@ -322,6 +354,7 @@ function resetDbCache(db: IDBDatabase): void {
 }
 
 function openDB(): Promise<IDBDatabase> {
+  assertStorageConsent();
   if (cachedDbPromise) return cachedDbPromise;
   cachedDbPromise = new Promise((resolve, reject) => {
     if (typeof indexedDB === "undefined") {
@@ -337,6 +370,14 @@ function openDB(): Promise<IDBDatabase> {
       markPerformance(upgradeStart);
       const db = req.result;
       const upgradeTx = req.transaction;
+      if (upgradeTx) trackTransaction(upgradeTx);
+      if (!hasStorageConsent()) {
+        upgradeTx?.abort();
+        db.close();
+        cachedDbPromise = undefined;
+        reject(CONSENT_REQUIRED);
+        return;
+      }
       // Return the store whether it already exists (upgrade) or must be created
       // (fresh DB), so indexes can be attached in the same versionchange tx.
       const ensureStore = (name: string, options: IDBObjectStoreParameters): IDBObjectStore | undefined => {
@@ -395,7 +436,7 @@ async function withStore<T>(
   const db = await openDB();
   try {
     return await new Promise<T | undefined>((resolve, reject) => {
-      const tx = db.transaction(storeName, mode);
+      const tx = openTransaction(db, storeName, mode);
       const request = task(tx.objectStore(storeName));
       let requestValue: T | undefined;
       if (request) {
@@ -423,7 +464,7 @@ async function listByOwnerIndex<T extends { ownerId?: string }>(
   const db = await openDB();
   try {
     return await new Promise<T[]>((resolve, reject) => {
-      const tx = db.transaction(storeName, "readonly");
+      const tx = openTransaction(db, storeName, "readonly");
       const store = tx.objectStore(storeName);
       if (!store.indexNames.contains("ownerId")) {
         const req = store.getAll();
@@ -469,7 +510,7 @@ async function migrateStoreInBatches<T>(
     let lastKey: IDBValidKey | undefined;
     for (;;) {
       const batch = await new Promise<{ count: number; lastKey?: IDBValidKey }>((resolve, reject) => {
-        const tx = db.transaction(storeName, "readwrite");
+        const tx = openTransaction(db, storeName, "readwrite");
         const store = tx.objectStore(storeName);
         const range = lastKey === undefined ? null : IDBKeyRange.lowerBound(lastKey, true);
         const req = store.openCursor(range);
@@ -554,7 +595,7 @@ async function mutateCoverageRecord<T>(
   let shouldNotify = false;
   try {
     const result = await new Promise<T>((resolve, reject) => {
-      const tx = db.transaction(COVERAGE_STORE, "readwrite");
+      const tx = openTransaction(db, COVERAGE_STORE, "readwrite");
       const store = tx.objectStore(COVERAGE_STORE);
       const request = store.get(targetId);
       let resultValue: T;
@@ -662,7 +703,7 @@ export async function listRecentHistorySummaries(limit: number): Promise<History
       const db = await openDB();
       try {
         return await new Promise<HistorySummaryRecord[]>((resolve, reject) => {
-          const tx = db.transaction(HISTORY_SUMMARY_STORE, "readonly");
+          const tx = openTransaction(db, HISTORY_SUMMARY_STORE, "readonly");
           const store = tx.objectStore(HISTORY_SUMMARY_STORE);
           if (!store.indexNames.contains("owner_updatedAt")) {
             const req = store.getAll();
@@ -724,7 +765,7 @@ export async function deleteSearches(keys: string[]): Promise<void> {
   try {
     const db = await openDB();
     await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction([LEGACY_SEARCH_STORE, HISTORY_SUMMARY_STORE], "readwrite");
+      const tx = openTransaction(db, [LEGACY_SEARCH_STORE, HISTORY_SUMMARY_STORE], "readwrite");
       const searchStore = tx.objectStore(LEGACY_SEARCH_STORE);
       const summaryStore = tx.objectStore(HISTORY_SUMMARY_STORE);
       for (const key of keys) {
@@ -1375,6 +1416,7 @@ function ensureIdentityCacheInvalidation(): void {
 }
 
 export async function getOrCreateLocalUser(): Promise<LocalUser> {
+  assertStorageConsent();
   ensureIdentityCacheInvalidation();
   if (cachedLocalUser) return cachedLocalUser;
   const settings = await readSettings();
@@ -1415,6 +1457,7 @@ export async function updateLocalUser(input: { displayName?: string }): Promise<
 }
 
 export async function getSettings(): Promise<AppSettings> {
+  assertStorageConsent();
   ensureIdentityCacheInvalidation();
   if (cachedSettings) return cachedSettings;
   await getOrCreateLocalUser();
@@ -1549,7 +1592,7 @@ export async function listCachedCaptureRecordsForCaptures(
     const db = await openDB();
     try {
       return await new Promise<CachedHtmlCaptureRecord[]>((resolve, reject) => {
-        const tx = db.transaction(HTML_CAPTURE_STORE, "readonly");
+        const tx = openTransaction(db, HTML_CAPTURE_STORE, "readonly");
         const store = tx.objectStore(HTML_CAPTURE_STORE);
         const records: CachedHtmlCaptureRecord[] = [];
         for (const key of keys) {
@@ -1586,7 +1629,7 @@ export async function countCachedCaptureKeys(keys: string[]): Promise<number> {
     const db = await openDB();
     try {
       return await new Promise<number>((resolve, reject) => {
-        const tx = db.transaction(HTML_CAPTURE_META_STORE, "readonly");
+        const tx = openTransaction(db, HTML_CAPTURE_META_STORE, "readonly");
         const store = tx.objectStore(HTML_CAPTURE_META_STORE);
         let count = 0;
         const missingKeys: string[] = [];
@@ -1629,7 +1672,7 @@ export async function deleteCachedCapture(
     const cacheKey = typeof captureOrKey === "string" ? captureOrKey : captureCacheKey(captureOrKey);
     const db = await openDB();
     await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction([HTML_CAPTURE_STORE, HTML_CAPTURE_META_STORE], "readwrite");
+      const tx = openTransaction(db, [HTML_CAPTURE_STORE, HTML_CAPTURE_META_STORE], "readwrite");
       tx.objectStore(HTML_CAPTURE_STORE).delete(cacheKey);
       tx.objectStore(HTML_CAPTURE_META_STORE).delete(cacheKey);
       tx.oncomplete = () => resolve();
@@ -1657,7 +1700,7 @@ export async function deleteCachedCaptureKeys(keys: string[]): Promise<void> {
     const uniqueKeys = Array.from(new Set(keys));
     const db = await openDB();
     await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction([HTML_CAPTURE_STORE, HTML_CAPTURE_META_STORE], "readwrite");
+      const tx = openTransaction(db, [HTML_CAPTURE_STORE, HTML_CAPTURE_META_STORE], "readwrite");
       const htmlStore = tx.objectStore(HTML_CAPTURE_STORE);
       const metaStore = tx.objectStore(HTML_CAPTURE_META_STORE);
       for (const key of uniqueKeys) {
@@ -1679,7 +1722,7 @@ export async function clearHtmlCache(): Promise<void> {
   try {
     const db = await openDB();
     await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction([HTML_CAPTURE_STORE, HTML_CAPTURE_META_STORE], "readwrite");
+      const tx = openTransaction(db, [HTML_CAPTURE_STORE, HTML_CAPTURE_META_STORE], "readwrite");
       tx.objectStore(HTML_CAPTURE_STORE).clear();
       tx.objectStore(HTML_CAPTURE_META_STORE).clear();
       tx.oncomplete = () => resolve();
@@ -1697,7 +1740,7 @@ export async function clearAllLocalAppData(): Promise<void> {
   try {
     const db = await openDB();
     await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(
+      const tx = openTransaction(db,
         [LEGACY_SEARCH_STORE, HISTORY_SUMMARY_STORE, TARGET_STORE, COVERAGE_STORE, SESSION_STORE, USER_STORE, SETTINGS_STORE, HTML_CAPTURE_STORE, HTML_CAPTURE_META_STORE],
         "readwrite"
       );
@@ -1816,7 +1859,7 @@ export async function searchCachedHtml(
   const db = await openDB();
   try {
     const matches = await new Promise<CachedHtmlSearchMatch[]>((resolve, reject) => {
-      const tx = db.transaction(HTML_CAPTURE_STORE, "readonly");
+      const tx = openTransaction(db, HTML_CAPTURE_STORE, "readonly");
       const store = tx.objectStore(HTML_CAPTURE_STORE);
       const request = store.openCursor();
       const found: CachedHtmlSearchMatch[] = [];
@@ -2052,7 +2095,7 @@ async function countCachedCaptureKeysFromHtmlStore(keys: string[], ownerId: stri
   const metas: CachedHtmlCaptureMetaRecord[] = [];
   try {
     const count = await new Promise<number>((resolve, reject) => {
-      const tx = db.transaction(HTML_CAPTURE_STORE, "readonly");
+      const tx = openTransaction(db, HTML_CAPTURE_STORE, "readonly");
       const store = tx.objectStore(HTML_CAPTURE_STORE);
       let found = 0;
       for (const key of uniqueKeys) {

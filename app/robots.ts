@@ -6,6 +6,7 @@ export default function robots(): MetadataRoute.Robots {
       userAgent: "*",
       allow: "/",
       disallow: ["/api/", "/search", "/history", "/settings", "/view"]
-    }
+    },
+    sitemap: "https://crawlback.cc/sitemap.xml"
   };
 }

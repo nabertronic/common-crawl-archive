@@ -1,4 +1,5 @@
 import { markPerformance, measurePerformance } from "@/lib/performance";
+import { hasStorageConsent } from "@/lib/website-preferences";
 
 export const COLLECTIONS_URL = "https://index.commoncrawl.org/collinfo.json";
 export const DATA_BASE_URL = "https://data.commoncrawl.org/";
@@ -307,6 +308,7 @@ export function parseCollections(value: unknown): CommonCrawlCollection[] {
 
 function readJsonStorage<T>(key: string): T | undefined {
   try {
+    if (!hasStorageConsent()) return undefined;
     if (typeof globalThis.localStorage === "undefined") return undefined;
     const value = globalThis.localStorage.getItem(key);
     return value ? (JSON.parse(value) as T) : undefined;
@@ -317,6 +319,7 @@ function readJsonStorage<T>(key: string): T | undefined {
 
 function writeJsonStorage(key: string, value: unknown): void {
   try {
+    if (!hasStorageConsent()) return;
     if (typeof globalThis.localStorage === "undefined") return;
     globalThis.localStorage.setItem(key, JSON.stringify(value));
   } catch {
@@ -1064,6 +1067,7 @@ export function getCommonCrawlRateLimitSnapshot(hostname = "index.commoncrawl.or
 export function resetCommonCrawlRateLimitState(): void {
   hostStates.clear();
   try {
+    if (!hasStorageConsent()) return;
     if (typeof globalThis.localStorage === "undefined") return;
     for (let index = globalThis.localStorage.length - 1; index >= 0; index -= 1) {
       const key = globalThis.localStorage.key(index);

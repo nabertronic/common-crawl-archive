@@ -1,17 +1,20 @@
 import { robotsUrlForTarget, type RobotsCheckResult } from "./robots";
+import { hasStorageConsent } from "./website-preferences";
 
 export const ROBOTS_CACHE_TTL_MS = 48 * 60 * 60 * 1000;
 const ROBOTS_CACHE_PREFIX = "wayback-fallback:robots:v1:";
 
 export function readCachedRobotsStatus(
   url: string,
-  storage: Pick<Storage, "getItem"> | undefined = globalThis.localStorage,
+  storage?: Pick<Storage, "getItem">,
   now = Date.now()
 ): RobotsCheckResult | null {
   try {
+    if (!hasStorageConsent()) return null;
+    const targetStorage = storage === undefined ? globalThis.localStorage : storage;
     const key = robotsCacheKey(url);
-    if (!key || !storage) return null;
-    const raw = storage.getItem(key);
+    if (!key || !targetStorage) return null;
+    const raw = targetStorage.getItem(key);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as RobotsCheckResult;
     if (!isRobotsCheckResult(parsed)) return null;
@@ -25,12 +28,14 @@ export function readCachedRobotsStatus(
 export function writeCachedRobotsStatus(
   url: string,
   result: RobotsCheckResult,
-  storage: Pick<Storage, "setItem"> | undefined = globalThis.localStorage
+  storage?: Pick<Storage, "setItem">
 ) {
   try {
+    if (!hasStorageConsent()) return;
+    const targetStorage = storage === undefined ? globalThis.localStorage : storage;
     const key = robotsCacheKey(url);
-    if (!key || !storage) return;
-    storage.setItem(key, JSON.stringify(result));
+    if (!key || !targetStorage) return;
+    targetStorage.setItem(key, JSON.stringify(result));
   } catch {
     // Robots cache writes are best-effort.
   }

@@ -3,12 +3,20 @@ import { LegalPage } from "@/components/legal-page";
 
 export const metadata: Metadata = {
   title: "Legal notice · Crawlback",
-  description: "Provider information and contact details for Crawlback."
+  description: "Provider information and contact details for Crawlback.",
+  alternates: { canonical: "/imprint" },
+  openGraph: {
+    title: "Legal notice · Crawlback",
+    description: "Provider information and contact details for Crawlback.",
+    url: "/imprint",
+    siteName: "Crawlback",
+    type: "website"
+  }
 };
 
 const sectionClass = "py-8 sm:py-9";
-const headingClass = "font-mono text-xs uppercase tracking-[0.16em] text-zinc-400";
-const textClass = "mt-4 max-w-2xl text-sm leading-7 text-zinc-300";
+const headingClass = "text-lg font-semibold leading-snug text-zinc-50 sm:text-xl";
+const textClass = "mt-3 max-w-2xl text-base leading-7 text-zinc-300";
 
 export default function ImprintPage() {
   return (

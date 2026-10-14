@@ -1,4 +1,5 @@
 import { searchUrlCoversTarget, type MatchType } from "./common-crawl";
+import { hasStorageConsent } from "./website-preferences";
 
 export const OPT_OUT_REGISTRY_CSV_URL =
   "https://docs.google.com/spreadsheets/d/1uavIZ-Y2ew-Vj7d0_pY67SGD2jcUCsZZ5rPy1qEyPzg/export?format=csv&gid=0";
@@ -180,6 +181,7 @@ function isOptOutEntry(value: unknown): value is OptOutEntry {
 
 function readOptOutRegistry({ allowStale }: { allowStale: boolean }): OptOutRegistry | undefined {
   try {
+    if (!hasStorageConsent()) return undefined;
     if (typeof globalThis.localStorage === "undefined") return undefined;
     const value = globalThis.localStorage.getItem(OPT_OUT_REGISTRY_CACHE_KEY);
     if (!value) return undefined;
@@ -205,6 +207,7 @@ function readOptOutRegistry({ allowStale }: { allowStale: boolean }): OptOutRegi
 
 function writeOptOutRegistry(registry: OptOutRegistry): void {
   try {
+    if (!hasStorageConsent()) return;
     if (typeof globalThis.localStorage === "undefined") return;
     globalThis.localStorage.setItem(OPT_OUT_REGISTRY_CACHE_KEY, JSON.stringify(registry));
   } catch {

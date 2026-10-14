@@ -4,11 +4,19 @@ import { LegalPage } from "@/components/legal-page";
 
 export const metadata: Metadata = {
   title: "Privacy · Crawlback",
-  description: "How Crawlback handles browser storage, archive searches, and technical access data."
+  description: "How Crawlback handles browser storage, archive searches, and technical access data.",
+  alternates: { canonical: "/privacy" },
+  openGraph: {
+    title: "Privacy · Crawlback",
+    description: "How Crawlback handles browser storage, archive searches, and technical access data.",
+    url: "/privacy",
+    siteName: "Crawlback",
+    type: "website"
+  }
 };
 
-const sectionClass = "space-y-4 py-8 text-sm leading-7 text-zinc-300 sm:py-9";
-const headingClass = "font-mono text-xs uppercase tracking-[0.16em] text-zinc-400";
+const sectionClass = "space-y-4 py-8 text-base leading-7 text-zinc-300 sm:py-10";
+const headingClass = "text-lg font-semibold leading-snug text-zinc-50 sm:text-xl";
 const linkClass = "text-amber-300 underline decoration-amber-300/40 underline-offset-4 hover:text-amber-200";
 
 export default function PrivacyPage() {
@@ -16,9 +24,9 @@ export default function PrivacyPage() {
     <LegalPage title="Privacy" eyebrow="Your searches · Your browser">
       <section className={sectionClass} aria-labelledby="privacy-overview">
         <h2 id="privacy-overview" className={headingClass}>At a glance</h2>
-        <p>Crawlback helps you find archived web pages. There are no accounts, advertising, analytics scripts, or session recordings. Search history, settings, and saved captures stay in your browser; they are not synchronised to an account.</p>
+        <p>Crawlback helps you find archived web pages. There are no accounts, advertising, analytics scripts, or session recordings. If you allow browser storage, search history, settings, and saved captures stay in your browser; they are not synchronised to an account.</p>
         <p>Local storage does not make a search anonymous: archive queries go to Common Crawl, and visiting this website requires technical access data to be processed by our hosting provider.</p>
-        <p className="text-xs text-zinc-500">Last updated: 14 October 2026</p>
+        <p className="text-sm text-zinc-400">Last updated: 14 October 2026</p>
       </section>
 
       <section className={sectionClass} aria-labelledby="privacy-controller">
@@ -51,16 +59,16 @@ export default function PrivacyPage() {
         <dl className="space-y-5 border-l border-amber-300/30 pl-5">
           <div><dt className="font-semibold text-zinc-100">History, settings, and saved captures</dt><dd>IndexedDB holds your scan history, results, coverage, settings, and optionally cached HTML. A local identifier separates data inside this browser; it is not a login or a tracking identifier sent to us.</dd></div>
           <div><dt className="font-semibold text-zinc-100">Search and request caches</dt><dd>Local storage holds source lists, robots checks, archive-query results, and scan coordination state. The background-scan service worker also caches Common Crawl index responses in the browser.</dd></div>
-          <div><dt className="font-semibold text-zinc-100">Website settings acknowledgement</dt><dd>A versioned local-storage entry remembers that you have read the storage notice. It does not grant consent to tracking. You can reopen the notice using “Website settings” in the footer.</dd></div>
+          <div><dt className="font-semibold text-zinc-100">Storage choice</dt><dd>After you select “Allow browser storage,” a small versioned entry in local storage records that choice so the app can remember it. This record contains the consent version and grant status, not your search history. “No thanks” is remembered only in memory for the current page session.</dd></div>
         </dl>
-        <p>We do not request consent for advertising or analytics because those features are not used. Device access that is strictly necessary to provide a feature you expressly request is covered by <a href="https://www.gesetze-im-internet.de/ttdsg/__25.html" className={linkClass}>Section 25(2)(2) TDDDG</a>. The banner explains storage; clicking “Continue” acknowledges that information.</p>
+        <p>Before you allow storage, Crawlback reads only the small consent record to check your choice. It does not read app history or settings. App storage features stay disabled until you explicitly choose “Allow browser storage.” This consent covers browser storage for the app features described above. For storing or accessing information on your device, the legal basis is your consent under Section 25(1) TDDDG. To the extent the associated processing involves personal data, the basis is Article 6(1)(a) GDPR. The app does not rely on the exception in Section 25(2)(2) TDDDG for these features.</p>
         <p>History and preferences have no automatic time-based deletion. Source-list and opt-out data is normally refreshed after 24 hours, robots results after 48 hours, and archive-query results after seven days. These are freshness periods, not guaranteed deletion periods: stale entries and service-worker caches can remain until replaced or cleared. Cached HTML can be evicted when automatic pruning is enabled and the configured size limit is reached.</p>
       </section>
 
       <section className={sectionClass} aria-labelledby="privacy-controls">
         <h2 id="privacy-controls" className={headingClass}>Your controls</h2>
         <p>Use <Link href="/settings#storage" className={linkClass}>App settings</Link> to control saved HTML and clear its cache. “Clear all” in the danger zone resets the app’s IndexedDB history, settings, and captures. It does not remove every local-storage entry or the service-worker cache.</p>
-        <p>To remove all data for this website, use your browser’s site-data controls, including local storage, IndexedDB, and cached data. This also removes the storage-notice acknowledgement. Your browser may clear data automatically or prevent storage; history and caching may then be unavailable. Exported files on your computer are separate and must be deleted there.</p>
+        <p>Choose “Website settings” in the footer and turn browser storage off to withdraw consent. This removes the consent record, stops app features from accessing browser storage, unregisters the app’s service workers, and deletes Crawlback Cache Storage caches. It does not delete your saved IndexedDB history, captures, settings, or other app local-storage data from the device. You can use the browser’s site-data controls to remove remaining data, including local storage and IndexedDB. Exported files on your computer are separate and must be deleted there. You can allow storage again at any time.</p>
       </section>
 
       <section className={sectionClass} aria-labelledby="privacy-contact">

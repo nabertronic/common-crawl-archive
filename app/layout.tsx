@@ -1,15 +1,31 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { headers } from "next/headers";
+import { Atkinson_Hyperlegible_Mono, Atkinson_Hyperlegible_Next } from "next/font/google";
 import "./globals.css";
 import { APP_NAME } from "@/lib/app-meta";
 import { DevTools } from "@/components/dev/dev-tools";
 import { ServiceWorkerRegistrar } from "@/components/service-worker-registrar";
 import { SiteFooter } from "@/components/site-footer";
 import { WebsitePreferences } from "@/components/website-preferences";
+import { StorageConsentGate } from "@/components/storage-consent-gate";
+
+// Atkinson Hyperlegible was drawn by the Braille Institute for low-vision
+// readers: unambiguous letterforms (Il1, O0) matter when reading URLs and dates.
+const sans = Atkinson_Hyperlegible_Next({ subsets: ["latin"], variable: "--font-sans-family", display: "swap" });
+const mono = Atkinson_Hyperlegible_Mono({ subsets: ["latin"], variable: "--font-mono-family", display: "swap" });
+
+export const viewport: Viewport = {
+  themeColor: "#0a0a0c",
+  colorScheme: "dark",
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover"
+};
 
 export const metadata: Metadata = {
   title: APP_NAME,
-  description: "Search public Common Crawl archives and recover snapshots missing from the Wayback Machine."
+  metadataBase: new URL("https://crawlback.cc"),
+  description: "Search public web archives to investigate old pages and find useful sources for reporting and research."
 };
 
 export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
@@ -19,9 +35,9 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
   // nonce and 'strict-dynamic' would block all of them.
   await headers();
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" className={`${sans.variable} ${mono.variable}`} suppressHydrationWarning>
       <body>
-        {children}
+        <StorageConsentGate>{children}</StorageConsentGate>
         <SiteFooter />
         <WebsitePreferences />
         {/* Registers the background-scan service worker (production only). */}

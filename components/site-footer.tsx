@@ -4,17 +4,20 @@ import Link from "next/link";
 import { BrandWordmark } from "@/components/brand";
 import { openWebsitePreferences } from "@/lib/website-preferences";
 
-const linkClass = "rounded-sm text-xs text-zinc-400 transition hover:text-amber-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-300";
+const linkClass = "inline-flex min-h-11 items-center rounded-sm text-sm text-zinc-300 transition hover:text-amber-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-300";
 
 export function SiteFooter() {
   return (
-    <footer className="relative z-10 mx-auto w-full max-w-3xl px-5 pb-8 pt-6 sm:px-8">
-      <div className="flex flex-col gap-5 border-t border-zinc-800 pt-6 sm:flex-row sm:items-center sm:justify-between">
-        <Link href="/" aria-label="Crawlback home" className="w-fit rounded-sm text-zinc-500 hover:text-zinc-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-300">
+    <footer className="relative z-10 mx-auto w-full max-w-3xl px-5 pb-[max(2rem,env(safe-area-inset-bottom))] pt-6 sm:px-8">
+      <div className="flex flex-col gap-4 border-t border-zinc-800 pt-6 sm:flex-row sm:items-center sm:justify-between">
+        <Link href="/" aria-label="Crawlback home" className="inline-flex min-h-11 w-fit items-center rounded-sm text-zinc-400 hover:text-zinc-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-300">
           <BrandWordmark className="text-base leading-none" />
         </Link>
-        <nav aria-label="Website information" className="flex flex-wrap items-center gap-x-6 gap-y-4">
+        <nav aria-label="Website information" className="grid grid-cols-2 gap-x-6 sm:flex sm:flex-wrap sm:items-center sm:gap-x-5">
+          <Link href="/how-it-works#how-it-works" className={linkClass}>How it works</Link>
+          <Link href="/how-it-works#faq" className={linkClass}>FAQ</Link>
           <Link href="/privacy" className={linkClass}>Privacy</Link>
+          <Link href="/terms" className={linkClass}>Terms</Link>
           <Link href="/imprint" className={linkClass}>Legal notice</Link>
           <button type="button" onClick={openWebsitePreferences} className={linkClass}>Website settings</button>
         </nav>
