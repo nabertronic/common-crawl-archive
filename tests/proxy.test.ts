@@ -24,7 +24,7 @@ describe("CSP proxy", () => {
 
     expect(csp).toContain("default-src 'self'");
     expect(csp).toContain("object-src 'none'");
-    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toContain("frame-ancestors 'self' https://eu.posthog.com");
     expect(csp).toContain("base-uri 'self'");
     expect(csp).toContain("form-action 'self'");
     // The client talks to Common Crawl directly from the browser.

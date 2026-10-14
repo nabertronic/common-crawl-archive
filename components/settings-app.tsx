@@ -1,11 +1,15 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useReverification, useUser } from "@clerk/nextjs";
+import { type ClipboardEvent, type FormEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
   Database,
   FileText,
+  KeyRound,
+  Loader2,
+  Mail,
   RefreshCw,
   RotateCcw,
   Search,
@@ -70,12 +74,17 @@ const SECTIONS = [
   { id: "viewer", label: "Viewer" },
   { id: "storage", label: "Storage" },
   { id: "export", label: "Export defaults" },
+  { id: "account", label: "Account" },
   { id: "danger-zone", label: "Danger zone" }
 ] as const;
 
 type SectionId = (typeof SECTIONS)[number]["id"];
 
-export function SettingsApp() {
+type InitialAccount = {
+  email: string | null;
+};
+
+export function SettingsApp({ initialAccount }: { initialAccount?: InitialAccount }) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [stats, setStats] = useState<CacheStats>({ count: 0, sizeBytes: 0 });
   const [collectionInfo, setCollectionInfo] = useState<CollectionCacheInfo>({ count: 0 });
@@ -545,6 +554,8 @@ export function SettingsApp() {
               </div>
             </Panel>
 
+            <AccountPanel initialAccount={initialAccount} />
+
             <Panel
               id="danger-zone"
               icon={<AlertTriangle size={16} />}
@@ -569,6 +580,7 @@ export function SettingsApp() {
                   Clear all
                 </Button>
               </SettingRow>
+              <DeleteAccountControl />
             </Panel>
           </div>
         </div>
@@ -586,6 +598,297 @@ export function SettingsApp() {
         </div>
       ) : null}
     </main>
+  );
+}
+
+function AccountPanel({ initialAccount }: { initialAccount?: InitialAccount }) {
+  const { user, isLoaded } = useUser();
+  const [showPasswordForm, setShowPasswordForm] = useState(false);
+  const [showEmailForm, setShowEmailForm] = useState(false);
+  const [newEmail, setNewEmail] = useState("");
+  const [verificationCode, setVerificationCode] = useState<string[]>(() => Array(6).fill(""));
+  const [pendingEmailId, setPendingEmailId] = useState<string | null>(null);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [emailError, setEmailError] = useState<string | null>(null);
+  const [emailNotice, setEmailNotice] = useState<string | null>(null);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordNotice, setPasswordNotice] = useState<string | null>(null);
+  const [sendingEmailCode, setSendingEmailCode] = useState(false);
+  const [verifyingEmail, setVerifyingEmail] = useState(false);
+  const [updatingPassword, setUpdatingPassword] = useState(false);
+
+  const createEmailAddress = useReverification(async (emailAddress: string) => {
+    if (!user) throw new Error("Your account is unavailable. Please sign in again.");
+    return user.createEmailAddress({ email: emailAddress });
+  });
+
+  const makePrimaryEmail = useReverification(async (emailAddressId: string) => {
+    if (!user) throw new Error("Your account is unavailable. Please sign in again.");
+    await user.update({ primaryEmailAddressId: emailAddressId });
+  });
+
+  const updatePassword = useReverification(async (current: string, next: string) => {
+    if (!user) throw new Error("Your account is unavailable. Please sign in again.");
+    await user.updatePassword({ currentPassword: current, newPassword: next, signOutOfOtherSessions: true });
+  });
+
+  const email = user?.primaryEmailAddress?.emailAddress ?? initialAccount?.email ?? "Loading…";
+  const accountReady = isLoaded && Boolean(user);
+
+  async function startEmailChange(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!user || sendingEmailCode) return;
+    setEmailError(null);
+    setEmailNotice(null);
+    setSendingEmailCode(true);
+    try {
+      const created = await createEmailAddress(newEmail.trim());
+      await user.reload();
+      const emailAddress = user.emailAddresses.find((item) => item.id === created.id);
+      if (!emailAddress) throw new Error("The new email address could not be prepared.");
+      await emailAddress.prepareVerification({ strategy: "email_code" });
+      setPendingEmailId(emailAddress.id);
+      setEmailNotice(`A verification code was sent to ${emailAddress.emailAddress}.`);
+    } catch (error) {
+      setEmailError(getClerkErrorMessage(error));
+    } finally {
+      setSendingEmailCode(false);
+    }
+  }
+
+  async function verifyEmailChange(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!user || !pendingEmailId || verifyingEmail) return;
+    setEmailError(null);
+    setEmailNotice(null);
+    setVerifyingEmail(true);
+    try {
+      const emailAddress = user.emailAddresses.find((item) => item.id === pendingEmailId);
+      if (!emailAddress) throw new Error("The pending email address is no longer available.");
+      await emailAddress.attemptVerification({ code: verificationCode.join("") });
+      await makePrimaryEmail(emailAddress.id);
+      await user.reload();
+      setPendingEmailId(null);
+      setVerificationCode(Array(6).fill(""));
+      setNewEmail("");
+      setShowEmailForm(false);
+      setEmailNotice("Email address updated.");
+    } catch (error) {
+      setEmailError(getClerkErrorMessage(error));
+    } finally {
+      setVerifyingEmail(false);
+    }
+  }
+
+  async function changePassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (updatingPassword) return;
+    setPasswordError(null);
+    setPasswordNotice(null);
+    if (newPassword !== confirmPassword) {
+      setPasswordError("The new passwords do not match.");
+      return;
+    }
+    setUpdatingPassword(true);
+    try {
+      await updatePassword(currentPassword, newPassword);
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setShowPasswordForm(false);
+      setPasswordNotice("Password updated. Other active sessions were signed out.");
+    } catch (error) {
+      setPasswordError(getClerkErrorMessage(error));
+    } finally {
+      setUpdatingPassword(false);
+    }
+  }
+
+  return (
+    <Panel id="account" icon={<KeyRound size={16} />} title="Account" description="Private beta access">
+      <SettingRow label="Email address" description="Used for sign-in and account notifications.">
+        <span className="inline-flex max-w-full items-center gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-200">
+          <Mail size={14} aria-hidden="true" className="shrink-0 text-amber-300" />
+          <span className="truncate">{email}</span>
+        </span>
+      </SettingRow>
+      <div className="py-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-zinc-100">Change email address</p>
+            <p className="mt-0.5 text-xs leading-5 text-zinc-400">A six-digit code confirms the new address before it becomes your sign-in email.</p>
+          </div>
+          <Button disabled={!accountReady} onClick={() => setShowEmailForm((value) => !value)} size="sm" type="button" variant="secondary">
+            {!accountReady ? <Loader2 size={14} className="animate-spin" /> : null}
+            {!accountReady ? "Loading…" : showEmailForm ? "Cancel" : "Change email"}
+          </Button>
+        </div>
+        {showEmailForm ? (
+          pendingEmailId ? (
+            <form className="mt-4 flex max-w-xl items-end gap-3" onSubmit={(event) => void verifyEmailChange(event)}>
+              <div className="min-w-0 flex-1">
+                <span className="mb-2 block text-xs font-semibold uppercase tracking-[0.12em] text-zinc-400" id="email-code-label">Verification code</span>
+                <SixDigitCode value={verificationCode} onChange={setVerificationCode} />
+              </div>
+              <Button disabled={verifyingEmail || verificationCode.some((digit) => !digit)} size="sm" type="submit">{verifyingEmail ? <Loader2 size={14} className="animate-spin" /> : null}{verifyingEmail ? "Verifying…" : "Verify email"}</Button>
+            </form>
+          ) : (
+            <form className="mt-4 flex max-w-xl items-stretch gap-3" onSubmit={(event) => void startEmailChange(event)}>
+              <Input aria-label="New email address" autoComplete="email" onChange={(event) => setNewEmail(event.target.value)} placeholder="you@example.com" required type="email" value={newEmail} />
+              <Button disabled={sendingEmailCode} size="sm" type="submit">{sendingEmailCode ? <Loader2 size={14} className="animate-spin" /> : null}{sendingEmailCode ? "Sending…" : "Send code"}</Button>
+            </form>
+          )
+        ) : null}
+        {emailError ? <p className="mt-3 text-sm text-red-200" role="alert">{emailError}</p> : null}
+        {emailNotice ? <p className="mt-3 text-sm text-emerald-200" role="status">{emailNotice}</p> : null}
+      </div>
+      <div className="py-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-zinc-100">Change password</p>
+            <p className="mt-0.5 text-xs leading-5 text-zinc-400">Other active sessions will be signed out after the password is changed.</p>
+          </div>
+          <Button disabled={!accountReady} onClick={() => setShowPasswordForm((value) => !value)} size="sm" type="button" variant="secondary">
+            {!accountReady ? <Loader2 size={14} className="animate-spin" /> : null}
+            {!accountReady ? "Loading…" : showPasswordForm ? "Cancel" : "Change password"}
+          </Button>
+        </div>
+        {showPasswordForm ? (
+          <form className="mt-4 grid max-w-xl gap-3" onSubmit={(event) => void changePassword(event)}>
+            <Input aria-label="Current password" autoComplete="current-password" onChange={(event) => setCurrentPassword(event.target.value)} placeholder="Current password" required type="password" value={currentPassword} />
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Input aria-label="New password" autoComplete="new-password" minLength={8} onChange={(event) => setNewPassword(event.target.value)} placeholder="New password" required type="password" value={newPassword} />
+              <Input aria-label="Confirm new password" autoComplete="new-password" minLength={8} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Confirm new password" required type="password" value={confirmPassword} />
+            </div>
+            <div className="flex justify-end"><Button disabled={updatingPassword} size="sm" type="submit">{updatingPassword ? <Loader2 size={14} className="animate-spin" /> : <KeyRound size={14} />}{updatingPassword ? "Updating…" : "Update password"}</Button></div>
+          </form>
+        ) : null}
+        {passwordError ? <p className="mt-3 text-sm text-red-200" role="alert">{passwordError}</p> : null}
+        {passwordNotice ? <p className="mt-3 text-sm text-emerald-200" role="status">{passwordNotice}</p> : null}
+      </div>
+    </Panel>
+  );
+}
+
+function DeleteAccountControl() {
+  const { user } = useUser();
+  const [open, setOpen] = useState(false);
+  const [confirmation, setConfirmation] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const deleteAccount = useReverification(async () => {
+    if (!user) throw new Error("Your account is unavailable. Please sign in again.");
+    await user.delete();
+  });
+
+  async function confirmDeletion() {
+    if (confirmation !== "DELETE" || deleting) return;
+    setError(null);
+    setDeleting(true);
+    try {
+      await deleteAccount();
+      window.location.assign("/sign-in");
+    } catch (caughtError) {
+      setError(getClerkErrorMessage(caughtError));
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <div className="py-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-red-100">Delete account</p>
+          <p className="mt-0.5 text-xs leading-5 text-zinc-400">Permanently deletes your account and ends all sessions.</p>
+        </div>
+        <div className="shrink-0"><Button onClick={() => setOpen((value) => !value)} size="sm" type="button" variant="danger">Delete account</Button></div>
+      </div>
+      {open ? (
+        <div className="mt-4 max-w-xl rounded-md border border-red-500/25 bg-red-500/5 p-3">
+          <p className="text-xs leading-5 text-red-100">Type <span className="font-mono font-bold">DELETE</span> to permanently remove your account.</p>
+          <div className="mt-3 flex items-center gap-3">
+            <Input aria-label="Confirm account deletion" onChange={(event) => setConfirmation(event.target.value)} placeholder="DELETE" value={confirmation} />
+            <Button disabled={confirmation !== "DELETE" || deleting} size="sm" type="button" variant="danger" onClick={() => void confirmDeletion()}>{deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}{deleting ? "Deleting…" : "Delete"}</Button>
+          </div>
+          {error ? <p className="mt-3 text-sm text-red-200" role="alert">{error}</p> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SixDigitCode({ value, onChange }: { value: string[]; onChange: (value: string[]) => void }) {
+  const refs = useRef<Array<HTMLInputElement | null>>([]);
+
+  function fill(valueToFill: string, startIndex = 0) {
+    const digits = valueToFill.replace(/\D/g, "").slice(0, 6 - startIndex).split("");
+    if (digits.length === 0) return;
+    const next = [...value];
+    digits.forEach((digit, offset) => {
+      next[startIndex + offset] = digit;
+    });
+    onChange(next);
+    refs.current[Math.min(startIndex + digits.length, 5)]?.focus();
+  }
+
+  function change(index: number, input: string) {
+    const digits = input.replace(/\D/g, "");
+    if (digits.length > 1) {
+      fill(digits, index);
+      return;
+    }
+    const next = [...value];
+    next[index] = digits;
+    onChange(next);
+    if (digits && index < 5) refs.current[index + 1]?.focus();
+  }
+
+  function keyDown(index: number, event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Backspace" && !value[index] && index > 0) {
+      event.preventDefault();
+      const next = [...value];
+      next[index - 1] = "";
+      onChange(next);
+      refs.current[index - 1]?.focus();
+    }
+    if (event.key === "ArrowLeft" && index > 0) {
+      event.preventDefault();
+      refs.current[index - 1]?.focus();
+    }
+    if (event.key === "ArrowRight" && index < 5) {
+      event.preventDefault();
+      refs.current[index + 1]?.focus();
+    }
+  }
+
+  return (
+    <div aria-labelledby="email-code-label" className="grid grid-cols-6 gap-1.5 sm:gap-2" onPaste={(event: ClipboardEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      fill(event.clipboardData.getData("text"));
+    }}>
+      {value.map((digit, index) => (
+        <input
+          aria-label={`Verification code digit ${index + 1} of 6`}
+          autoComplete={index === 0 ? "one-time-code" : "off"}
+          autoFocus={index === 0}
+          className="h-11 min-w-0 rounded-md border border-zinc-700 bg-zinc-950 text-center font-mono text-lg font-bold tabular-nums text-zinc-50 outline-none transition focus:border-amber-300 focus:ring-2 focus:ring-amber-300/15"
+          inputMode="numeric"
+          key={index}
+          maxLength={1}
+          onChange={(event) => change(index, event.target.value)}
+          onKeyDown={(event) => keyDown(index, event)}
+          pattern="[0-9]*"
+          ref={(element) => {
+            refs.current[index] = element;
+          }}
+          required
+          type="text"
+          value={digit}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -771,6 +1074,16 @@ function Stat({ label, value }: { label: string; value: string }) {
       <span className="truncate font-mono text-sm font-bold text-zinc-100" title={value}>{value}</span>
     </div>
   );
+}
+
+function getClerkErrorMessage(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "object" && error !== null && "errors" in error) {
+    const errors = (error as { errors?: Array<{ longMessage?: string; message?: string }> }).errors;
+    const first = errors?.[0];
+    if (first?.longMessage ?? first?.message) return first.longMessage ?? first.message ?? "Could not update password.";
+  }
+  return "Could not update password. Please try again.";
 }
 
 function shortDate(timestamp: number) {

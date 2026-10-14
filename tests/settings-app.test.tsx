@@ -95,7 +95,8 @@ describe("SettingsApp", () => {
       "03Viewer",
       "04Storage",
       "05Export defaults",
-      "06Danger zone"
+      "06Account",
+      "07Danger zone"
     ]);
     expect(sectionLinks.map((link) => link.getAttribute("href"))).toEqual([
       "#scan-settings",
@@ -103,14 +104,41 @@ describe("SettingsApp", () => {
       "#viewer",
       "#storage",
       "#export",
+      "#account",
       "#danger-zone"
     ]);
     expect(screen.queryByRole("link", { name: /collections/i })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Scan settings" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Account" })).toBeInTheDocument();
+    expect(screen.getByText("tester@example.com")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Export defaults" })).toBeInTheDocument();
     expect(screen.getByText("Common Crawl list")).toBeInTheDocument();
     expect(screen.getByText("Default match mode")).toBeInTheDocument();
     expect(screen.getByText("Default scan window")).toBeInTheDocument();
+  });
+
+  it("keeps password fields collapsed until the user asks to change the password", async () => {
+    render(<SettingsApp />);
+
+    await screen.findByRole("heading", { name: "Account" });
+    expect(screen.queryByLabelText("Current password")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Change password" }));
+
+    expect(screen.getByLabelText("Current password")).toBeInTheDocument();
+    expect(screen.getByLabelText("New password")).toBeInTheDocument();
+  });
+
+  it("keeps account feedback scoped to the relevant email or password action", async () => {
+    render(<SettingsApp />);
+
+    await screen.findByRole("heading", { name: "Account" });
+    expect(screen.queryByLabelText("First name")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Last name")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Change email" }));
+    expect(screen.getByLabelText("New email address")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send code" })).toHaveClass("h-8");
   });
 
   it("saves the global robots.txt check setting", async () => {

@@ -22,17 +22,23 @@ function securityResponse(request: NextRequest) {
     "default-src 'self'",
     "base-uri 'self'",
     "object-src 'none'",
-    "frame-ancestors 'none'",
+    // PostHog renders the in-app heatmap viewer by embedding the page. Keep
+    // framing blocked everywhere else while allowing only the EU PostHog app.
+    "frame-ancestors 'self' https://eu.posthog.com",
     "form-action 'self'",
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isProd ? "" : " 'unsafe-eval'"}`,
-    "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob:",
+    // The PostHog toolbar is launched only by an authorized PostHog admin, but
+    // it loads its own UI assets when active. Permit PostHog's domains without
+    // weakening the app's own script nonce policy.
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' https://*.posthog.com${isProd ? "" : " 'unsafe-eval'"}`,
+    "style-src 'self' 'unsafe-inline' https://*.posthog.com",
+    "img-src 'self' data: blob: https://*.posthog.com",
     // Compute worker is same-origin bundled code; some bundlers instantiate it
     // from a blob: URL, which worker-src must permit (it does not inherit the
     // strict-dynamic script-src, only default-src, which is 'self').
     "worker-src 'self' blob:",
-    "font-src 'self'",
-    "connect-src 'self' https://index.commoncrawl.org https://data.commoncrawl.org https://clerk.linewise.app https://accounts.linewise.app",
+    "font-src 'self' https://*.posthog.com",
+    "media-src 'self' https://*.posthog.com",
+    "connect-src 'self' https://index.commoncrawl.org https://data.commoncrawl.org https://clerk.linewise.app https://accounts.linewise.app https://*.posthog.com",
     "frame-src 'self'",
     "upgrade-insecure-requests"
   ].join("; ");

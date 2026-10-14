@@ -471,6 +471,7 @@ describe("ArchiveSearchApp", () => {
     const menu = screen.getByRole("navigation", { name: "App navigation" });
     expect(within(menu).getByRole("link", { name: /history/i })).toHaveAttribute("href", "/history");
     expect(within(menu).getByRole("link", { name: /settings/i })).toHaveAttribute("href", "/settings");
+    expect(within(menu).getByRole("button", { name: /sign out/i })).toBeInTheDocument();
   });
 
   it("responds when search route params change without a full reload", async () => {

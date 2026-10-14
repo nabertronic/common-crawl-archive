@@ -1,7 +1,8 @@
 "use client";
 
+import { useClerk } from "@clerk/nextjs";
 import { useEffect, useId, useRef, useState, type ComponentType } from "react";
-import { History, Menu, Search, Settings } from "lucide-react";
+import { History, LogOut, Menu, Search, Settings } from "lucide-react";
 import Link from "next/link";
 
 type MenuItem = {
@@ -28,7 +29,9 @@ export function TopRightMenu({
   mode?: "fixed" | "inline";
   items?: MenuItem[];
 }) {
+  const { signOut } = useClerk();
   const [open, setOpen] = useState(false);
+  const [isSigningOut, setIsSigningOut] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const menuId = useId();
 
@@ -57,6 +60,12 @@ export function TopRightMenu({
       ? "fixed right-4 top-4 z-[80] md:right-8 md:top-6"
       : "relative z-[80] ml-auto";
 
+  async function handleSignOut() {
+    if (isSigningOut) return;
+    setIsSigningOut(true);
+    await signOut({ redirectUrl: "/sign-in" });
+  }
+
   return (
     <div ref={containerRef} className={containerClass}>
       <button
@@ -84,6 +93,15 @@ export function TopRightMenu({
               </Link>
             );
           })}
+          <button
+            className={`${itemClass} w-full border-t border-zinc-800 text-left text-zinc-300 hover:text-zinc-50 disabled:cursor-wait disabled:opacity-60`}
+            disabled={isSigningOut}
+            onClick={() => void handleSignOut()}
+            type="button"
+          >
+            <LogOut size={16} aria-hidden="true" />
+            {isSigningOut ? "Signing out…" : "Sign out"}
+          </button>
         </nav>
       ) : null}
     </div>
