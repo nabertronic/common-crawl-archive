@@ -1,6 +1,25 @@
-# Security Architecture
+# Security Policy
 
-This document explains the security controls in this codebase and the invariants
+## Reporting a vulnerability
+
+Please report security vulnerabilities privately. Do not open a public issue for a security problem.
+
+- **Preferred:** use GitHub Private Vulnerability Reporting at
+  https://github.com/nabertronic/common-crawl-archive/security/advisories/new
+- **Email:** nabert@pm.me
+
+Include as much of the following as you can:
+
+- A description of the issue and its impact
+- The affected page, route, or file, and the version or commit
+- Steps to reproduce, or a proof of concept
+- Any suggested fix or mitigation
+
+Response times are best effort. There is no bug bounty program.
+
+## Security architecture
+
+This section explains the security controls in this codebase and the invariants
 you (a human or AI agent) must preserve when changing it. Read it before touching
 network code, the proxy/middleware, the HTML preview, or response headers.
 
@@ -233,7 +252,7 @@ Unit tests cannot catch a CSP that silently blocks scripts. For any change to
    `connect-src` origin (`index.commoncrawl.org`) succeeds, and a disallowed
    origin is blocked.
 
-A `.claude/launch.json` (`prod` config) exists for the preview tooling.
+For a local production check, run `pnpm build` and `pnpm start`, then open http://localhost:3000 in a browser.
 
 ---
 

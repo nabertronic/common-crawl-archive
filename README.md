@@ -118,7 +118,7 @@ Changes to network code, the proxy, the HTML preview, or response headers should
 
 ## Security
 
-Please do not report vulnerabilities in public issues. [SECURITY.md](SECURITY.md) describes the security architecture and the invariants that changes must preserve.
+Please do not report vulnerabilities in public issues. Report them privately as described in [SECURITY.md](SECURITY.md#reporting-a-vulnerability). That file also describes the security architecture and the invariants that changes must preserve.
 
 ## Acknowledgements
 

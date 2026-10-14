@@ -10,3 +10,11 @@ tmp
 .env.local
 .env.*.local
 .vercel
+
+# Internal notes (kept locally, not published)
+TODO.md
+PERF-PLAN.md
+PERF-BASELINE.md
+DEPENDENCY-AUDIT.md
+.claude/launch.json
+skills-lock.json
