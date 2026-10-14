@@ -2,6 +2,8 @@ import "@testing-library/jest-dom/vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { LandingSections } from "@/components/landing-sections";
+import { SiteFooter } from "@/components/site-footer";
+import { WebsitePreferences } from "@/components/website-preferences";
 
 describe("LandingSections", () => {
   it("renders all four landing sections", () => {
@@ -25,8 +27,8 @@ describe("LandingSections", () => {
     expect(screen.getByText(/Common Crawl often holds captures the Wayback Machine is missing/)).toBeVisible();
   });
 
-  it("renders the floating landing navigation and keeps footer minimal", () => {
-    render(<LandingSections />);
+  it("keeps landing navigation and makes legal information and website settings accessible in the shared footer", async () => {
+    render(<><LandingSections /><SiteFooter /><WebsitePreferences /></>);
     const nav = screen.getByRole("navigation", { name: "Landing sections" });
     expect(nav.querySelector('a[href="#top"]')).not.toBeNull();
     expect(nav.querySelector('a[href="#how-it-works"]')).not.toBeNull();
@@ -36,6 +38,11 @@ describe("LandingSections", () => {
     expect(screen.getByRole("button", { name: "Open menu" })).toBeInTheDocument();
 
     const footer = screen.getByRole("contentinfo");
+    expect(footer.querySelector('a[href="/privacy"]')).not.toBeNull();
+    expect(footer.querySelector('a[href="/imprint"]')).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Website settings" }));
+    expect(await screen.findByRole("dialog", { name: "Your data, on this device" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
     expect(footer.querySelector('a[href="/history"]')).toBeNull();
     expect(footer.querySelector('a[href="/settings"]')).toBeNull();
     expect(footer.querySelector('a[href="https://commoncrawl.org"]')).toBeNull();

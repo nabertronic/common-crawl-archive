@@ -48,6 +48,18 @@ After deploying, verify that `/`, `/search`, `/history`, `/settings`, and `/view
 open without a login, and that the API endpoints work without a session.
 API request limits, SSRF protection, and the sandboxed capture viewer remain active.
 
+## Privacy and legal information
+
+The interface and legal pages are in English. `/privacy` explains the actual
+browser storage and network requests; `/imprint` provides the operator's contact
+information and the postal address as a local image. `/impressum` redirects to
+`/imprint`. The privacy notice describes Vercel hosting.
+
+A first-visit cookie and storage notice explains that the app sets no cookies and
+uses no tracking. Continue acknowledges the notice; it does not grant consent to
+analytics. The shared footer reopens it through **Website settings**. This
+acknowledgement is stored locally and works without an external consent service.
+
 ## Opt-out Registry
 
 The Common Crawl opt-out registry is fetched live from the published Google Sheet and cached by the app. A bundled snapshot is also stored at `data/common-crawl-opt-out-registry-snapshot.csv` so the app can still answer opt-out checks if the sheet is temporarily unavailable.

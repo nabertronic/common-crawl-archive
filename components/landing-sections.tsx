@@ -394,17 +394,6 @@ function FaqSection() {
   );
 }
 
-function LandingFooter() {
-  return (
-    <footer className="border-t border-zinc-800 pb-6 pt-8">
-      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <BrandWordmark className="text-base leading-none" />
-        <p className="text-xs text-zinc-500">Find archived versions of web pages.</p>
-      </div>
-    </footer>
-  );
-}
-
 export function LandingSections() {
   return (
     <>
@@ -414,7 +403,6 @@ export function LandingSections() {
         <BenefitsSection />
         <DataSourceSection />
         <FaqSection />
-        <LandingFooter />
       </div>
     </>
   );
