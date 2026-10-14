@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { BrandWordmark } from "@/components/brand";
 import { TopRightMenu } from "@/components/top-right-menu";
 import { LandingBookmarkHint } from "@/components/landing-bookmark-hint";
+import { GITHUB_REPOSITORY_URL } from "@/lib/app-meta";
 
 function Reveal({ children, className }: { children: ReactNode; className?: string }) {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -194,6 +195,15 @@ function HowItWorksSection() {
             </li>
           ))}
         </ol>
+        <div className="mt-6 border-l border-amber-300/50 pl-4">
+          <p className="font-mono text-xs font-bold uppercase tracking-[0.16em] text-amber-300">Example · Local government notice</p>
+          <p className="mt-2 text-[0.9375rem] leading-relaxed text-zinc-300">
+            Suppose a city removes a notice about a road closure. Search the notice&apos;s URL, open an earlier
+            capture, and note the date Common Crawl saved it. Compare the wording with the city&apos;s later notice
+            and another independent record before reporting what changed. The saved date does not tell you when
+            the city first published the notice.
+          </p>
+        </div>
       </Reveal>
     </section>
   );
@@ -206,21 +216,40 @@ function DataSourceSection() {
         <SectionHeading label="Data source" title="Built on Common Crawl" titleId="data-source-title" />
         <GlowPanel className="mt-6 p-5 sm:p-6">
           <p className="text-[0.9375rem] leading-relaxed text-zinc-300">
-            Common Crawl is a nonprofit that has been crawling the web since 2008 and publishes everything it
-            collects as open data. Its archive spans more than 300 billion pages across 100+ crawl collections.
+            Common Crawl is an independent nonprofit that has been crawling the web since 2008 and publishes
+            everything it collects as open data. Its archive spans more than 300 billion pages across 100+ crawl
+            collections. It collects samples of the web, so it does not save every page or capture every change.
           </p>
           <p className="mt-3 text-[0.9375rem] leading-relaxed text-zinc-300">
             Crawlback uses those crawls to find individual pages inside the archive. Results are captured HTML,
             not live replays of the page.
           </p>
-          <a
-            href="https://commoncrawl.org"
-            target="_blank"
-            rel="noreferrer"
-            className="mt-4 inline-flex min-h-11 items-center text-sm font-semibold text-amber-200 underline underline-offset-2 transition hover:text-amber-100"
-          >
-            commoncrawl.org →
-          </a>
+          <div className="mt-4 flex flex-wrap gap-x-6 gap-y-1">
+            <a
+              href="https://commoncrawl.org"
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex min-h-11 items-center text-sm font-semibold text-amber-200 underline underline-offset-2 transition hover:text-amber-100"
+            >
+              commoncrawl.org →
+            </a>
+            <a
+              href="https://www.commoncrawl.org/faq"
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex min-h-11 items-center text-sm font-semibold text-amber-200 underline underline-offset-2 transition hover:text-amber-100"
+            >
+              Common Crawl FAQ →
+            </a>
+            <a
+              href="https://www.commoncrawl.org/terms-of-use"
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex min-h-11 items-center text-sm font-semibold text-amber-200 underline underline-offset-2 transition hover:text-amber-100"
+            >
+              Terms of Use →
+            </a>
+          </div>
         </GlowPanel>
       </Reveal>
     </section>
@@ -265,7 +294,6 @@ function BenefitsSection() {
           title="A web archive that stays out of your way"
           titleId="why-crawlback-title"
         />
-        <LandingBookmarkHint />
         <ul className="mt-6 grid list-none gap-3 p-0 sm:grid-cols-2">
           {BENEFITS.map((benefit) => (
             <li key={benefit.title}>
@@ -279,6 +307,7 @@ function BenefitsSection() {
             </li>
           ))}
         </ul>
+        <LandingBookmarkHint />
       </Reveal>
     </section>
   );
@@ -289,6 +318,11 @@ const FAQ_ITEMS: { question: string; answer: string }[] = [
     question: "How is this different from the Wayback Machine?",
     answer:
       "The Wayback Machine archives on demand and replays full pages. Crawlback searches Common Crawl, a separate archive built by broad crawls since 2008. The two overlap only partially. Common Crawl often holds captures the Wayback Machine is missing, which is exactly when Crawlback is useful."
+  },
+  {
+    question: "What does OSINT mean here?",
+    answer:
+      "OSINT means open-source intelligence: research and analysis using information available to the public. An archived page can be one useful source among many. It does not by itself establish who published a page or whether its claims were true."
   },
   {
     question: "Why can a scan take so long?",
@@ -378,26 +412,26 @@ function FaqSection() {
   );
 }
 
-const guideLinkClass =
-  "inline-flex min-h-11 items-center gap-1.5 text-[0.9375rem] font-semibold text-zinc-100 underline decoration-zinc-600 underline-offset-4 transition hover:text-amber-200 hover:decoration-amber-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-300";
-
 export function LandingSections() {
   return (
     <>
       <LandingMiniHeader />
       <div className="relative z-10 mx-auto w-full max-w-3xl space-y-20 px-5 pb-10 pt-8 sm:space-y-24 md:px-8">
-        <nav aria-label="Research guide" className="flex flex-wrap items-center gap-x-6 gap-y-1">
-          <a href="#how-it-works" className={guideLinkClass}>
-            How it works <span aria-hidden="true" className="text-amber-300">→</span>
-          </a>
-          <a href="#faq" className={guideLinkClass}>
-            FAQ <span aria-hidden="true" className="text-amber-300">→</span>
-          </a>
-        </nav>
         <HowItWorksSection />
         <BenefitsSection />
         <DataSourceSection />
         <FaqSection />
+        <p className="text-center text-[0.9375rem] leading-relaxed text-zinc-300">
+          Crawlback is open source.{" "}
+          <a
+            href={GITHUB_REPOSITORY_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex min-h-11 items-center font-semibold text-amber-200 underline underline-offset-2 transition hover:text-amber-100"
+          >
+            Read the code on GitHub →
+          </a>
+        </p>
       </div>
     </>
   );

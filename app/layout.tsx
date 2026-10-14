@@ -35,7 +35,9 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
   // nonce and 'strict-dynamic' would block all of them.
   await headers();
   return (
-    <html lang="en" className={`${sans.variable} ${mono.variable}`} suppressHydrationWarning>
+    // data-scroll-behavior tells Next that <html> uses CSS smooth scrolling, so it
+    // disables that smoothing during route transitions (new pages start at the top).
+    <html lang="en" className={`${sans.variable} ${mono.variable}`} data-scroll-behavior="smooth" suppressHydrationWarning>
       <body>
         <StorageConsentGate>{children}</StorageConsentGate>
         <SiteFooter />

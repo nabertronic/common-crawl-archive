@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { BrandWordmark } from "@/components/brand";
+import { GITHUB_REPOSITORY_URL } from "@/lib/app-meta";
 import { openWebsitePreferences } from "@/lib/website-preferences";
 
 const linkClass = "inline-flex min-h-11 items-center rounded-sm text-sm text-zinc-300 transition hover:text-amber-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-300";
@@ -20,6 +21,7 @@ export function SiteFooter() {
           <Link href="/terms" className={linkClass}>Terms</Link>
           <Link href="/imprint" rel="nofollow" className={linkClass}>Legal notice</Link>
           <button type="button" onClick={openWebsitePreferences} className={linkClass}>Website settings</button>
+          <a href={GITHUB_REPOSITORY_URL} target="_blank" rel="noopener noreferrer" className={linkClass}>GitHub</a>
         </nav>
       </div>
     </footer>

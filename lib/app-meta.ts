@@ -1,5 +1,7 @@
 export const APP_NAME = "Crawlback";
 
+export const GITHUB_REPOSITORY_URL = "https://github.com/nabertronic/common-crawl-archive";
+
 export function stripUrlForTitle(url: string): string {
   return url
     .trim()

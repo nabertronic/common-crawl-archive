@@ -86,7 +86,6 @@ describe("StorageConsentGate", () => {
     expect(screen.getByLabelText("URL to search")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /start scan/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Advanced search" })).toBeInTheDocument();
-    expect(screen.getAllByRole("navigation", { name: "Research guide" })).toHaveLength(1);
     expect(screen.queryByText("Storage app contents")).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("URL to search"), { target: { value: "https://example.org/report" } });
     fireEvent.click(screen.getByRole("button", { name: /start scan/i }));

@@ -46,14 +46,24 @@ function getClientHint(): BookmarkHint {
 
 // Server snapshot is null, so server HTML and the first client render match;
 // the real hint is applied right after hydration without a mismatch.
+// The wrapper always keeps a line box (about three lines on phones for the touch
+// text), so hydration fills the space instead of pushing the content below it down.
 export function LandingBookmarkHint() {
   const pathname = usePathname();
   const hint = useSyncExternalStore(noopSubscribe, getClientHint, () => null);
 
-  if (pathname !== "/" || hint === null) return null;
+  if (pathname !== "/") return null;
 
   return (
-    <p className="mx-auto mt-4 flex max-w-2xl flex-wrap items-center justify-center gap-x-2 gap-y-2 px-2 text-center text-[1.0625rem] leading-relaxed text-zinc-200">
+    <div className="mx-auto mt-8 flex min-h-[5.5rem] max-w-2xl items-center justify-center sm:min-h-[1.75rem]">
+      {hint === null ? null : <BookmarkHintText hint={hint} />}
+    </div>
+  );
+}
+
+function BookmarkHintText({ hint }: { hint: BookmarkHint }) {
+  return (
+    <p className="flex flex-wrap items-center justify-center gap-x-2 gap-y-2 px-2 text-center text-[1.0625rem] leading-relaxed text-zinc-200">
       <Bookmark size={16} aria-hidden="true" className="shrink-0 text-amber-300" />
       {hint.kind === "keys" ? (
         <>

@@ -70,11 +70,13 @@ const CalendarView = dynamic(() => import("@/components/calendar-view").then((mo
 const HtmlPrivacyWarningDialog = dynamic(() =>
   import("@/components/html-privacy-warning-dialog").then((mod) => mod.HtmlPrivacyWarningDialog)
 );
-const LandingSections = dynamic(() => import("@/components/landing-sections").then((mod) => mod.LandingSections));
 const VirtualizedCaptureList = dynamic(() =>
   import("@/components/virtualized-capture-list").then((mod) => mod.VirtualizedCaptureList)
 );
 import { TopRightMenu } from "@/components/top-right-menu";
+// Static on purpose: a lazy landing import suspends the first client render after
+// consent is granted, which blanked the hero and let the footer jump to the top.
+import { LandingSections } from "@/components/landing-sections";
 import { createMockSearchDataset, createMockWarcRecord, isMockCaptureFilename } from "@/lib/mock-data";
 import { APP_NAME, buildTabTitle, stripUrlForTitle } from "@/lib/app-meta";
 import { markPerformance, measurePerformance, measureSync } from "@/lib/performance";

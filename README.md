@@ -1,94 +1,133 @@
 # Crawlback
 
-A Next.js webapp for searching URLs, hosts, and domains across public Common Crawl indexes and opening matching WARC captures in a local browser viewer. Positioned as a fallback archive: when the Wayback Machine has no capture, Crawlback helps recover what Common Crawl saw.
+Find and open archived versions of web pages from Common Crawl, a fallback for when the Wayback Machine has no capture.
 
-## Goals
+Live site: https://crawlback.vercel.app
 
-- Query Common Crawl from the user's browser with exact URL, host, or domain matching.
-- Check the current target site's `robots.txt` for Common Crawl's `CCBot` through the app server, avoiding browser CORS limits.
-- Check the Common Crawl opt-out registry and surface likely exclusions before or during a scan.
-- Search all collections returned by `https://index.commoncrawl.org/collinfo.json`. A full scan is the default scope. The `scope` URL parameter is omitted for full scans, so `/search?url=...` runs a full scan; `scope=recent` (written explicitly) limits the search to recent collections, and `scope=custom` with `from`/`to` limits it to a date range.
-- Store scan history, coverage, settings, and optional cached HTML locally in IndexedDB.
-- Keep routes stable for future PastPage provider integration:
-  - `/search?url=https://example.com/page`
-  - `/view?url=...&timestamp=...&collection=...&filename=...&offset=...&length=...`
-- Render extracted HTML in a sandboxed preview without attempting full Wayback-style asset reconstruction.
+## Features
 
-## Development
+- Search an exact URL, a host, or a domain across the public Common Crawl indexes.
+- Search all collections by default, only recent collections, or a custom date range.
+- Check the target site's `robots.txt` for Common Crawl's `CCBot` user agent.
+- Check the Common Crawl opt-out registry and flag likely exclusions before or during a scan.
+- Open matching captures in a sandboxed local viewer. Archived scripts do not run.
+- Keep scan history, results, coverage, and settings in the browser (IndexedDB).
+- Optionally cache captured HTML locally, with size limits and manual pruning.
+- Export history as CSV or JSON, and export captures as JSON, ZIP (HTML), or WARC.
+
+## Privacy
+
+- No accounts, no sign-in, and no analytics or tracking scripts.
+- Search history, settings, and cached captures stay in your browser. They are not synced to a server.
+- Crawlback's own code sets no cookies. Browser storage is only used after you choose "Allow browser storage".
+- Archive queries are sent from your browser directly to Common Crawl's index and data servers.
+- The robots.txt check and the opt-out registry lookup go through the Crawlback server. The robots.txt check sends your target URL to the target site's server, not your IP address.
+- The hosting provider processes standard request data to deliver the site.
+
+The full description is on the [privacy page](https://crawlback.vercel.app/privacy).
+
+## How it works
+
+- **Index search.** Crawlback reads the collection list from `index.commoncrawl.org/collinfo.json` and queries each selected collection's CDX index. Matching captures are then read from Common Crawl's WARC files in `data.commoncrawl.org`, using byte ranges from the index.
+- **Respecting site owners.** The `robots.txt` check and the opt-out registry lookup are shown before and during a scan. The registry is fetched from the published Common Crawl sheet, with a bundled snapshot as a fallback.
+- **Sandboxed viewer.** Archived HTML is shown in an iframe with an empty `sandbox` attribute, so scripts, forms, and same-origin access are disabled. HTML is also sanitized as defense in depth.
+- **Server-side protection.** Every server-side fetch of a user-supplied URL goes through an SSRF guard. It allows only HTTP(S) on ports 80 and 443, blocks private, loopback, and link-local addresses, pins the connection to the validated address, re-checks every redirect, and caps response size and time.
+- **Rate limits.** API routes apply per-client request limits. Common Crawl requests are spaced out to avoid rate-limit responses.
+
+For the security model and the invariants that must be preserved, see [SECURITY.md](SECURITY.md).
+
+## Current limits
+
+- Searches exact URLs, hosts, or domains. It does not crawl links from the target page.
+- Keeps HTML `200` captures and redirects returned by the index.
+- Does not rewrite or replay page assets, and does not execute archived JavaScript.
+- Does not automatically load compressed WARC records larger than 15 MB.
+- Data is stored in the browser only. There is no sync, team workspace, or hosted job queue.
+
+## Tech stack
+
+- [Next.js](https://nextjs.org/) (App Router) and React
+- TypeScript
+- Tailwind CSS
+- Vitest and Testing Library for tests
+
+## Getting started
+
+### Requirements
+
+- Node.js 24 to 26 (see `engines` in `package.json`)
+- pnpm 10.33.2 (see `packageManager` in `package.json`)
+
+### Run locally
 
 ```bash
 pnpm install
 pnpm dev
 ```
 
-Open `http://localhost:3000`.
+Open http://localhost:3000.
 
-## Checks
+### Checks and build
+
+```bash
+pnpm typecheck   # TypeScript
+pnpm test        # Vitest
+pnpm build       # production build
+pnpm start       # serve the production build
+```
+
+`pnpm build` creates a server-capable Next.js build. The app needs a runtime that supports Next.js route handlers, because the robots.txt check and the opt-out and collections APIs run on the server.
+
+### Maintenance scripts
+
+```bash
+pnpm refresh:opt-out-registry   # refresh the bundled opt-out registry snapshot
+pnpm benchmark:cdx              # benchmark CDX scanning
+```
+
+## Deployment
+
+Crawlback needs no environment variables and no API keys. Deploy the Next.js build on any host that runs Next.js server code. The reference deployment runs on Vercel.
+
+After deploying, check that `/`, `/search`, `/history`, `/settings`, and `/view` load without a login.
+
+The optional variable `TRUST_CLOUDFLARE_HEADERS=1` should only be set when Cloudflare sits in front of the app and overwrites `cf-connecting-ip`. See `.env.example` and [SECURITY.md](SECURITY.md).
+
+## Project structure
+
+- `app/` - Next.js routes (`/search`, `/view`, `/history`, `/settings`, legal pages) and API routes under `app/api/`
+- `components/` - UI components
+- `lib/` - Common Crawl client, WARC parsing, robots.txt handling, opt-out registry, SSRF guard, storage, and exports
+- `lib/workers/` - compute worker
+- `public/sw.js` - service worker for background scans
+- `proxy.ts` - per-request Content-Security-Policy
+- `data/` - bundled opt-out registry snapshot
+- `scripts/` - maintenance and benchmark scripts
+- `tests/` - unit and component tests
+
+## Contributing
+
+Issues and pull requests are welcome. Before opening a pull request, run:
 
 ```bash
 pnpm typecheck
 pnpm test
-pnpm build
 ```
 
-`pnpm build` creates a server-capable Next.js build. Deploy it on a runtime that supports Next.js route handlers.
+Changes to network code, the proxy, the HTML preview, or response headers should follow the checklist in [SECURITY.md](SECURITY.md).
 
-## Public deployment
+## Security
 
-Crawlback runs without accounts, authentication services, or analytics. No API
-keys or environment variables are required. Search history, settings, and cached
-captures stay in the user's browser.
+Please do not report vulnerabilities in public issues. [SECURITY.md](SECURITY.md) describes the security architecture and the invariants that changes must preserve.
 
-Deploy the server-capable Next.js build with `pnpm build` and `pnpm start`.
-The server is needed for the robots.txt checks and public archive metadata APIs.
-The app still accesses Common Crawl and the published opt-out registry to provide
-archive search. It does not send usage events to a tracking service.
+## Acknowledgements
 
-After deploying, verify that `/`, `/search`, `/history`, `/settings`, and `/view`
-open without a login, and that the API endpoints work without a session.
-API request limits, SSRF protection, and the sandboxed capture viewer remain active.
+Crawlback uses data from [Common Crawl](https://commoncrawl.org/), a nonprofit that publishes open web crawl data. The archived content belongs to its respective owners. Use of Common Crawl data is subject to Common Crawl's terms of use. Crawlback is an independent project.
 
-## Privacy and legal information
+## License
 
-The interface and legal pages are in English. The research workflow is explained
-on the landing page in the `How it works` section (`/#how-it-works`), and the
-questions are answered in the FAQ section (`/#faq`). The old `/how-it-works`
-path issues a permanent redirect to `/#how-it-works`. `/privacy` describes
-browser storage, search requests, and technical access data; `/terms` contains
-the terms of use; `/imprint` provides the operator's contact information and
-postal address as a local image. `/imprint` is marked `noindex, nofollow,
-noarchive, nosnippet, noimageindex` both in the page metadata and through an
-`X-Robots-Tag` response header, and it is excluded from `app/sitemap.ts`. Footer
-links to it use `rel="nofollow"`. `/impressum` redirects to `/imprint`. The
-privacy notice describes Vercel hosting.
+Copyright (C) 2026 Alexander Nabert.
 
-Crawlback's own code sets no cookies and uses no advertising or analytics
-tracking. Before app routes that use browser storage load, visitors can choose
-**Allow browser storage** or **No thanks**. App features remain disabled until
-storage is explicitly allowed. A minimal versioned consent record is saved in
-local storage only after the visitor allows it; declining is remembered only in
-memory for the current session. Read-only information pages remain available
-without allowing storage. The footer's **Website settings** control can reopen
-the choice or withdraw consent. Withdrawal disables app storage features,
-unregisters service workers, and deletes Crawlback Cache Storage caches. It does
-not delete saved IndexedDB data or other app local-storage data; browser site-data
-controls can be used to remove those remaining items.
+Crawlback is licensed under the GNU Affero General Public License, version 3 only (AGPL-3.0-only). See [LICENSE](LICENSE).
 
-## Opt-out Registry
-
-The Common Crawl opt-out registry is fetched live from the published Google Sheet and cached by the app. A bundled snapshot is also stored at `data/common-crawl-opt-out-registry-snapshot.csv` so the app can still answer opt-out checks if the sheet is temporarily unavailable.
-
-Refresh the bundled snapshot with:
-
-```bash
-pnpm refresh:opt-out-registry
-```
-
-## Current Limits
-
-- Searches exact URLs, hosts, or domains, but does not crawl links from the target page.
-- Retains HTML `200` captures and redirects from the Common Crawl index response.
-- Does not rewrite or replay page assets.
-- Does not execute archived JavaScript.
-- Does not automatically load compressed WARC records larger than 15 MB.
-- Stores data locally only; there is no account sync, team workspace, hosted job queue, or billing layer yet.
+If you run a modified version of Crawlback as a network service, the AGPL requires you to offer the source code of your modified version to the users who interact with it (section 13).

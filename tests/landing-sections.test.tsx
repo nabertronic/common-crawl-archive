@@ -17,7 +17,7 @@ const IPHONE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleW
 const ANDROID_UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36";
 
 describe("LandingSections", () => {
-  it("renders the merged sections with a single heading per section and no separate guide links", () => {
+  it("renders the merged sections with a single heading per section and no links under the hero", () => {
     render(<LandingSections />);
     expect(screen.getByRole("heading", { name: "Three steps to a lost page", level: 2 })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Built on Common Crawl", level: 2 })).toBeInTheDocument();
@@ -26,10 +26,35 @@ describe("LandingSections", () => {
     expect(document.getElementById("how-it-works")).not.toBeNull();
     expect(document.getElementById("faq")).not.toBeNull();
 
-    const guideNav = screen.getByRole("navigation", { name: "Research guide" });
-    expect(guideNav.querySelector('a[href="#how-it-works"]')).toHaveTextContent("How it works");
-    expect(guideNav.querySelector('a[href="#faq"]')).toHaveTextContent("FAQ");
+    expect(screen.queryByRole("navigation", { name: "Research guide" })).toBeNull();
+    expect(screen.queryByText("How it works →")).toBeNull();
     expect(document.querySelector('a[href^="/how-it-works"]')).toBeNull();
+  });
+
+  it("keeps the worked example and the Common Crawl guidance links from the old guide", () => {
+    render(<LandingSections />);
+    expect(screen.getByText("Example · Local government notice")).toBeInTheDocument();
+    expect(screen.getByText(/does not tell you when the city first published the notice/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Common Crawl FAQ →" })).toHaveAttribute("href", "https://www.commoncrawl.org/faq");
+    expect(screen.getByRole("link", { name: "Terms of Use →" })).toHaveAttribute("href", "https://www.commoncrawl.org/terms-of-use");
+  });
+
+  it("links the open-source repository in a new tab", () => {
+    render(<LandingSections />);
+    const link = screen.getByRole("link", { name: "Read the code on GitHub →" });
+    expect(link).toHaveAttribute("href", "https://github.com/nabertronic/common-crawl-archive");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(screen.getByText(/Crawlback is open source/)).toBeInTheDocument();
+  });
+
+  it("places the bookmark hint below the benefit cards and reserves its space before hydration", () => {
+    render(<LandingSections />);
+    const cards = screen.getByRole("heading", { name: "Alternative archive", level: 3 }).closest("ul");
+    const hintText = screen.getByText(/to bookmark Crawlback|Tap the Share button|Open your browser menu/);
+    expect(cards).not.toBeNull();
+    expect((cards?.compareDocumentPosition(hintText) ?? 0) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(cards?.nextElementSibling?.contains(hintText)).toBe(true);
   });
 
   it("exposes FAQ entries as h3 buttons with aria-expanded and aria-controls", () => {
@@ -58,7 +83,8 @@ describe("LandingSections", () => {
     const data = JSON.parse(script?.innerHTML ?? "{}");
     expect(data["@type"]).toBe("FAQPage");
     const questions = data.mainEntity.map((entry: { name: string }) => entry.name);
-    expect(questions).toHaveLength(6);
+    expect(questions).toHaveLength(7);
+    expect(questions).toContain("What does OSINT mean here?");
     for (const question of questions) {
       expect(screen.getByRole("button", { name: question })).toBeInTheDocument();
     }
@@ -78,6 +104,10 @@ describe("LandingSections", () => {
     expect(footer.querySelector('a[href="/privacy"]')).not.toBeNull();
     expect(footer.querySelector('a[href="/terms"]')).not.toBeNull();
     expect(footer.querySelector('a[href="/imprint"]')).not.toBeNull();
+    const githubLink = within(footer).getByRole("link", { name: "GitHub" });
+    expect(githubLink).toHaveAttribute("href", "https://github.com/nabertronic/common-crawl-archive");
+    expect(githubLink).toHaveAttribute("target", "_blank");
+    expect(githubLink).toHaveAttribute("rel", "noopener noreferrer");
     fireEvent.click(within(footer).getByRole("button", { name: "Website settings" }));
     expect(await screen.findByRole("dialog", { name: "Browser storage" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
