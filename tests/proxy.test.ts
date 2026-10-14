@@ -1,10 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import { proxy } from "@/proxy";
-import { clerkTestState } from "./setup";
 
 async function proxyResponse(request: NextRequest) {
-  const response = await proxy(request, {} as never);
+  const response = await proxy(request);
   if (!response) throw new Error("Expected proxy response");
   return response;
 }
@@ -13,26 +12,21 @@ async function cspOf(request: NextRequest) {
   return (await proxyResponse(request)).headers.get("content-security-policy") ?? "";
 }
 
-afterEach(() => {
-  vi.unstubAllEnvs();
-  clerkTestState.isAuthenticated = true;
-});
+afterEach(() => vi.unstubAllEnvs());
 
-describe("CSP proxy", () => {
+describe("public CSP proxy", () => {
   it("emits a policy with the core hardening directives", async () => {
     const csp = await cspOf(new NextRequest("https://app.test/"));
 
     expect(csp).toContain("default-src 'self'");
     expect(csp).toContain("object-src 'none'");
-    expect(csp).toContain("frame-ancestors 'self' https://eu.posthog.com");
+    expect(csp).toContain("frame-ancestors 'none'");
     expect(csp).toContain("base-uri 'self'");
     expect(csp).toContain("form-action 'self'");
-    // The client talks to Common Crawl directly from the browser.
     expect(csp).toContain("connect-src 'self' https://index.commoncrawl.org https://data.commoncrawl.org");
-    // Sandboxed srcdoc preview iframe.
     expect(csp).toContain("frame-src 'self'");
-    // Same-origin compute worker (with blob: for bundlers that use it).
     expect(csp).toContain("worker-src 'self' blob:");
+    expect(csp).not.toMatch(/clerk|posthog/i);
   });
 
   it("uses a nonce with strict-dynamic for scripts", async () => {
@@ -50,14 +44,9 @@ describe("CSP proxy", () => {
     expect(first).not.toBe(second);
   });
 
-  it("exposes the same nonce to the app via the x-nonce request header", async () => {
+  it("forwards the nonce to the rendered request", async () => {
     const response = await proxyResponse(new NextRequest("https://app.test/"));
-    const headerNonce = response.headers.get("content-security-policy")?.match(/'nonce-([^']+)'/)?.[1];
-    const forwarded = response.headers.get("x-middleware-override-headers");
-    // The nonce is forwarded to the rendered request; assert the policy carries one.
-    expect(headerNonce).toBeTruthy();
-    // x-nonce is set on the forwarded request headers (Next encodes overrides).
-    expect(forwarded ?? "").toMatch(/x-nonce/i);
+    expect(response.headers.get("x-middleware-override-headers") ?? "").toMatch(/x-nonce/i);
   });
 
   it("omits 'unsafe-eval' in production but allows it in development", async () => {
@@ -68,19 +57,12 @@ describe("CSP proxy", () => {
     expect(await cspOf(new NextRequest("https://app.test/"))).toContain("'unsafe-eval'");
   });
 
-  it("redirects an unsigned visitor from pages before the app shell renders", async () => {
-    clerkTestState.isAuthenticated = false;
-
-    const response = await proxyResponse(new NextRequest("https://app.test/settings"));
-    expect(response.status).toBe(302);
-    expect(response.headers.get("location")).toContain("/sign-in");
-  });
-
-  it("returns a non-cacheable 404 for unsigned API requests", async () => {
-    clerkTestState.isAuthenticated = false;
-
-    const response = await proxyResponse(new NextRequest("https://app.test/api/robots"));
-    expect(response.status).toBe(404);
-    expect(response.headers.get("Cache-Control")).toBe("no-store");
-  });
+  it.each(["https://app.test/settings", "https://app.test/api/robots"])(
+    "allows public requests to %s through the security proxy",
+    async (url) => {
+      const response = await proxyResponse(new NextRequest(url));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    }
+  );
 });

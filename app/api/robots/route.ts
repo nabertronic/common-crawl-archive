@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { auth } from "@clerk/nextjs/server";
 import { fetchRobotsStatus } from "@/lib/robots";
 import { checkRobotsRouteRateLimit } from "@/lib/robots-rate-limit";
 import { safeFetch } from "@/lib/safe-fetch";
@@ -8,8 +7,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
-  const { userId } = await auth.protect();
-  const rateLimit = checkRobotsRouteRateLimit(request, userId);
+  const rateLimit = checkRobotsRouteRateLimit(request);
   if (!rateLimit.allowed) {
     return NextResponse.json(
       {
@@ -38,7 +36,7 @@ export async function POST(request: Request) {
         error: "Missing url in JSON request body.",
         checkedAt: Date.now()
       },
-      { status: 400 }
+      { status: 400, headers: { "Cache-Control": "no-store" } }
     );
   }
 

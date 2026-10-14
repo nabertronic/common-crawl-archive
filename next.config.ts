@@ -10,8 +10,7 @@ const securityHeaders = [
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
   { key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains" },
   { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(), interest-cohort=()" },
-  { key: "X-DNS-Prefetch-Control", value: "off" },
-  { key: "X-Robots-Tag", value: "noindex, nofollow" }
+  { key: "X-DNS-Prefetch-Control", value: "off" }
 ];
 
 const nextConfig: NextConfig = {

@@ -1,4 +1,3 @@
-import { clerkMiddleware } from "@clerk/nextjs/server";
 import { NextResponse, type NextRequest } from "next/server";
 
 /**
@@ -22,23 +21,18 @@ function securityResponse(request: NextRequest) {
     "default-src 'self'",
     "base-uri 'self'",
     "object-src 'none'",
-    // PostHog renders the in-app heatmap viewer by embedding the page. Keep
-    // framing blocked everywhere else while allowing only the EU PostHog app.
-    "frame-ancestors 'self' https://eu.posthog.com",
+    "frame-ancestors 'none'",
     "form-action 'self'",
-    // The PostHog toolbar is launched only by an authorized PostHog admin, but
-    // it loads its own UI assets when active. Permit PostHog's domains without
-    // weakening the app's own script nonce policy.
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' https://*.posthog.com${isProd ? "" : " 'unsafe-eval'"}`,
-    "style-src 'self' 'unsafe-inline' https://*.posthog.com",
-    "img-src 'self' data: blob: https://*.posthog.com",
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isProd ? "" : " 'unsafe-eval'"}`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
     // Compute worker is same-origin bundled code; some bundlers instantiate it
     // from a blob: URL, which worker-src must permit (it does not inherit the
     // strict-dynamic script-src, only default-src, which is 'self').
     "worker-src 'self' blob:",
-    "font-src 'self' https://*.posthog.com",
-    "media-src 'self' https://*.posthog.com",
-    "connect-src 'self' https://index.commoncrawl.org https://data.commoncrawl.org https://clerk.linewise.app https://accounts.linewise.app https://*.posthog.com",
+    "font-src 'self'",
+    "media-src 'self'",
+    "connect-src 'self' https://index.commoncrawl.org https://data.commoncrawl.org",
     "frame-src 'self'",
     "upgrade-insecure-requests"
   ].join("; ");
@@ -52,40 +46,10 @@ function securityResponse(request: NextRequest) {
   return response;
 }
 
-function isPublicAuthenticationPath(pathname: string) {
-  return pathname === "/sign-in" || pathname.startsWith("/sign-in/");
+/** Public request proxy that applies the nonce CSP to documents and APIs. */
+export function proxy(request: NextRequest) {
+  return securityResponse(request);
 }
-
-/**
- * Clerk is the first gate for every document and API request. Protected pages
- * and route handlers also call auth.protect() directly: this early check keeps
- * signed-out visitors out of the app shell, while resource checks remain the
- * non-bypassable authorization boundary.
- */
-export const proxy = clerkMiddleware(
-  async (auth, request) => {
-    const pathname = request.nextUrl.pathname;
-
-    if (!isPublicAuthenticationPath(pathname)) {
-      const session = await auth();
-      if (!session.isAuthenticated) {
-        // Do not confirm which application endpoints exist to signed-out callers.
-        if (pathname.startsWith("/api/")) {
-          return new NextResponse(null, {
-            status: 404,
-            headers: {
-              "Cache-Control": "no-store",
-              "X-Robots-Tag": "noindex, nofollow"
-            }
-          });
-        }
-        return session.redirectToSignIn({ returnBackUrl: request.url });
-      }
-    }
-
-    return securityResponse(request);
-  }
-);
 
 export default proxy;
 

@@ -33,35 +33,20 @@ pnpm build
 
 `pnpm build` creates a server-capable Next.js build. Deploy it on a runtime that supports Next.js route handlers.
 
-## Private beta deployment
+## Public deployment
 
-Crawlback is configured as an invite-only Clerk application. All app pages and
-route handlers require a valid Clerk session; `/sign-in` is the sole public app
-page. The app never renders a sign-up component.
+Crawlback runs without accounts, authentication services, or analytics. No API
+keys or environment variables are required. Search history, settings, and cached
+captures stay in the user's browser.
 
-Before deploying, create a separate **Clerk Production** instance and complete
-these dashboard steps:
+Deploy the server-capable Next.js build with `pnpm build` and `pnpm start`.
+The server is needed for the robots.txt checks and public archive metadata APIs.
+The app still accesses Common Crawl and the published opt-out registry to provide
+archive search. It does not send usage events to a tracking service.
 
-1. In **Restrictions**, enable **Restricted mode**. Create every beta account
-   manually in Clerk; do not use the waitlist or public sign-up mode.
-2. Configure the beta domain (for example `beta.example.com`) as the only
-   production origin and redirect URL. Keep local development origins in the
-   development Clerk instance, not in the production instance.
-3. In Vercel, add the four values from `.env.example` to **Production** and
-   Preview as appropriate. The secret key belongs in Vercel only and must never
-   be committed. Use Clerk's verified `clerk.<domain>` CNAME for the Frontend
-   API rather than proxying authentication through the app.
-4. Protect Preview deployments with Vercel Authentication. Testers should use
-   the fixed beta domain and Clerk, not random Preview URLs. If the Vercel plan
-   includes Password Protection and an additional shared gate is wanted, enable
-   it for production as well.
-
-After each deploy, verify in an incognito browser that every page redirects to
-sign-in and that each `/api/*` endpoint returns a non-cacheable `404` without a
-session. Then sign in with one manually created Clerk account and repeat the
-three API checks. A public URL or JavaScript bundle cannot be made secret on the
-web; the security boundary is the authenticated server response, not obscurity
-of a path name.
+After deploying, verify that `/`, `/search`, `/history`, `/settings`, and `/view`
+open without a login, and that the API endpoints work without a session.
+API request limits, SSRF protection, and the sandboxed capture viewer remain active.
 
 ## Opt-out Registry
 

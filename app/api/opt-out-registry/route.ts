@@ -1,18 +1,15 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { auth } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 import { OPT_OUT_REGISTRY_CSV_URL, parseOptOutRegistryCsv } from "@/lib/opt-out-registry";
 
 export const dynamic = "force-dynamic";
 
-// This endpoint is authenticated. Never allow a shared browser/CDN cache to
-// replay its response outside the user's Clerk session.
+// Keep this public API response out of shared browser and CDN caches.
 const ROUTE_CACHE_CONTROL = "private, no-store";
 const SNAPSHOT_PATH = path.join(process.cwd(), "data", "common-crawl-opt-out-registry-snapshot.csv");
 
 export async function GET() {
-  await auth.protect();
   try {
     const response = await fetch(OPT_OUT_REGISTRY_CSV_URL, {
       headers: { Accept: "text/csv" },
@@ -41,7 +38,7 @@ export async function GET() {
 
     return NextResponse.json(
       { error: "Could not download the Common Crawl opt-out registry, and no bundled snapshot was available." },
-      { status: 502 }
+      { status: 502, headers: { "Cache-Control": ROUTE_CACHE_CONTROL } }
     );
   }
 }

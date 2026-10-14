@@ -4,28 +4,16 @@ This document explains the security controls in this codebase and the invariants
 you (a human or AI agent) must preserve when changing it. Read it before touching
 network code, the proxy/middleware, the HTML preview, or response headers.
 
-## Private-beta access control
+## Public access and local data
 
-Clerk is the access boundary for Crawlback's private beta. `proxy.ts` performs
-an early session check for every dynamic page and API request; it redirects
-documents to `/sign-in` and returns a generic, non-cacheable `404` for unsigned
-API requests. Every protected Server Component and Route Handler also calls
-`auth.protect()` directly. Keep both layers: the route-level call is the actual
-resource boundary, and the proxy prevents signed-out users from receiving the
-app shell first.
+All app pages and API routes are publicly accessible without an account.
+Search history, settings, and cached captures are stored in the user's browser;
+there is no server-side account data or analytics integration.
 
-Only `/sign-in` is public. Clerk's Frontend API is served from its verified
-`clerk.linewise.app` domain and contains no Crawlback application data.
-Static assets are necessarily fetchable so that the sign-in screen can work;
-they contain no secrets or protected data. Do not add a `<SignUp />` component
-or a public sign-up route. Whether an account can exist is enforced in Clerk
-Dashboard through Restricted mode, not through a client-side condition.
-
-All authenticated API responses must use `Cache-Control: private, no-store` or
-`no-store`. Never use a shared `public` cache for a response that is reachable
-only after authentication. The `robots` endpoint accepts the target as a JSON
-POST body rather than a URL query parameter so the searched target is not put
-into the endpoint path or browser referrer.
+API routes retain per-client IP request limits and non-cacheable responses.
+These in-memory limits apply per server instance, not globally across deployments.
+The `robots` endpoint accepts the target as a JSON POST body rather than a URL
+query parameter so the target is not put into the endpoint path or browser referrer.
 
 ## Threat model in one paragraph
 
@@ -41,9 +29,9 @@ user-influenced URLs** (SSRF) and (2) **rendering attacker-controlled HTML**
 
 ## 1. SSRF guard — `lib/safe-fetch.ts`
 
-**Why:** `app/api/robots/route.ts` takes a `url` query param from anyone and
+**Why:** `app/api/robots/route.ts` takes a `url` JSON body field from anyone and
 fetches it on the server. Without guarding, an attacker sends
-`?url=http://169.254.169.254/…` (cloud metadata), `http://localhost:6379/…`
+`{"url":"http://169.254.169.254/…"}` (cloud metadata), `http://localhost:6379/…`
 (internal services), or a public host that **redirects** to an internal one.
 
 **Control:** every server-side fetch of a user-influenced URL MUST go through
