@@ -46,6 +46,7 @@ import {
   type CommonCrawlCapture,
   type CommonCrawlCollection
 } from "@/lib/common-crawl";
+import { buildSpread, captureYearsFromKeys } from "@/lib/history-spread";
 import { createViewerHref } from "@/lib/navigation-state";
 import { markPerformance, measureAsync } from "@/lib/performance";
 import { computeCsv } from "@/lib/compute-client";
@@ -73,6 +74,8 @@ const HISTORY_CACHED_COL_CLASS = "history-col-cached";
 const HISTORY_SOURCES_COL_CLASS = "history-col-sources";
 const HISTORY_FAILED_COL_CLASS = "history-col-failed";
 const HISTORY_ACTIONS_COL_CLASS = "history-col-actions";
+const SPREAD_FROM_YEAR = 2008;
+const SPREAD_TO_YEAR = new Date().getUTCFullYear();
 const DEFAULT_SORT_DIR: Record<SortKey, SortDir> = {
   status: "asc",
   url: "asc",
@@ -374,9 +377,9 @@ export function HistoryApp() {
   }
 
   return (
-    <main className="min-h-screen px-4 py-5 text-zinc-100 md:px-8">
+    <main className="history-page min-h-screen px-4 py-5 text-zinc-100 md:px-8">
       <div className="mx-auto flex max-w-7xl flex-col gap-4" suppressHydrationWarning>
-        <header className="archive-panel relative z-40 rounded-md p-4">
+        <header className="archive-panel history-plain history-head relative z-40 rounded-md p-4">
           <div className="flex items-center justify-between gap-3">
             <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
               <Link
@@ -388,7 +391,7 @@ export function HistoryApp() {
                 <BrandLockup className="translate-y-[1.5px]" wordClassName="text-xl leading-none" />
               </Link>
               <div className="min-w-0">
-                <h1 className="border-l border-zinc-700 pl-3 text-xl font-bold leading-none text-zinc-50">
+                <h1 className="border-l border-zinc-700 pl-3 text-xl font-bold leading-none text-zinc-50 ledger:font-serif ledger:text-[32px] ledger:font-normal ledger:tracking-[-0.02em]">
                   Scan history
                 </h1>
               </div>
@@ -407,8 +410,8 @@ export function HistoryApp() {
 
         <CachedHtmlSearchPanel />
 
-        <section className="archive-panel rounded-md p-4">
-          <div className="flex flex-col gap-2 lg:flex-row">
+        <section className="archive-panel history-plain history-toolbar rounded-md p-4">
+          <div className="history-search-row flex flex-col gap-2 lg:flex-row">
             <label className="relative flex-1">
               <Search
                 aria-hidden="true"
@@ -474,15 +477,15 @@ export function HistoryApp() {
           ) : null}
         </section>
 
-        <section className="archive-panel rounded-md">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 p-4">
-            <label className="inline-flex min-h-11 cursor-pointer items-center gap-2.5 text-xs font-semibold uppercase tracking-[0.08em] text-zinc-300">
+        <section className="archive-panel history-plain rounded-md">
+          <div className="history-bulkbar flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 p-4">
+            <label className="inline-flex min-h-11 cursor-pointer items-center gap-2.5 text-xs font-semibold uppercase tracking-[0.08em] text-zinc-300 ledger:normal-case ledger:tracking-normal ledger:font-sans">
               <input
                 type="checkbox"
                 checked={allVisibleSelected}
                 onChange={(event) => toggleVisibleSelection(event.target.checked)}
                 aria-label="Select visible history entries"
-                className="h-5 w-5 cursor-pointer accent-amber-300"
+                className="h-5 w-5 cursor-pointer accent-amber-300 ledger:transition-transform ledger:duration-150 ledger:ease-[cubic-bezier(0.2,0.8,0.2,1)] ledger:motion-safe:active:scale-[0.9]"
               />
               Select visible
             </label>
@@ -497,7 +500,7 @@ export function HistoryApp() {
                     type="button"
                     aria-pressed={exportFormat === format}
                     onClick={() => setExportFormat(format)}
-                    className={`h-8 px-2.5 text-xs font-semibold uppercase tracking-wide transition ${
+                    className={`h-11 px-3 text-xs font-semibold uppercase tracking-wide sm:h-8 sm:px-2.5 ledger:normal-case ledger:tracking-normal ledger:font-sans transition ledger:transition-colors ledger:duration-150 ledger:ease-[cubic-bezier(0.2,0.8,0.2,1)] ${
                       exportFormat === format
                         ? "bg-amber-300/10 text-amber-200"
                         : "bg-zinc-950 text-zinc-400 hover:text-zinc-200"
@@ -576,13 +579,16 @@ export function HistoryApp() {
           ) : (
             <>
               <div>
-                <div className={`${HISTORY_GRID_CLASS} border-b border-zinc-800 px-4 py-3`}>
+                <div className={`history-thead ${HISTORY_GRID_CLASS} border-b border-zinc-800 px-4 py-3`}>
                   <span className={HISTORY_SELECT_COL_CLASS} />
                   <div className={HISTORY_STATUS_COL_CLASS}>
                     <SortHeader label="Status" sortKey="status" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
                   </div>
                   <div className={HISTORY_URL_COL_CLASS}>
                     <SortHeader label="URL" sortKey="url" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
+                    <span className="history-spread-label ledger-label mt-2 hidden w-[120px] ledger:block">
+                      Captures by year
+                    </span>
                   </div>
                   <div className={HISTORY_SCOPE_COL_CLASS}>
                     <SortHeader label="Scope" sortKey="scope" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} />
@@ -596,14 +602,14 @@ export function HistoryApp() {
                   <div className={HISTORY_SNAPSHOTS_COL_CLASS}>
                     <SortHeader label="Snapshots" sortKey="captures" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
                   </div>
-                  <span className={`${HISTORY_CACHED_COL_CLASS} text-right text-xs font-bold uppercase tracking-[0.14em] text-zinc-500`}>Cached</span>
+                  <span className={`${HISTORY_CACHED_COL_CLASS} text-right text-xs font-bold uppercase tracking-[0.14em] text-zinc-500 ledger:normal-case ledger:tracking-normal ledger:font-sans`}>Cached</span>
                   <div className={HISTORY_SOURCES_COL_CLASS}>
                     <SortHeader label="Sources" sortKey="sources" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
                   </div>
                   <div className={HISTORY_FAILED_COL_CLASS}>
                     <SortHeader label="Failed" sortKey="failed" currentKey={sortKey} currentDir={sortDir} onSort={toggleSort} align="right" />
                   </div>
-                  <span className={`${HISTORY_ACTIONS_COL_CLASS} text-right text-xs font-bold uppercase tracking-[0.14em] text-zinc-500`}>Actions</span>
+                  <span className={`${HISTORY_ACTIONS_COL_CLASS} text-right text-xs font-bold uppercase tracking-[0.14em] text-zinc-500 ledger:normal-case ledger:tracking-normal ledger:font-sans`}>Actions</span>
                 </div>
                 <div className="divide-y divide-zinc-800/70">
                   {visibleRecords.map((record) => (
@@ -619,7 +625,7 @@ export function HistoryApp() {
                   ))}
                 </div>
               </div>
-              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-800 p-4 text-xs text-zinc-400">
+              <div className="history-pager flex flex-wrap items-center justify-between gap-3 border-t border-zinc-800 p-4 text-xs text-zinc-400">
                 <p>
                   {sortedRecords.length === 0 ? 0 : pageStart + 1}-{Math.min(pageStart + pageSize, sortedRecords.length)} of{" "}
                   {sortedRecords.length}
@@ -687,17 +693,17 @@ function HistoryRow({
 
   return (
     <>
-    <article className={`${HISTORY_GRID_CLASS} px-4 py-3 text-sm transition hover:bg-zinc-900/45`}>
+    <article className={`history-row ${HISTORY_GRID_CLASS} px-4 py-3 text-sm transition hover:bg-zinc-900/45 ledger:transition-colors ledger:duration-150 ledger:ease-[cubic-bezier(0.2,0.8,0.2,1)]`}>
       <label className={HISTORY_SELECT_COL_CLASS}>
         <input
           type="checkbox"
           checked={selected}
           onChange={(event) => onSelectedChange(record.key, event.target.checked)}
           aria-label={`Select saved scan for ${record.url}`}
-          className="h-5 w-5 cursor-pointer accent-amber-300"
+          className="h-5 w-5 cursor-pointer accent-amber-300 ledger:transition-transform ledger:duration-150 ledger:ease-[cubic-bezier(0.2,0.8,0.2,1)] ledger:motion-safe:active:scale-[0.9]"
         />
       </label>
-      <div className={HISTORY_STATUS_COL_CLASS}>
+      <div className={`${HISTORY_STATUS_COL_CLASS} history-status`}>
         <div className="flex flex-nowrap items-center gap-1">
           <Badge tone={outcome === "complete" ? "green" : outcome === "partial" ? "amber" : "neutral"}>
             {outcome}
@@ -706,23 +712,24 @@ function HistoryRow({
         </div>
       </div>
       <div className={`${HISTORY_URL_COL_CLASS} min-w-0`}>
-        <p className="truncate text-sm font-bold text-zinc-50" title={record.url}>
+        <p className="history-url-host truncate text-sm font-bold text-zinc-50" title={record.url}>
           {host}
         </p>
         {path && path !== "/" ? (
-          <p className="mt-0.5 truncate text-xs text-zinc-500" title={path}>
+          <p className="history-url-path mt-0.5 truncate text-xs text-zinc-500" title={path}>
             {path}
           </p>
         ) : null}
+        <CaptureSpread keys={record.captureKeys} />
       </div>
-      <span className={`${HISTORY_SCOPE_COL_CLASS} truncate text-xs text-zinc-400`}>
+      <span className={`${HISTORY_SCOPE_COL_CLASS} history-meta truncate text-xs text-zinc-400`}>
         {record.scanScope === "all" ? "full" : record.scanScope === "custom" ? "custom" : "recent"}
       </span>
-      <span className={`${HISTORY_MATCH_COL_CLASS} truncate text-xs text-zinc-400`}>{record.matchType}</span>
-      <time className={`${HISTORY_UPDATED_COL_CLASS} truncate text-xs text-zinc-500`} title={formatDateTime(record.updatedAt)}>
+      <span className={`${HISTORY_MATCH_COL_CLASS} history-meta truncate text-xs text-zinc-400`}>{record.matchType}</span>
+      <time className={`${HISTORY_UPDATED_COL_CLASS} history-meta truncate text-xs text-zinc-500`} title={formatDateTime(record.updatedAt)}>
         {formatDate(record.updatedAt)}
       </time>
-      <div className={HISTORY_SNAPSHOTS_COL_CLASS}>
+      <div className={`${HISTORY_SNAPSHOTS_COL_CLASS} history-snapshots`}>
         <Metric value={String(record.captureCount)} tone={record.captureCount > 0 ? "green" : "neutral"} />
       </div>
       <div className={`${HISTORY_CACHED_COL_CLASS} text-right`}>
@@ -736,7 +743,7 @@ function HistoryRow({
       <div className={HISTORY_FAILED_COL_CLASS}>
         <Metric value={String(sourceStats.failed)} tone={sourceStats.failed > 0 ? "red" : "neutral"} />
       </div>
-      <div className={`${HISTORY_ACTIONS_COL_CLASS} flex min-w-0 items-center justify-end gap-1 overflow-hidden`}>
+      <div className={`${HISTORY_ACTIONS_COL_CLASS} history-actions flex min-w-0 items-center justify-end gap-1 overflow-hidden`}>
         {newCount > 0 ? (
           <LinkButton href={checkNewHref} size="sm" variant="secondary" title="Check new collections" aria-label="Check new collections" className={buttonClass}>
             <RotateCcw size={14} />
@@ -760,6 +767,42 @@ function HistoryRow({
       </div>
     </article>
     </>
+  );
+}
+
+const SPREAD_BAR_MAX_PX = 22;
+const SPREAD_STUB_PX = 2;
+
+/** Ledger-only sparkline of captures per collection year. Hidden in classic. */
+function CaptureSpread({ keys }: { keys: string[] }) {
+  const counts = buildSpread(keys, SPREAD_FROM_YEAR, SPREAD_TO_YEAR);
+  const max = Math.max(0, ...counts);
+  const yearsWithCaptures = captureYearsFromKeys(keys).filter(
+    (year) => year >= SPREAD_FROM_YEAR && year <= SPREAD_TO_YEAR
+  );
+  const firstYear = yearsWithCaptures.length > 0 ? Math.min(...yearsWithCaptures) : undefined;
+  const lastYear = yearsWithCaptures.length > 0 ? Math.max(...yearsWithCaptures) : undefined;
+  const label =
+    firstYear === undefined || lastYear === undefined
+      ? "No captures by year"
+      : firstYear === lastYear
+        ? `Captures by year, ${firstYear}`
+        : `Captures by year, ${firstYear} to ${lastYear}`;
+
+  return (
+    <div role="img" aria-label={label} className="history-spread mt-2 hidden h-[22px] w-[120px] max-w-full items-end gap-px ledger:flex">
+      {counts.map((count, index) =>
+        count > 0 ? (
+          <span
+            key={SPREAD_FROM_YEAR + index}
+            className="flex-1 bg-zinc-50"
+            style={{ height: Math.max(SPREAD_STUB_PX, Math.round((count / max) * SPREAD_BAR_MAX_PX)) }}
+          />
+        ) : (
+          <span key={SPREAD_FROM_YEAR + index} className="flex-1 bg-zinc-800" style={{ height: SPREAD_STUB_PX }} />
+        )
+      )}
+    </div>
   );
 }
 
@@ -828,7 +871,7 @@ function SortHeader({
     <button
       type="button"
       onClick={() => onSort(sortKey)}
-      className={`group flex w-full items-center gap-1 p-0 text-xs font-bold uppercase tracking-[0.14em] transition ${justify} ${color}`}
+      className={`group flex w-full items-center gap-1 p-0 text-xs font-bold uppercase tracking-[0.14em] ledger:normal-case ledger:tracking-normal ledger:font-sans transition ${justify} ${color}`}
     >
       <span>{label}</span>
       {active ? (
@@ -858,12 +901,12 @@ function SelectControl({
   const renderedOptions = fullValueOptions ?? options.map(([optionValue, optionLabel]) => ({ value: optionValue, label: optionLabel }));
   return (
     <label className="block">
-      <span className="mb-1 block text-xs font-bold uppercase tracking-[0.14em] text-zinc-500">{label}</span>
+      <span className="mb-1 block text-xs font-bold uppercase tracking-[0.14em] text-zinc-500 ledger:normal-case ledger:tracking-normal ledger:font-sans">{label}</span>
       <select
         ref={selectRef}
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100 outline-none focus:border-amber-300"
+        className="h-11 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-base text-zinc-100 outline-none focus:border-amber-300 sm:h-10 sm:text-sm"
       >
         {renderedOptions.map((option) => (
           <option key={option.value} value={option.value}>
@@ -877,7 +920,7 @@ function SelectControl({
 
 function EmptyState({ text }: { text: string }) {
   return (
-    <div className="grid min-h-80 place-items-center p-8 text-center">
+    <div className="history-empty grid min-h-80 place-items-center p-8 text-center">
       <div>
         <History className="mx-auto mb-3 text-zinc-500" size={30} />
         <p className="font-semibold text-zinc-300">{text}</p>
@@ -1152,12 +1195,12 @@ function CachedHtmlSearchPanel() {
   }, [query]);
 
   return (
-    <section className="archive-panel rounded-md px-4 py-1">
+    <section className="archive-panel history-plain history-cached rounded-md px-4 py-1">
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
-        className="flex min-h-12 w-full items-center gap-2 text-left text-xs font-bold uppercase tracking-[0.1em] text-zinc-200 transition hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300"
+        className="flex min-h-12 w-full items-center gap-2 text-left text-xs font-bold uppercase tracking-[0.1em] text-zinc-200 ledger:normal-case ledger:tracking-normal ledger:font-sans transition hover:text-white ledger:transition-colors ledger:duration-150 ledger:ease-[cubic-bezier(0.2,0.8,0.2,1)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300"
       >
         <Search size={14} />
         Full-text search (cached pages)
@@ -1196,7 +1239,7 @@ function CachedHtmlSearchPanel() {
                   <li key={match.cacheKey}>
                     <Link
                       href={viewerHrefForMatch(match)}
-                      className="block rounded-md border border-zinc-800 bg-zinc-950 p-3 transition hover:border-zinc-600"
+                      className="block rounded-md border border-zinc-800 bg-zinc-950 p-3 transition hover:border-zinc-600 ledger:transition-colors ledger:duration-150 ledger:ease-[cubic-bezier(0.2,0.8,0.2,1)]"
                     >
                       <div className="flex items-center justify-between gap-2">
                         <span className="truncate text-sm font-semibold text-amber-200">{match.url || "(unknown URL)"}</span>

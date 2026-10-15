@@ -72,7 +72,7 @@ function BookmarkHintText({ hint }: { hint: BookmarkHint }) {
             {hint.keys.map((key) => (
               <kbd
                 key={key}
-                className="inline-flex min-h-6 min-w-6 items-center justify-center rounded-md border border-amber-300/35 border-b-2 bg-zinc-900 px-1.5 font-mono text-[0.8125rem] font-semibold leading-none text-amber-200 shadow-[0_0_14px_rgba(250,204,21,0.12)]"
+                className="ledger-key inline-flex min-h-6 min-w-6 items-center justify-center rounded-md border border-amber-300/35 border-b-2 bg-zinc-900 px-1.5 font-mono text-[0.8125rem] font-semibold leading-none text-amber-200 shadow-[0_0_14px_rgba(250,204,21,0.12)] ledger:rounded-[3px] ledger:border-zinc-50 ledger:bg-zinc-950 ledger:text-zinc-50 ledger:shadow-none"
               >
                 {key}
               </kbd>

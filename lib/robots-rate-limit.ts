@@ -61,21 +61,23 @@ export function createRouteRateLimiter({
 /**
  * Resolve the identity used to group requests.
  *
- * Header trust choice: on Vercel, `x-real-ip` and `x-forwarded-for` are set by the
- * platform edge, so they are preferred. `cf-connecting-ip` is NOT set or overwritten
- * by Vercel, so anyone can rotate it per request to escape the limit. It is only
- * honored when the deployment explicitly sits behind Cloudflare and opts in with
- * TRUST_CLOUDFLARE_HEADERS=1. Requests without a usable IP share a "local" bucket.
+ * Header trust choice: Vercel overwrites `x-real-ip` and `x-forwarded-for`, so those
+ * headers are trusted only on Vercel. `cf-connecting-ip` is not set or overwritten
+ * by Vercel, so it is only honored when the operator explicitly opts in and controls
+ * the Cloudflare edge. Unknown/direct deployments use one shared bucket because
+ * request headers there may be supplied by the caller.
  */
 function clientKey(request: Request) {
   if (process.env.TRUST_CLOUDFLARE_HEADERS === "1") {
     const cfIp = request.headers.get("cf-connecting-ip")?.trim();
     if (cfIp && isIP(cfIp)) return cfIp;
   }
-  const realIp = request.headers.get("x-real-ip")?.trim();
-  if (realIp && isIP(realIp)) return realIp;
-  const forwardedFor = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  if (forwardedFor && isIP(forwardedFor)) return forwardedFor;
+  if (process.env.VERCEL === "1") {
+    const realIp = request.headers.get("x-real-ip")?.trim();
+    if (realIp && isIP(realIp)) return realIp;
+    const forwardedFor = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+    if (forwardedFor && isIP(forwardedFor)) return forwardedFor;
+  }
   return "local";
 }
 

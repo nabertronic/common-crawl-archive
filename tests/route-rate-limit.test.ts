@@ -7,6 +7,7 @@ function requestFrom(ip: string): Request {
 
 describe("createRouteRateLimiter", () => {
   beforeEach(() => {
+    vi.stubEnv("VERCEL", "1");
     vi.stubEnv("TRUST_CLOUDFLARE_HEADERS", "");
   });
   afterEach(() => vi.unstubAllEnvs());
@@ -75,6 +76,29 @@ describe("createRouteRateLimiter", () => {
     expect(limiter.check(spoofed("192.0.2.1"), now).allowed).toBe(true);
     expect(limiter.check(spoofed("192.0.2.2"), now).allowed).toBe(true);
     expect(limiter.check(spoofed("192.0.2.3"), now).allowed).toBe(false);
+  });
+
+  it("uses one shared bucket on direct or unknown deployments regardless of spoofed IP headers", () => {
+    vi.stubEnv("VERCEL", "");
+    const limiter = createRouteRateLimiter({ windowMs: 1000, maxRequests: 1 });
+    const now = 12_250;
+    const spoofed = (ip: string) => new Request("https://app.example/api/x", {
+      headers: { "x-real-ip": ip, "x-forwarded-for": ip, "cf-connecting-ip": ip }
+    });
+
+    expect(limiter.check(spoofed("192.0.2.20"), now).allowed).toBe(true);
+    expect(limiter.check(spoofed("192.0.2.21"), now).allowed).toBe(false);
+  });
+
+  it("uses Vercel client headers and ignores independently spoofable Cloudflare headers", () => {
+    const limiter = createRouteRateLimiter({ windowMs: 1000, maxRequests: 1 });
+    const now = 12_300;
+    const fromVercel = (cf: string) => new Request("https://app.example/api/x", {
+      headers: { "x-real-ip": "198.51.100.41", "x-forwarded-for": "198.51.100.41", "cf-connecting-ip": cf }
+    });
+
+    expect(limiter.check(fromVercel("192.0.2.30"), now).allowed).toBe(true);
+    expect(limiter.check(fromVercel("192.0.2.31"), now).allowed).toBe(false);
   });
 
   it("honors cf-connecting-ip only when TRUST_CLOUDFLARE_HEADERS=1", () => {

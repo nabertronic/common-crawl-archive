@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crawlback · Settings (mockup)</title>
+<link rel="stylesheet" href="mockup.css">
+</head>
+<body>
+
+<header class="topbar">
+  <a class="wordmark" href="landing.html">crawl<i>back</i></a>
+  <nav aria-label="App">
+    <a href="search.html">Scan</a>
+    <a href="history.html">History</a>
+    <a href="settings.html" aria-current="page">Settings</a>
+  </nav>
+  <span class="spacer"></span>
+  <a class="btn small" href="landing.html">New scan</a>
+</header>
+
+<main class="wrap">
+  <div class="page-head">
+    <div>
+      <h1>Settings</h1>
+      <p>Preferences are saved on this device only.</p>
+    </div>
+  </div>
+
+  <div class="settings">
+    <nav class="settings-nav" aria-label="Settings sections">
+      <a href="#scan" aria-current="true">Scan</a>
+      <a href="#results">Results</a>
+      <a href="#viewer">Viewer</a>
+      <a href="#storage">Storage</a>
+      <a href="#export">Export</a>
+      <a href="#danger">Danger zone</a>
+    </nav>
+
+    <div>
+      <section id="scan" class="panel">
+        <div class="panel-head"><h2>Scan</h2></div>
+        <div class="srow"><div><h3>Default match mode</h3><p>How the URL is matched against the index.</p></div>
+          <div class="ctl"><div class="seg"><button aria-pressed="true">Exact</button><button aria-pressed="false">Host</button><button aria-pressed="false">Domain</button></div></div></div>
+        <div class="srow"><div><h3>Default scan window</h3><p>Which collections a new scan covers.</p></div>
+          <div class="ctl"><select class="field"><option>Full archive</option><option>Recent</option><option>Custom date range</option></select></div></div>
+        <div class="srow"><div><h3>Robots.txt check</h3><p>One request to the target site. Turn off for sensitive targets so the site is never contacted.</p></div>
+          <div class="ctl"><button class="toggle" role="switch" aria-checked="true" aria-label="Robots.txt check"></button></div></div>
+        <div class="srow"><div><h3>Common Crawl list</h3><p>112 collections, fetched today at 20:58</p></div>
+          <div class="ctl"><button class="btn ghost small">Refresh</button></div></div>
+      </section>
+
+      <section id="results" class="panel">
+        <div class="panel-head"><h2>Results</h2></div>
+        <div class="srow"><div><h3>Result view</h3><p>Initial layout for scan results.</p></div>
+          <div class="ctl"><div class="seg"><button aria-pressed="true">Ledger</button><button aria-pressed="false">Calendar</button></div></div></div>
+        <div class="srow"><div><h3>Sort order</h3><p>Initial sorting of captures.</p></div>
+          <div class="ctl"><select class="field"><option>Newest first</option><option>Oldest first</option></select></div></div>
+        <div class="srow"><div><h3>Search page size</h3><p>Captures per page in scan results.</p></div>
+          <div class="ctl"><select class="field"><option>100</option><option>250</option></select></div></div>
+      </section>
+
+      <section id="viewer" class="panel">
+        <div class="panel-head"><h2>Viewer</h2></div>
+        <div class="srow"><div><h3>Large capture limit</h3><p>Records above this size need a manual load.</p></div>
+          <div class="ctl"><input class="field" value="15 MB" style="max-width:120px"></div></div>
+        <div class="srow"><div><h3>HTML privacy warning</h3><p>Ask before downloading raw HTML that could contain trackers.</p></div>
+          <div class="ctl"><button class="toggle" role="switch" aria-checked="true" aria-label="HTML privacy warning"></button></div></div>
+      </section>
+
+      <section id="storage" class="panel">
+        <div class="panel-head"><h2>Storage</h2></div>
+        <div class="srow"><div><h3>Browser storage</h3><p>IndexedDB, on this device only.</p>
+          <div class="meter"><i></i></div>
+          <div class="stats3"><div><span class="label">Cached files</span><b>214</b></div><div><span class="label">Size</span><b>34 MB</b></div><div><span class="label">Last used</span><b>Today</b></div></div></div>
+          <div class="ctl"><button class="btn ghost small">Prune now</button></div></div>
+        <div class="srow"><div><h3>Cache HTML</h3><p>Keep fetched snapshots locally for instant reopening.</p></div>
+          <div class="ctl"><button class="toggle" role="switch" aria-checked="true" aria-label="Cache HTML"></button></div></div>
+        <div class="srow"><div><h3>Cache limit</h3><p>Maximum disk space for cached HTML.</p></div>
+          <div class="ctl"><select class="field"><option>100 MB</option><option>250 MB</option><option>500 MB</option></select></div></div>
+      </section>
+
+      <section id="export" class="panel">
+        <div class="panel-head"><h2>Export</h2></div>
+        <div class="srow"><div><h3>Default format</h3><p>Used by the Export button on result pages.</p></div>
+          <div class="ctl"><div class="seg"><button aria-pressed="false">CSV</button><button aria-pressed="true">JSON</button><button aria-pressed="false">ZIP</button><button aria-pressed="false">WARC</button></div></div></div>
+      </section>
+
+      <section id="danger" class="panel">
+        <div class="panel-head danger"><h2>Danger zone</h2></div>
+        <div class="srow"><div><h3>Clear HTML cache</h3><p>Deletes cached HTML files. History entries stay intact.</p></div><div class="ctl"><button class="btn danger small">Clear cache</button></div></div>
+        <div class="srow"><div><h3>Reset settings</h3><p>Restores every setting on this page to its default.</p></div><div class="ctl"><button class="btn danger small">Reset</button></div></div>
+        <div class="srow"><div><h3>Clear all data</h3><p>Deletes history, settings, and cached HTML from this device.</p></div><div class="ctl"><button class="btn small" style="background:var(--accent);border-color:var(--accent)">Clear everything</button></div></div>
+      </section>
+    </div>
+  </div>
+</main>
+
+<footer class="footer">
+  <div class="wrap">
+    <a class="wordmark" href="landing.html">crawl<i>back</i></a>
+    <nav aria-label="Website information"><a href="#">Privacy</a><a href="#">Terms</a><a href="#">Legal notice</a><a href="#">GitHub</a></nav>
+  </div>
+</footer>
+
+<script src="mockup.js"></script>
+</body>
+</html>

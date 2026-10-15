@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
-import { fireEvent, render, screen, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { LandingSections } from "@/components/landing-sections";
 import { SiteFooter } from "@/components/site-footer";
 import { WebsitePreferences } from "@/components/website-preferences";
@@ -36,7 +36,7 @@ describe("LandingSections", () => {
     expect(screen.queryByText(/Local government notice/)).toBeNull();
     expect(screen.queryByText(/Suppose a city removes a notice/)).toBeNull();
     expect(screen.getByRole("link", { name: "Common Crawl FAQ →" })).toHaveAttribute("href", "https://www.commoncrawl.org/faq");
-    expect(screen.getByRole("link", { name: "Terms of Use →" })).toHaveAttribute("href", "https://www.commoncrawl.org/terms-of-use");
+    expect(screen.queryByRole("link", { name: /Terms of Use/ })).toBeNull();
   });
 
   it("answers the scan, preview, and FAQ questions with the updated guidance", () => {
@@ -155,5 +155,48 @@ describe("detectBookmarkHint", () => {
     expect(detectBookmarkHint({ userAgent: IPHONE_UA, platform: "iPhone" })).toMatchObject({ kind: "touch" });
     expect(detectBookmarkHint({ userAgent: MAC_UA, platform: "MacIntel", maxTouchPoints: 5 })).toMatchObject({ kind: "touch" });
     expect(detectBookmarkHint({ userAgent: ANDROID_UA, platform: "Linux armv8l" })).toMatchObject({ kind: "touch" });
+  });
+});
+
+describe("Reveal robustness", () => {
+  const sectionCount = () => document.querySelectorAll("#how-it-works, #why-crawlback, #data-source, #faq").length;
+  const originalIO = globalThis.IntersectionObserver;
+  const originalRect = Element.prototype.getBoundingClientRect;
+  afterEach(() => {
+    globalThis.IntersectionObserver = originalIO;
+    Element.prototype.getBoundingClientRect = originalRect;
+    vi.useRealTimers();
+  });
+  const hidden = () => document.querySelectorAll(".scroll-reveal:not(.is-visible)");
+
+  it("shows everything when IntersectionObserver is unavailable", () => {
+    // @ts-expect-error simulate missing API
+    delete globalThis.IntersectionObserver;
+    render(<LandingSections />);
+    expect(sectionCount()).toBe(4);
+    expect(hidden().length).toBe(0);
+    expect(document.querySelectorAll(".is-visible").length).toBeGreaterThan(0);
+  });
+
+  it("reveals sections already in or above the viewport at mount, including after a remount", () => {
+    class NeverFiresIO { observe() {} disconnect() {} unobserve() {} takeRecords() { return []; } }
+    globalThis.IntersectionObserver = NeverFiresIO as unknown as typeof IntersectionObserver;
+    Element.prototype.getBoundingClientRect = () => ({ top: -2000, bottom: -1000, left: 0, right: 0, width: 0, height: 0, x: 0, y: -2000, toJSON() {} }) as DOMRect;
+    const first = render(<LandingSections />);
+    expect(hidden().length).toBe(0);
+    first.unmount();
+    render(<LandingSections />);
+    expect(hidden().length).toBe(0);
+  });
+
+  it("never leaves below-fold sections hidden if the observer never fires", () => {
+    vi.useFakeTimers();
+    class NeverFiresIO { observe() {} disconnect() {} unobserve() {} takeRecords() { return []; } }
+    globalThis.IntersectionObserver = NeverFiresIO as unknown as typeof IntersectionObserver;
+    Element.prototype.getBoundingClientRect = () => ({ top: 5000, bottom: 6000, left: 0, right: 0, width: 0, height: 0, x: 0, y: 5000, toJSON() {} }) as DOMRect;
+    render(<LandingSections />);
+    expect(hidden().length).toBeGreaterThan(0);
+    act(() => { vi.advanceTimersByTime(3000); });
+    expect(hidden().length).toBe(0);
   });
 });

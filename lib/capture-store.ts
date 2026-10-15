@@ -1741,6 +1741,8 @@ export async function clearHtmlCache(): Promise<void> {
 }
 
 export async function clearAllLocalAppData(): Promise<void> {
+  // The saved theme choice is the only app preference outside IndexedDB.
+  try { globalThis.localStorage?.removeItem("crawlback:theme"); /* Legacy key from the retired theme switcher. */ } catch { /* Storage may be blocked. */ }
   try {
     const db = await openDB();
     await new Promise<void>((resolve, reject) => {

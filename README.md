@@ -93,6 +93,11 @@ After deploying, check that `/`, `/search`, `/history`, `/settings`, and `/view`
 
 The optional variable `TRUST_CLOUDFLARE_HEADERS=1` should only be set when Cloudflare sits in front of the app and overwrites `cf-connecting-ip`. See `.env.example` and [SECURITY.md](SECURITY.md).
 
+Vercel's platform IP headers are trusted only when `VERCEL=1` (set by Vercel).
+Other hosts share a conservative API rate-limit bucket unless the trusted
+Cloudflare configuration above is enabled. Do not set either trust flag on a
+server that accepts those headers directly from arbitrary clients.
+
 ## Project structure
 
 - `app/` - Next.js routes (`/search`, `/view`, `/history`, `/settings`, legal pages) and API routes under `app/api/`

@@ -15,9 +15,9 @@ export const metadata: Metadata = {
   }
 };
 
-const sectionClass = "space-y-4 py-8 text-base leading-7 text-zinc-300 sm:py-10";
-const headingClass = "text-lg font-semibold leading-snug text-zinc-50 sm:text-xl";
-const linkClass = "text-amber-300 underline decoration-amber-300/40 underline-offset-4 hover:text-amber-200";
+const sectionClass = "space-y-4 py-8 text-base leading-7 text-zinc-300 sm:py-10 ledger:space-y-5 ledger:text-[17px] ledger:leading-[1.65]";
+const headingClass = "text-lg font-semibold leading-snug text-zinc-50 sm:text-xl ledger:font-serif ledger:font-normal ledger:text-[1.75rem] ledger:leading-[1.1] ledger:tracking-[-0.01em] ledger:text-balance ledger:sm:text-[40px]";
+const linkClass = "text-amber-300 underline decoration-amber-300/40 underline-offset-4 hover:text-amber-200 ledger:text-zinc-50 ledger:decoration-amber-300 ledger:decoration-[1.5px] ledger:hover:text-amber-300";
 
 export default function TermsPage() {
   return (

@@ -1,8 +1,10 @@
 import "@testing-library/jest-dom/vitest";
+import { StrictMode } from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const commonCrawlMocks = vi.hoisted(() => ({
+  push: vi.fn(),
   collections: [] as Array<{
     id: string;
     name: string;
@@ -152,15 +154,19 @@ import { ArchiveSearchApp, mergePersistedScanLog, persistedSearchDurationMs, res
 import { ensureScanSession, findOrCreateLegacySession, getCoverage, getScanSession, putSearch, startCoverageRun, upsertCoverageResult } from "@/lib/capture-store";
 import { fetchCollections, queryCollection, resetCommonCrawlRateLimitState } from "@/lib/common-crawl";
 import { robotsCacheKey } from "@/lib/robots-cache";
-import { grantStorageConsent } from "@/lib/website-preferences";
+import { declineStorageConsent, revokeStorageConsent, resetStorageConsentSession, grantStorageConsent, hasStorageConsent, STORAGE_CONSENT_STORAGE_KEY } from "@/lib/website-preferences";
 
 vi.mock("next/navigation", () => ({
-  usePathname: () => "/",
+  usePathname: () => window.location.pathname,
   useRouter: () => ({
+    push: commonCrawlMocks.push,
     replace: vi.fn()
   }),
   useSearchParams: () => new URLSearchParams(window.location.search)
 }));
+
+import { StorageConsentGate } from "@/components/storage-consent-gate";
+import { WebsitePreferences } from "@/components/website-preferences";
 
 function setNativeInputValue(input: HTMLInputElement, value: string) {
   const valueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
@@ -272,6 +278,124 @@ describe("ArchiveSearchApp", () => {
         }
       ]
     }));
+  });
+
+  it.each(["undecided", "declined", "granted"])("starts the PastPage full scan with %s storage consent and shows the banner only without a decision", async (decision) => {
+    revokeStorageConsent();
+    resetStorageConsentSession();
+    if (decision === "declined") declineStorageConsent();
+    if (decision === "granted") grantStorageConsent();
+    commonCrawlMocks.collections[0] = { ...commonCrawlMocks.collections[0], from: "2010-01-01T00:00:00", to: "2010-02-01T00:00:00" };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 404 })));
+    window.history.replaceState({}, "", "/search?url=https%3A%2F%2Fexample.org%2Farticle%3Fid%3D42&match=exact&scope=all&source=pastpage");
+    render(<><StorageConsentGate><ArchiveSearchApp autoStart /></StorageConsentGate><WebsitePreferences /></>);
+    await waitFor(() => expect(queryCollection).toHaveBeenCalledTimes(2));
+    expect(queryCollection).toHaveBeenCalledWith(
+      "https://example.org/article?id=42", expect.anything(), expect.anything(),
+      undefined, undefined, undefined, undefined, "exact", expect.any(Function), expect.any(Function), null, null, undefined
+    );
+    expect(hasStorageConsent()).toBe(decision === "granted");
+    expect(ensureScanSession).not.toHaveBeenCalled();
+    if (decision !== "granted") expect(putSearch).not.toHaveBeenCalled();
+    if (decision === "undecided") {
+      expect(screen.getByRole("complementary", { name: "Allow browser storage?" })).toBeInTheDocument();
+    } else {
+      expect(screen.queryByRole("complementary", { name: "Allow browser storage?" })).not.toBeInTheDocument();
+    }
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    if (decision !== "granted") {
+      expect((window.localStorage.setItem as ReturnType<typeof vi.fn>).mock.calls.every(([key]) => key === STORAGE_CONSENT_STORAGE_KEY)).toBe(true);
+    }
+  });
+
+  it.each(["allow", "decline", "revoke"])("continues a PastPage scan after storage choice: %s", async (choice) => {
+    revokeStorageConsent();
+    resetStorageConsentSession();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 404 })));
+    const pending = deferred<Awaited<ReturnType<typeof queryCollection>>>();
+    vi.mocked(queryCollection).mockReturnValueOnce(pending.promise);
+    window.history.replaceState({}, "", "/search?url=https%3A%2F%2Fexample.org%2Farticle&match=exact&scope=all&source=pastpage");
+    render(<><StorageConsentGate><ArchiveSearchApp autoStart /></StorageConsentGate><WebsitePreferences /></>);
+    await waitFor(() => expect(queryCollection).toHaveBeenCalledTimes(1));
+    const signal = vi.mocked(queryCollection).mock.calls[0][2] as AbortSignal;
+    if (choice === "allow" || choice === "revoke") {
+      fireEvent.click(screen.getByRole("button", { name: "Allow browser storage" }));
+      if (choice === "revoke") act(() => revokeStorageConsent());
+    } else {
+      fireEvent.click(screen.getByRole("button", { name: "No thanks" }));
+    }
+    expect(signal.aborted).toBe(false);
+    await act(async () => pending.resolve({
+      collection: commonCrawlMocks.collections[0], status: "checked", captures: [], checkedAt: Date.now(), attempts: 1, runs: 1
+    }));
+    await waitFor(() => expect(queryCollection).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole("button", { name: /^pause$/i })).not.toBeInTheDocument());
+    expect(signal.aborted).toBe(false);
+    expect(fetchCollections).toHaveBeenCalledTimes(2);
+  });
+
+  it("still aborts ordinary scans when storage consent is revoked", async () => {
+    settingsMocks.settings.robotsTxtChecksEnabled = false;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 404 })));
+    const pending = deferred<Awaited<ReturnType<typeof queryCollection>>>();
+    vi.mocked(queryCollection).mockReturnValueOnce(pending.promise);
+    window.history.replaceState({}, "", "/search?url=example.org&scope=all");
+    render(<><StorageConsentGate><ArchiveSearchApp autoStart /></StorageConsentGate><WebsitePreferences /></>);
+    await waitFor(() => expect(queryCollection).toHaveBeenCalledTimes(1));
+    const signal = vi.mocked(queryCollection).mock.calls[0][2] as AbortSignal;
+    act(() => revokeStorageConsent());
+    expect(signal.aborted).toBe(true);
+    expect(screen.getByRole("button", { name: "Start search" })).toBeInTheDocument();
+    await act(async () => pending.resolve({
+      collection: commonCrawlMocks.collections[0], status: "checked", captures: [], checkedAt: Date.now(), attempts: 1, runs: 1
+    }));
+    expect(queryCollection).toHaveBeenCalledTimes(1);
+  });
+
+  it("guards tab departure while loading collections and removes the guard when paused", async () => {
+    settingsMocks.settings.robotsTxtChecksEnabled = false;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 404 })));
+    const collections = deferred<Awaited<ReturnType<typeof fetchCollections>>>();
+    vi.mocked(fetchCollections).mockReturnValueOnce(collections.promise);
+    render(<ArchiveSearchApp autoStart initialParams={{ url: "example.org" }} />);
+    await waitFor(() => expect(fetchCollections).toHaveBeenCalled());
+
+    const departure = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(departure);
+    expect(departure.defaultPrevented).toBe(true);
+
+    await act(async () => collections.resolve([commonCrawlMocks.collections[0]]));
+    fireEvent.click(screen.getByRole("button", { name: /^pause$/i }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: /^pause$/i })).not.toBeInTheDocument());
+    const afterCompletion = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(afterCompletion);
+    expect(afterCompletion.defaultPrevented).toBe(false);
+  });
+
+  it("confirms same-tab links during a scan and keeps scanning when navigation is cancelled", async () => {
+    settingsMocks.settings.robotsTxtChecksEnabled = false;
+    vi.mocked(fetchCollections).mockReturnValueOnce(new Promise(() => {}));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const { unmount } = render(<ArchiveSearchApp autoStart initialParams={{ url: "example.org" }} />);
+    await waitFor(() => expect(fetchCollections).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: /open menu/i }));
+    const history = screen.getByRole("link", { name: /history/i });
+
+    fireEvent.click(history);
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("the scan will stop"));
+    expect(commonCrawlMocks.push).not.toHaveBeenCalled();
+    const departure = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(departure);
+    expect(departure.defaultPrevented).toBe(true);
+
+    confirm.mockReturnValue(true);
+    fireEvent.click(history);
+    expect(commonCrawlMocks.push).toHaveBeenCalledWith("/history");
+
+    unmount();
+    const afterUnmount = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(afterUnmount);
+    expect(afterUnmount.defaultPrevented).toBe(false);
   });
 
   it("does not bake the active scan segment into durationMs while persisting a running scan", () => {
@@ -422,6 +546,9 @@ describe("ArchiveSearchApp", () => {
   });
 
   it("syncs back-forward restored URL field values before enabling search controls", async () => {
+    vi.spyOn(performance, "getEntriesByType").mockReturnValue([
+      { type: "back_forward" } as PerformanceNavigationTiming
+    ]);
     render(<ArchiveSearchApp />);
 
     const input = screen.getByLabelText("URL to search") as HTMLInputElement;
@@ -429,14 +556,16 @@ describe("ArchiveSearchApp", () => {
 
     expect(startButton).toBeDisabled();
 
-    setNativeInputValue(input, "hutt.io");
-    dispatchPageShow(true);
+    act(() => {
+      setNativeInputValue(input, "hutt.io");
+      dispatchPageShow(true);
+    });
 
     await waitFor(() => expect(startButton).toBeEnabled());
 
     fireEvent.click(screen.getByRole("button", { name: /advanced search/i }));
 
-    expect(screen.getByLabelText("Match type")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Match type")).toBeInTheDocument();
   });
 
   it("clears browser-restored URL field values on a fresh home-page open", async () => {
@@ -1252,6 +1381,37 @@ describe("ArchiveSearchApp", () => {
     expect(screen.getAllByText(optOutMessage)).toHaveLength(1);
   });
 
+  it.each(["url", "session"] as const)("starts a %s scan after Strict Mode replays its startup effect", async (route) => {
+    settingsMocks.settings.robotsTxtChecksEnabled = false;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 404 })));
+    const session = {
+      scanId: "scan_strict",
+      targetId: "target:https://example.org/:exact:live",
+      url: "https://example.org/",
+      matchType: "exact" as const,
+      mock: false,
+      scope: "all" as const,
+      createdAt: 1,
+      updatedAt: 1
+    };
+    vi.mocked(getScanSession).mockResolvedValue(session);
+    window.history.pushState({}, "", "/search");
+
+    render(
+      <StrictMode>
+        <ArchiveSearchApp autoStart initialParams={route === "session"
+          ? { scan: session.scanId, action: "fresh" }
+          : { url: "example.org" }} />
+      </StrictMode>
+    );
+
+    await waitFor(() => expect(queryCollection).toHaveBeenCalled());
+    await waitFor(() => expect(queryCollection).toHaveBeenCalledTimes(commonCrawlMocks.collections.length));
+    for (const collection of commonCrawlMocks.collections) {
+      expect(vi.mocked(queryCollection).mock.calls.filter(([, queried]) => queried.id === collection.id)).toHaveLength(1);
+    }
+  });
+
   it("starts a full scan when the search URL has no scope param", async () => {
     vi.mocked(getCoverage).mockResolvedValue(undefined);
 
@@ -1259,6 +1419,16 @@ describe("ArchiveSearchApp", () => {
 
     await waitFor(() => expect(findOrCreateLegacySession).toHaveBeenCalled());
     expect(vi.mocked(findOrCreateLegacySession).mock.calls[0][3]).toBe("all");
+  });
+
+  it("shows the scan type and scope under the scanned URL once a scan starts", async () => {
+    vi.mocked(getCoverage).mockResolvedValue(undefined);
+
+    render(<ArchiveSearchApp autoStart initialParams={{ url: "example.org", match: "host", scope: "recent" }} />);
+
+    const scannedUrl = await screen.findByLabelText("Scanned URL");
+    const description = await screen.findByText("Host, all paths · Last 12 months");
+    expect(scannedUrl.parentElement).toContainElement(description);
   });
 
   it("does not show stored-progress for a clean fresh scan", async () => {
@@ -1584,8 +1754,11 @@ describe("ArchiveSearchApp", () => {
     fireEvent.change(screen.getByLabelText("URL to search"), { target: { value: "ftp://example.com/archive" } });
     fireEvent.click(screen.getByRole("button", { name: /start scan/i }));
 
-    expect(await screen.findByText("Only http and https URLs can be scanned.")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText("Only http and https URLs can be scanned.")).toBeInTheDocument();
+    });
     expect(screen.queryByLabelText("Scanned URL")).not.toBeInTheDocument();
+    expect(queryCollection).not.toHaveBeenCalled();
   });
 
   it("shows a real empty result state when a scan finds no snapshots", async () => {

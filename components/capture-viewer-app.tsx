@@ -12,7 +12,8 @@ import {
 import { loadCaptureRecord, type ParsedWarcRecord } from "@/lib/warc";
 import { buildCapturePreviewDocument } from "@/lib/capture-preview";
 import { markPerformance, measureAsync } from "@/lib/performance";
-import { cn, formatBytes } from "@/lib/utils";
+import { cn, formatBytes, formatTimestamp } from "@/lib/utils";
+import { formatCaptureCitation, formatCaptureDateLong } from "@/lib/capture-citation";
 import { Button } from "@/components/ui/button";
 import { HtmlPrivacyWarningDialog } from "@/components/html-privacy-warning-dialog";
 import {
@@ -96,6 +97,7 @@ export function CaptureViewerApp() {
   const [state, setState] = useState<ViewerState>({ kind: "loading" });
   const [activeTab, setActiveTab] = useState<"preview" | "source" | "headers">("preview");
   const [copied, setCopied] = useState(false);
+  const [citationCopied, setCitationCopied] = useState(false);
   const [pendingHtmlAction, setPendingHtmlAction] = useState<"copy" | "download" | null>(null);
   const [showHtmlPrivacyWarning, setShowHtmlPrivacyWarning] = useState(true);
   const [largeCaptureLimitBytes, setLargeCaptureLimitBytes] = useState(LARGE_CAPTURE_LIMIT_BYTES);
@@ -160,6 +162,38 @@ export function CaptureViewerApp() {
     const timer = window.setTimeout(() => setCopied(false), 1800);
     return () => window.clearTimeout(timer);
   }, [copied]);
+
+  useEffect(() => {
+    if (!citationCopied) return;
+    const timer = window.setTimeout(() => setCitationCopied(false), 1800);
+    return () => window.clearTimeout(timer);
+  }, [citationCopied]);
+
+  // Ledger dossier only. Built from the route and the loaded record's headers.
+  const citationText = useMemo(
+    () => formatCaptureCitation({ url, timestamp, collection, retrievedAt: new Date() }),
+    [collection, timestamp, url]
+  );
+  const dossierDate = formatCaptureDateLong(timestamp) || "—";
+  const dossierRows: { label: string; value: string }[] = [
+    { label: "Captured (UTC)", value: /^\d{14}$/.test(timestamp) ? formatTimestamp(timestamp) : "—" },
+    { label: "Original URL", value: url || "—" },
+    { label: "Collection", value: collection || "—" },
+    { label: "Payload digest", value: findHeaderValue(state.kind === "loaded" ? state.record.warcHeaders : undefined, "WARC-Payload-Digest") || "—" },
+    { label: "Record ID", value: findHeaderValue(state.kind === "loaded" ? state.record.warcHeaders : undefined, "WARC-Record-ID") || "—" },
+    { label: "Content type", value: findHeaderValue(state.kind === "loaded" ? state.record.httpHeaders : undefined, "content-type") || "—" },
+    { label: "WARC file", value: filename || "—" },
+    { label: "Byte range", value: offset && length ? formatByteRange(offset, length) : "—" }
+  ];
+
+  const copyCitation = useCallback(() => {
+    const clipboard = typeof navigator === "undefined" ? undefined : navigator.clipboard;
+    if (!clipboard || typeof clipboard.writeText !== "function") return;
+    void clipboard
+      .writeText(citationText)
+      .then(() => setCitationCopied(true))
+      .catch(() => undefined);
+  }, [citationText]);
 
   useEffect(() => {
     void getSettings()
@@ -365,7 +399,7 @@ export function CaptureViewerApp() {
         onJumpTo={handleJumpTo}
       />
 
-      <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex min-h-0 flex-1 flex-col ledger:overflow-y-auto lg:ledger:flex-row lg:ledger:overflow-hidden">
         {state.kind === "loading" ? (
           <section className="grid flex-1 min-h-96 place-items-center bg-zinc-950/40 p-8">
             <div className="text-center">
@@ -382,33 +416,34 @@ export function CaptureViewerApp() {
         ) : null}
 
         {state.kind === "too-large" ? (
-          <div className="p-4">
+          <div className="p-4 lg:ledger:min-w-0 lg:ledger:flex-1">
             <LargeCaptureNotice length={state.length} limitBytes={largeCaptureLimitBytes} onLoadAnyway={() => setAllowLargeLoad(true)} />
           </div>
         ) : null}
 
         {state.kind === "error" ? (
-          <div className="p-4">
+          <div className="p-4 lg:ledger:min-w-0 lg:ledger:flex-1">
             <Notice title="Could not render capture" message={state.message} />
           </div>
         ) : null}
 
         {state.kind === "loaded" ? (
-          <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-zinc-950">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 p-3">
-              <div className="flex gap-1">
+          <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-zinc-950 ledger:min-h-[70dvh] ledger:flex-none lg:ledger:min-h-0 lg:ledger:min-w-0 lg:ledger:flex-1">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 p-3 ledger:bg-zinc-900">
+              <div className="flex gap-1 max-sm:w-full max-sm:[&>*]:flex-1">
                 {(["preview", "source", "headers"] as const).map((tab) => (
                   <Button
                     key={tab}
                     size="sm"
                     variant={activeTab === tab ? "primary" : "ghost"}
                     onClick={() => setActiveTab(tab)}
+                    className="ledger:font-sans ledger:normal-case ledger:tracking-normal"
                   >
                     {tab}
                   </Button>
                 ))}
               </div>
-              <div className="flex gap-2">
+              <div className="flex gap-2 max-sm:w-full max-sm:[&>button]:flex-1">
                 <Button
                   variant="secondary"
                   size="sm"
@@ -452,13 +487,21 @@ export function CaptureViewerApp() {
               </div>
             ) : null}
             {activeTab === "preview" && !previewBlocked ? (
-              <div className="min-h-0 flex-1 bg-white">
-                <iframe
-                  title="Sanitized capture preview"
-                  sandbox=""
-                  srcDoc={sanitizedHtml}
-                  className="block h-full w-full bg-white"
-                />
+              <div className="min-h-0 flex-1 bg-white ledger:flex ledger:flex-col ledger:bg-transparent ledger:p-3 ledger:sm:p-6">
+                <div
+                  aria-hidden="true"
+                  className="hidden ledger:block ledger:shrink-0 ledger:pb-2 ledger:font-sans ledger:text-[13px] ledger:text-zinc-400"
+                >
+                  Sandboxed preview: scripts and external requests are blocked
+                </div>
+                <div className="h-full w-full bg-white ledger:relative ledger:min-h-0 ledger:flex-1 ledger:border ledger:border-zinc-800 ledger:bg-[#fff] ledger:shadow-none">
+                  <iframe
+                    title="Sanitized capture preview"
+                    sandbox=""
+                    srcDoc={sanitizedHtml}
+                    className="block h-full w-full bg-white ledger:bg-[#fff]"
+                  />
+                </div>
               </div>
             ) : null}
             {activeTab === "source" ? (
@@ -473,10 +516,47 @@ export function CaptureViewerApp() {
             ) : null}
           </section>
         ) : null}
+
+        <aside
+          aria-label="Capture record"
+          className="hidden ledger:flex ledger:w-full ledger:shrink-0 ledger:flex-col ledger:border-t ledger:border-zinc-50 ledger:bg-zinc-950 ledger:p-6 ledger:pb-[max(2.5rem,env(safe-area-inset-bottom))] lg:ledger:h-full lg:ledger:min-h-0 lg:ledger:w-[340px] lg:ledger:overflow-y-auto lg:ledger:border-l lg:ledger:border-t-0"
+        >
+          <h2 className="ledger:font-serif ledger:text-[30px] ledger:font-normal ledger:leading-[1.1] ledger:tracking-[-0.02em] ledger:text-zinc-50">
+            {dossierDate}
+          </h2>
+          <dl className="ledger:mt-[18px]">
+            {dossierRows.map((row) => (
+              <div key={row.label} className="ledger:border-b ledger:border-zinc-800 ledger:py-2.5">
+                <dt className="ledger-label ledger:text-xs ledger:normal-case ledger:tracking-normal">{row.label}</dt>
+                <dd className="ledger:mt-1 ledger:break-all ledger:font-mono ledger:text-sm ledger:text-zinc-50">{row.value}</dd>
+              </div>
+            ))}
+          </dl>
+          <div className="ledger:mt-[22px] ledger:grid ledger:gap-2">
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              aria-live="polite"
+              onClick={copyCitation}
+              className="ledger:w-full ledger:justify-center"
+            >
+              {citationCopied ? <Check size={14} /> : <Copy size={14} />}
+              {citationCopied ? "Copied" : "Copy citation"}
+            </Button>
+          </div>
+          <div className="ledger:mt-6 ledger:border ledger:border-dashed ledger:border-zinc-600 ledger:p-3.5 ledger:font-mono ledger:text-[12.5px] ledger:leading-[1.55] ledger:text-zinc-300 ledger:break-words">
+            {citationText}
+          </div>
+          <p className="ledger:mt-[18px] ledger:text-[13.5px] ledger:leading-normal ledger:text-zinc-300">
+            Common Crawl saved this page on the date shown above. That is not necessarily the day the page went live.
+          </p>
+        </aside>
       </div>
       <HtmlPrivacyWarningDialog
         open={pendingHtmlAction !== null}
         actionLabel={pendingHtmlAction === "copy" ? "Copy HTML" : "Download HTML"}
+        protectedDownload={pendingHtmlAction === "download"}
         onCancel={() => setPendingHtmlAction(null)}
         onContinue={({ dontShowAgain }) => {
           if (dontShowAgain) {
@@ -505,7 +585,7 @@ function IntegrityWarning({
 }) {
   const recordDate = integrity.recordDate || "missing";
   return (
-    <section role="alert" className="m-3 rounded-md border border-red-400/40 bg-red-400/10 p-4 text-sm text-red-100">
+    <section role="alert" className="m-3 rounded-md border border-red-400/40 bg-red-400/10 p-4 text-sm text-red-100 ledger:rounded-none">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex gap-3">
           <ShieldAlert className="mt-1 shrink-0 text-red-300" size={22} />
@@ -583,18 +663,37 @@ function LargeCaptureNotice({ length, limitBytes, onLoadAnyway }: { length: numb
   );
 }
 
+function findHeaderValue(headers: Record<string, string> | undefined, name: string): string | undefined {
+  if (!headers) return undefined;
+  const wanted = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.trim().toLowerCase() === wanted && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+// Inclusive first-last byte positions, the same convention as an HTTP Range header.
+function formatByteRange(offset: string, length: string): string {
+  const start = Number(offset);
+  const size = Number(length);
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(size) || start < 0 || size <= 0) {
+    return `${offset}, ${length}`;
+  }
+  return `${start}–${start + size - 1}`;
+}
+
 function HeaderBlock({ title, headers }: { title: string; headers: Record<string, string> }) {
   return (
-    <section className="rounded-md border border-zinc-800 bg-zinc-950 p-4">
-      <div className="mb-3 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.14em]">
+    <section className="rounded-md border border-zinc-800 bg-zinc-950 p-4 ledger:rounded-none">
+      <div className="mb-3 flex items-center gap-2 text-sm font-bold uppercase tracking-[0.14em] ledger:font-mono ledger:text-[11.5px] ledger:normal-case ledger:tracking-normal">
         <FileCode2 size={15} />
         {title}
       </div>
-      <dl className="space-y-2">
+      <dl className="space-y-2 ledger:!space-y-0">
         {Object.entries(headers).map(([key, value]) => (
-          <div key={key}>
-            <dt className="text-xs font-bold uppercase tracking-[0.14em] text-zinc-500">{key}</dt>
-            <dd className="break-all text-xs text-zinc-300">{value}</dd>
+          <div key={key} className="ledger:border-b ledger:border-zinc-800 ledger:py-2">
+            <dt className="text-xs font-bold uppercase tracking-[0.14em] text-zinc-500 ledger:font-mono ledger:text-[11px] ledger:normal-case ledger:tracking-normal">{key}</dt>
+            <dd className="break-all text-xs text-zinc-300 ledger:mt-1 ledger:font-mono ledger:text-[13px]">{value}</dd>
           </div>
         ))}
       </dl>

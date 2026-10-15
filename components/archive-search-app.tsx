@@ -1,6 +1,6 @@
 "use client";
 
-import { type CSSProperties, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, type ReactNode, useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
   Ban,
@@ -62,6 +62,8 @@ import { Input } from "@/components/ui/input";
 import { Tooltip } from "@/components/ui/tooltip";
 import { BrandLockup } from "@/components/brand";
 import { CaptureRow, CaptureRowHeader, type SortOption } from "@/components/capture-row";
+import { HeroStamp } from "@/components/ledger/hero-stamp";
+import { ScanProgressGrid } from "@/components/ledger/scan-progress-grid";
 import dynamic from "next/dynamic";
 // Code-split components that aren't part of the initial list/search view so they
 // stay out of the first-load JS. SSR is kept (default) so landing HTML and SEO
@@ -85,16 +87,11 @@ import {
   coverageDurationMs,
   coverageResults,
   coverageScanLogResults,
-  addCoverageDuration,
-  appendCoverageScanLogEntry,
   deleteSearches,
-  ensureScanSession,
-  ensureTarget,
   findOrCreateLegacySession,
   DEFAULT_CAPTURE_EXPORT_COLUMNS,
   DEFAULT_SCAN_SCOPE,
   DEFAULT_SEARCH_PAGE_SIZE,
-  getCoverage,
   getSettings,
   getScanSession,
   getSearch,
@@ -105,11 +102,9 @@ import {
   scanSearchKey,
   scanLogDurationMs,
   searchKey,
-  startCoverageRun,
   subscribeToSearchChanges,
   targetIdFor,
   updateSettings,
-  upsertCoverageResult,
   type AppSettings,
   type CoverageRecord,
   type HistorySummaryRecord,
@@ -118,6 +113,8 @@ import {
 } from "@/lib/capture-store";
 import { captureKey, dedupeCaptures, mergeCollectionResults, upsertCollectionResult } from "@/lib/scan-results";
 import { groupCapturesByUrl } from "@/lib/capture-grouping";
+import { findChangedCaptures } from "@/lib/capture-changes";
+import { describeScanSettings } from "@/lib/scan-description";
 import { prefetchCaptureRecord } from "@/lib/warc-prefetch";
 import { planScanFetches, prefetchScanInBackground } from "@/lib/background-scan";
 import { fetchRawWarcRecordBytes, loadCaptureRecord } from "@/lib/warc";
@@ -134,7 +131,10 @@ import { robotsUrlForTarget, type RobotsCheckResult } from "@/lib/robots";
 import { readCachedRobotsStatus, writeCachedRobotsStatus } from "@/lib/robots-cache";
 import { findOptOutMatch, type OptOutMatch } from "@/lib/opt-out-registry";
 import { createLegacySearchHref, createSearchHref, createViewerHref } from "@/lib/navigation-state";
-import { hasStorageConsent, requireStorageConsent, subscribeStorageConsent } from "@/lib/website-preferences";
+import { hasStorageConsent, subscribeStorageConsent } from "@/lib/website-preferences";
+import * as persistentScanStore from "@/lib/capture-store";
+import { createTemporaryScanStore } from "@/lib/temporary-scan-store";
+import { isPastPageEntry } from "@/lib/pastpage-entry";
 
 type ViewMode = "list" | "calendar" | "grouped";
 type ScanScope = "recent" | "all" | "custom";
@@ -185,7 +185,9 @@ function blockedRobotsApprovalStorageKey(targetId: string) {
   return `crawlback:blocked-robots-approved:${targetId}`;
 }
 
+
 export type ArchiveSearchInitialParams = {
+  source?: string;
   url?: string;
   match?: string;
   scope?: string;
@@ -307,6 +309,7 @@ type SearchParamReader = {
 
 function searchParamsToInitialParams(params?: SearchParamReader | null): ArchiveSearchInitialParams {
   return {
+    source: params?.get("source") ?? undefined,
     url: params?.get("url") ?? undefined,
     match: params?.get("match") ?? undefined,
     scope: params?.get("scope") ?? undefined,
@@ -538,7 +541,7 @@ function scanLogEvent(event: ScanLogEvent["event"], message: string, tone: ScanL
   };
 }
 
-function hasStoredCoverageHistory(coverage: Awaited<ReturnType<typeof getCoverage>> | undefined) {
+function hasStoredCoverageHistory(coverage: CoverageRecord | undefined) {
   return Boolean(
     coverage &&
     (
@@ -1233,7 +1236,7 @@ function readAutoRetryState(
   dateTo?: string
 ): AutoRetryState | undefined {
   try {
-    if (typeof window === "undefined" || !requireStorageConsent()) return undefined;
+    if (typeof window === "undefined" || !hasStorageConsent()) return undefined;
     const value = window.localStorage.getItem(autoRetryStateKey(url, matchType, mock, scope, dateFrom, dateTo));
     if (!value) return undefined;
     const record = JSON.parse(value) as Partial<AutoRetryState>;
@@ -1256,7 +1259,7 @@ function writeAutoRetryState(
   state: AutoRetryState
 ) {
   try {
-    if (typeof window === "undefined" || !requireStorageConsent()) return;
+    if (typeof window === "undefined" || !hasStorageConsent()) return;
     window.localStorage.setItem(autoRetryStateKey(url, matchType, mock, scope, dateFrom, dateTo), JSON.stringify(state));
   } catch {
     // Auto-retry persistence is best-effort.
@@ -1272,7 +1275,7 @@ function clearAutoRetryState(
   dateTo?: string
 ) {
   try {
-    if (typeof window === "undefined" || !requireStorageConsent()) return;
+    if (typeof window === "undefined" || !hasStorageConsent()) return;
     window.localStorage.removeItem(autoRetryStateKey(url, matchType, mock, scope, dateFrom, dateTo));
   } catch {
     // Auto-retry persistence is best-effort.
@@ -1380,18 +1383,18 @@ function scanLogNeedsDate(timestamps: (number | undefined)[]) {
 // Widen the timestamp column when a date is shown so it stays on one line
 // instead of wrapping and making every row twice as tall.
 function scanLogRowClass(withDate: boolean) {
-  return `grid gap-2 px-3 py-2 text-xs text-zinc-400 ${
+  return `grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 px-3 py-2.5 text-xs [&>p:nth-child(3)]:col-span-2 sm:[&>p:nth-child(3)]:col-span-1 sm:gap-2 sm:py-2 text-zinc-400 ledger:gap-x-6 ledger:px-3.5 ledger:py-2.5 ledger:text-[0.8125rem] ledger:motion-safe:animate-[menu-fade_200ms_ease-out] ${
     withDate ? "sm:grid-cols-[150px_130px_1fr]" : "sm:grid-cols-[74px_130px_1fr]"
-  }`;
+  } ${withDate ? "ledger:sm:grid-cols-[13rem_11rem_1fr]" : "ledger:sm:grid-cols-[8rem_11rem_1fr]"}`;
 }
 
 function LandingStatsFooter() {
   return (
     <p
-      className="reveal text-balance text-center text-lg leading-snug text-zinc-300 sm:text-xl"
+      className="reveal ledger-hero-title text-balance text-center text-lg leading-snug text-zinc-300 sm:text-xl ledger:max-w-[18ch] ledger:text-left ledger:font-serif ledger:font-normal ledger:text-5xl ledger:leading-[0.95] ledger:tracking-[-0.02em] ledger:text-zinc-50 ledger:sm:text-7xl"
       style={{ animationDelay: "200ms" }}
     >
-      Find archived versions of web pages.
+      Find <em className="ledger-hero-mark not-italic ledger:italic">archived</em> copies of pages the web forgot.
     </p>
   );
 }
@@ -1419,6 +1422,13 @@ export function ArchiveSearchApp({
     () => resolveInitialParams(initialParams, searchParams),
     [initialParams, searchParams]
   );
+  const pastPageEntry = autoStart && isPastPageEntry("/search", {
+    get: (key) => routeParams[key as keyof ArchiveSearchInitialParams] ?? null
+  });
+  const [temporaryScanStore] = useState(createTemporaryScanStore);
+  const { ensureTarget, ensureScanSession, getCoverage, startCoverageRun,
+    addCoverageDuration, appendCoverageScanLogEntry, upsertCoverageResult } =
+    pastPageEntry ? temporaryScanStore : persistentScanStore;
   const initialUrl = normalizeInitialUrl(routeParams.url ?? null);
   const initialMatchType = normalizeInitialMatchType(routeParams.match ?? null);
   const initialDateFrom = normalizeDateInput(routeParams.from);
@@ -1471,6 +1481,8 @@ export function ArchiveSearchApp({
   const [checkedCollectionIds, setCheckedCollectionIds] = useState<Set<string>>(new Set());
   const [scanLog, setScanLog] = useState<ScanLogEntry[]>([]);
   const [scanLogOpen, setScanLogOpen] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [exportsOpen, setExportsOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [scanStartedAt, setScanStartedAt] = useState<number | undefined>();
   const [activeScanId, setActiveScanId] = useState(initialScanId ?? "");
@@ -1526,11 +1538,12 @@ export function ArchiveSearchApp({
       warcAbortRef.current?.abort();
     };
     const unsubscribe = subscribeStorageConsent(() => {
-      if (!hasStorageConsent()) stop();
+      if (!pastPageEntry && !hasStorageConsent()) stop();
     });
     return () => { unsubscribe(); stop(); };
-  }, []);
+  }, [pastPageEntry]);
   const autoStartSignature = [
+    routeParams.source ?? "",
     initialMockMode ? "mock" : "live",
     initialUrl,
     initialMatchType ?? DEFAULT_MATCH_TYPE,
@@ -1557,9 +1570,8 @@ export function ArchiveSearchApp({
   }, []);
 
   const hasBlockedRobotsApproval = useCallback((session: Pick<ScanSession, "scanId" | "targetId">) => {
-    if (!requireStorageConsent()) return false;
     if (session.scanId && blockedRobotsApprovedScanIdsRef.current.has(session.scanId)) return true;
-    if (!session.targetId || typeof window === "undefined") return false;
+    if (!hasStorageConsent() || !session.targetId || typeof window === "undefined") return false;
     try {
       return window.localStorage.getItem(blockedRobotsApprovalStorageKey(session.targetId)) === "1";
     } catch {
@@ -1568,9 +1580,8 @@ export function ArchiveSearchApp({
   }, []);
 
   const rememberBlockedRobotsApproval = useCallback((session: Pick<ScanSession, "scanId" | "targetId">) => {
-    if (!requireStorageConsent()) return;
     if (session.scanId) blockedRobotsApprovedScanIdsRef.current.add(session.scanId);
-    if (!session.targetId || typeof window === "undefined") return;
+    if (!hasStorageConsent() || !session.targetId || typeof window === "undefined") return;
     try {
       window.localStorage.setItem(blockedRobotsApprovalStorageKey(session.targetId), "1");
     } catch {
@@ -1604,6 +1615,7 @@ export function ArchiveSearchApp({
 
   useEffect(() => {
     markPerformance("page-hydrated:search");
+    if (!hasStorageConsent()) return;
     void getSettings()
       .then((settings) => {
         setAppSettings(settings);
@@ -1703,6 +1715,10 @@ export function ArchiveSearchApp({
     );
   }, [captures, collectionFilter, deferredUrlFilter, mimeFilter, sortBy, statusFilter, yearFilter]);
 
+  // Content-change markers use the full unfiltered set so a filtered-out
+  // previous capture still counts as the comparison baseline.
+  const changedKeys = useMemo(() => findChangedCaptures(captures), [captures]);
+
   const exportCaptures = exportScope === "all" ? captures : filteredCaptures;
   const canExport = exportCaptures.length > 0;
 
@@ -1735,11 +1751,14 @@ export function ArchiveSearchApp({
   }, [page, totalPages]);
 
   useEffect(() => {
+    let restoredFromHistory = isBackForwardNavigation();
     const syncOrClear = (restoreFromHistory: boolean) => {
       if (restoreFromHistory) {
+        restoredFromHistory = true;
         syncRestoredTargetUrl();
         return;
       }
+      if (restoredFromHistory) return;
       clearFreshHomeSearchState();
     };
     syncOrClear(isBackForwardNavigation());
@@ -1916,8 +1935,10 @@ export function ArchiveSearchApp({
 
   async function loadSessionById(scanId: string, signal?: AbortSignal) {
     const session = await getScanSession(scanId);
+    if (signal?.aborted) return false;
     if (!session) return false;
     const loadedCollections = collections.length > 0 ? collections : await fetchCollections(signal);
+    if (signal?.aborted) return false;
     applySessionIdentity(session);
     await applyCoverageToState(session, loadedCollections);
     return true;
@@ -2060,7 +2081,7 @@ export function ArchiveSearchApp({
     const existingCoverage = mode === "fresh" ? undefined : await getCoverage(session.targetId);
     const reuseStoredPrerequisites = mode !== "fresh" && hasStoredCoverageHistory(existingCoverage);
 
-    if (mode === "fresh") {
+    if (mode === "fresh" && !pastPageEntry) {
       const nextHref = createSearchHref({
         session,
         action: window.location.pathname === "/search" ? undefined : "fresh"
@@ -2233,11 +2254,11 @@ export function ArchiveSearchApp({
     setNextAutoRetryAt(undefined);
     setState(collections.length > 0 ? "running" : "loading-collections");
 
-    const loadStoredForMode =
+    const loadStoredForMode = hasStorageConsent() && (
       mode === "fresh" ||
       ((mode === "resume" || mode === "retry-failed" || mode === "auto-retry") &&
         checkedCollectionIds.size === 0 &&
-        failedResults.length === 0);
+        failedResults.length === 0));
 
     if (mode === "fresh") {
       setCaptures([]);
@@ -2705,6 +2726,7 @@ export function ArchiveSearchApp({
 
   async function shouldCheckRobotsTxt() {
     if (appSettings) return appSettings.robotsTxtChecksEnabled;
+    if (!hasStorageConsent()) return true;
     try {
       const settings = await getSettings();
       setAppSettings(settings);
@@ -3056,6 +3078,14 @@ export function ArchiveSearchApp({
   }
 
   useEffect(() => {
+    const cancelStartup = (controller: AbortController) => {
+      controller.abort();
+      // An aborted startup must be allowed to run again. In development,
+      // Strict Mode immediately cleans up and replays this effect on mount.
+      if (autoStartedSignatureRef.current === autoStartSignature) {
+        autoStartedSignatureRef.current = "";
+      }
+    };
     if (initialScanId && autoStartedSignatureRef.current !== autoStartSignature) {
       autoStartedSignatureRef.current = autoStartSignature;
       const controller = new AbortController();
@@ -3097,7 +3127,7 @@ export function ArchiveSearchApp({
           setState("error");
         }
       })();
-      return () => controller.abort();
+      return () => cancelStartup(controller);
     }
     if (initialMockMode && autoStartedSignatureRef.current !== autoStartSignature) {
       autoStartedSignatureRef.current = autoStartSignature;
@@ -3132,6 +3162,10 @@ export function ArchiveSearchApp({
       try {
         const loadedCollections = collections.length > 0 ? collections : await fetchCollections(controller.signal);
         if (controller.signal.aborted) return;
+        if (pastPageEntry) {
+          await runSearch("fresh", { url: searchUrl, matchType: "exact", scope: "all" });
+          return;
+        }
         const loadedSession = await loadStoredScan(
           searchUrl,
           nextMatchType,
@@ -3179,10 +3213,11 @@ export function ArchiveSearchApp({
         setState("error");
       }
     })();
-    return () => controller.abort();
+    return () => cancelStartup(controller);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     autoStart,
+    pastPageEntry,
     autoStartSignature,
     initialAction,
     initialDateFrom,
@@ -3198,6 +3233,38 @@ export function ArchiveSearchApp({
   ]);
 
   const isRunning = state === "loading-collections" || state === "running";
+
+  useEffect(() => {
+    if (!isRunning) return;
+
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      // Browsers supply their own text for close, reload, and external navigation.
+      event.returnValue = "The scan will stop if you leave this page.";
+    };
+    const confirmNavigation = (event: MouseEvent) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      const link = event.target instanceof Element ? event.target.closest("a[href]") : null;
+      if (!(link instanceof HTMLAnchorElement) || link.hasAttribute("download") || (link.target && link.target !== "_self")) return;
+      const destination = new URL(link.href, window.location.href);
+      if (destination.origin !== window.location.origin) return;
+      if (destination.pathname === window.location.pathname && destination.search === window.location.search) return;
+
+      // Next.js client navigation does not fire beforeunload.
+      event.preventDefault();
+      event.stopPropagation();
+      if (window.confirm("A scan is still running. If you leave this page, the scan will stop. Do you really want to leave?")) {
+        router.push(`${destination.pathname}${destination.search}${destination.hash}`);
+      }
+    };
+
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    document.addEventListener("click", confirmNavigation, true);
+    return () => {
+      window.removeEventListener("beforeunload", warnBeforeUnload);
+      document.removeEventListener("click", confirmNavigation, true);
+    };
+  }, [isRunning, router]);
 
   // While a scan is running and the tab is hidden, ask the service worker to keep
   // warming the CDX pages of the not-yet-checked collections so the scan makes
@@ -3254,6 +3321,9 @@ export function ArchiveSearchApp({
     captures.length > 0 ||
     failedResults.length > 0;
   const hasCaptures = captures.length > 0;
+  const scanCollectionIds = useMemo(() => scopedCollections.map((collection) => collection.id), [scopedCollections]);
+  const scanFailedIds = useMemo(() => new Set(failedResults.map((result) => result.collection.id)), [failedResults]);
+  const scanCapturedIds = useMemo(() => new Set(captures.map((capture) => capture.collectionId)), [captures]);
   const completion = progress.total > 0 ? Math.round((successfulCount / progress.total) * 100) : 0;
   const hasAutoRetryWork = availabilityIssue && uncheckedCount > 0;
   const canScheduleAutoRetry = !isRunning && !isStoredView && Boolean(targetUrl.trim()) && hasAutoRetryWork;
@@ -3556,10 +3626,11 @@ export function ArchiveSearchApp({
 
   useEffect(() => {
     const trimmedUrl = targetUrl.trim();
-    if (isStoredView) return;
+    if (isStoredView || !hasStorageConsent()) return;
     if (!trimmedUrl || captures.length === 0) return;
     const key = searchKey(trimmedUrl, matchType, initialMockMode);
     const timer = window.setTimeout(() => {
+      if (!hasStorageConsent()) return;
       void putSearch({
         key,
         url: trimmedUrl,
@@ -3574,7 +3645,7 @@ export function ArchiveSearchApp({
 
   useEffect(() => {
     const trimmedUrl = targetUrl.trim();
-    if (isStoredView) return;
+    if (isStoredView || !hasStorageConsent()) return;
     if (!trimmedUrl || scanLog.length === 0) return;
     const key = scanSearchKey(trimmedUrl, matchType, initialMockMode, persistedScanScope, {
       dateFrom: customDateFrom,
@@ -3590,6 +3661,7 @@ export function ArchiveSearchApp({
         ? storedDurationMs
         : elapsedMs || scanLogDurationMs(scanLog);
     const timer = window.setTimeout(() => {
+      if (!hasStorageConsent()) return;
       void (async () => {
         // The UI scan log only holds the entries of the current visit, so a
         // partial run (e.g. rescanning one new collection) must not shrink the
@@ -3686,7 +3758,7 @@ export function ArchiveSearchApp({
       id="top"
       className={
         hasStartedSearch
-          ? "min-h-screen px-4 py-5 text-zinc-100 md:px-8"
+          ? "min-h-screen px-4 py-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] text-zinc-100 md:px-8"
           : "relative min-h-[100svh] text-zinc-100"
       }
     >
@@ -3696,14 +3768,15 @@ export function ArchiveSearchApp({
         className={
           hasStartedSearch
             ? "mx-auto flex max-w-7xl flex-col gap-4"
-            : "relative z-10 grid min-h-[100svh] w-full place-items-center px-5 pb-24 pt-20 md:px-8"
+            : "relative z-10 grid min-h-[100svh] w-full justify-items-center content-start px-5 pb-24 pt-[max(5rem,22svh)] md:px-8 ledger:items-start ledger:content-start ledger:md:px-0"
         }
       >
+        {hasStartedSearch ? null : <HeroStamp />}
         {hasStartedSearch ? <h1 className="sr-only">Crawlback scan results</h1> : null}
-        <header className={hasStartedSearch ? "archive-panel relative rounded-md p-4" : "w-full max-w-3xl p-0"}>
+        <header className={hasStartedSearch ? "archive-panel relative rounded-md p-4 ledger:!border-0 ledger:!bg-transparent ledger:!shadow-none ledger:rounded-none ledger:px-0 ledger:pb-0 ledger:pt-7" : "w-full max-w-3xl p-0 ledger:max-w-6xl ledger:md:px-10"}>
           <div className={hasStartedSearch ? "flex flex-col gap-4 lg:flex-row lg:items-end" : "flex flex-col gap-4"}>
             <div className="flex-1">
-              <div className={hasStartedSearch ? "mb-3 flex items-center gap-3" : "mb-8 flex flex-col items-center gap-3 text-center"}>
+              <div className={hasStartedSearch ? "mb-3 flex items-center gap-3" : "mb-8 flex flex-col items-center gap-3 text-center ledger:mb-10 ledger:items-start ledger:gap-5 ledger:text-left"}>
                 {hasStartedSearch ? (
                   <div className="flex items-center gap-2">
                     <Link
@@ -3727,7 +3800,7 @@ export function ArchiveSearchApp({
                       <BrandLockup
                         size="hero"
                         className="justify-center gap-5"
-                        wordClassName="leading-none decode-in"
+                        wordClassName="leading-none decode-in ledger:text-2xl"
                       />
                     </h1>
                     <LandingStatsFooter />
@@ -3735,24 +3808,35 @@ export function ArchiveSearchApp({
                 )}
               </div>
               <div
-                className={`flex gap-2${hasStartedSearch ? " flex-col sm:flex-row" : " flex-col reveal sm:flex-row"}`}
+                className={`flex gap-2${hasStartedSearch ? " flex-col sm:flex-row" : " flex-col reveal ledger-hero-form sm:flex-row"}`}
                 style={hasStartedSearch ? undefined : { animationDelay: "260ms" }}
                 suppressHydrationWarning
               >
                 {hasStartedSearch ? (
+                  <div className="flex w-full min-w-0 flex-col">
                   <div
                     aria-label="Scanned URL"
                     title={targetUrl}
-                    className="flex h-11 w-full items-center overflow-hidden rounded-md border border-zinc-800 bg-zinc-950 px-3 text-sm text-zinc-100"
+                    className="flex h-11 w-full items-center overflow-hidden rounded-md border border-zinc-800 bg-zinc-950 px-3 text-sm text-zinc-100 ledger:h-auto ledger:rounded-none ledger:border-0 ledger:bg-transparent ledger:px-0 ledger:text-2xl ledger:font-medium ledger:tracking-[-0.02em] ledger:overflow-visible"
                   >
-                    <span className="truncate font-mono">{targetUrl}</span>
+                    <span className="truncate font-mono ledger:overflow-visible ledger:whitespace-normal ledger:break-all">{targetUrl}</span>
+                  </div>
+                  <p className="mt-1 font-sans text-[0.8125rem] font-normal leading-snug text-zinc-500">
+                    {describeScanSettings({
+                      matchType,
+                      scope: scanScope,
+                      from: customDateFrom,
+                      to: customDateTo,
+                      earliestYear: collections.length > 0 ? earliestArchiveYear : null
+                    })}
+                  </p>
                   </div>
                 ) : (
                   <div className="flex-1">
                     <div className="relative">
                       <span
                         aria-hidden
-                        className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 font-mono text-base font-bold leading-none text-amber-300"
+                        className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 font-mono text-base font-bold leading-none text-amber-300 ledger:hidden"
                       >
                         &gt;
                       </span>
@@ -3763,7 +3847,7 @@ export function ArchiveSearchApp({
                         value={targetUrl}
                         placeholder="whitehouse.gov/administration"
                         autoComplete="off"
-                        className="terminal-input h-12 rounded-xl pl-9 font-mono"
+        className="terminal-input h-12 rounded-xl pl-9 font-mono ledger:h-14 ledger:rounded-[3px] ledger:px-4 ledger:text-xl"
                         onChange={(event) => setTargetUrl(event.target.value)}
                         onKeyDown={(event) => {
                           if (event.key === "Enter") void runSearch("fresh", { url: event.currentTarget.value, scope: scanScope });
@@ -3774,17 +3858,18 @@ export function ArchiveSearchApp({
                 )}
                 {!hasStartedSearch ? (
                   <Button
-                    className="h-12 w-full shrink-0 whitespace-nowrap rounded-xl px-5 text-[0.9375rem] transition-transform hover:-translate-y-0.5 active:translate-y-0 sm:w-auto"
+                    className="ledger-start-button group h-12 w-full shrink-0 whitespace-nowrap rounded-xl px-5 text-[0.9375rem] transition-transform hover:-translate-y-0.5 active:translate-y-0 sm:w-auto ledger:h-14 ledger:hover:translate-y-0 ledger:text-base"
                     disabled={!canStartFresh}
                     onClick={() => void runSearch("fresh", { url: targetUrlInputRef.current?.value, scope: scanScope })}
                   >
-                    <Play size={16} />
+                    <Play size={16} className="ledger:hidden" />
                     Start scan
+                    <span aria-hidden className="ledger-start-arrow hidden ledger:inline-block">→</span>
                   </Button>
                 ) : null}
               </div>
               {!hasStartedSearch ? (
-                <div className="reveal" style={{ animationDelay: "380ms" }}>
+                <div className="reveal ledger-hero-form" style={{ animationDelay: "380ms" }}>
                   <AdvancedSettings
                     open={advancedOpen}
                     onToggle={() => setAdvancedOpen((value) => !value)}
@@ -3815,7 +3900,7 @@ export function ArchiveSearchApp({
             {hasStartedSearch ? (
               <div className="flex flex-col items-end gap-2 lg:w-[420px]">
                 <div aria-hidden="true" className="hidden h-11 lg:block" />
-                <div className="flex min-h-11 w-full divide-x divide-zinc-800 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950/60 sm:h-11">
+                <div className="flex min-h-11 w-full divide-x divide-zinc-800 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950/60 sm:h-11 ledger:min-h-0 ledger:rounded-none ledger:border-zinc-50 ledger:bg-zinc-950 ledger:divide-zinc-800 ledger:sm:!h-auto">
                   <Stat
                     label="Sources"
                     value={`${successfulCount}/${displayedSourceTotal}`}
@@ -3828,7 +3913,7 @@ export function ArchiveSearchApp({
           </div>
           {hasStartedSearch ? (
             <div
-              className="mt-4 h-2 overflow-hidden rounded-sm bg-zinc-900"
+              className="mt-4 h-2 overflow-hidden rounded-sm bg-zinc-900 ledger:mt-5 ledger:h-[5px] ledger:rounded-none ledger:bg-zinc-800"
               role="progressbar"
               aria-label="Scan progress"
               aria-valuemin={0}
@@ -3836,7 +3921,7 @@ export function ArchiveSearchApp({
               aria-valuenow={completion}
             >
               <div
-                className="h-full bg-amber-300 transition-all"
+                className="h-full bg-amber-300 transition-all ledger:bg-zinc-50 ledger:transition-[width] ledger:duration-500 ledger:ease-out"
                 style={{
                   width: `${completion}%`
                 }}
@@ -3844,21 +3929,30 @@ export function ArchiveSearchApp({
             </div>
           ) : null}
           {hasStartedSearch ? (
+            <ScanProgressGrid
+              collectionIds={scanCollectionIds}
+              checkedIds={checkedCollectionIds}
+              failedIds={scanFailedIds}
+              capturedIds={scanCapturedIds}
+              scanningIds={progress.activeCollections}
+            />
+          ) : null}
+          {hasStartedSearch ? (
             <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 text-xs text-zinc-400">
               <button
                 type="button"
                 aria-expanded={scanLogOpen}
-                className="-my-2 inline-flex min-h-10 items-center gap-1 text-left font-semibold uppercase tracking-[0.08em] text-zinc-300 transition hover:text-zinc-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300"
+                className="-my-2 inline-flex min-h-11 items-center gap-1 text-left font-semibold uppercase tracking-[0.08em] text-zinc-300 transition hover:text-zinc-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300 ledger:font-sans ledger:normal-case ledger:font-bold ledger:text-[0.8125rem] ledger:tracking-normal ledger:text-zinc-400"
                 onClick={() => setScanLogOpen((current) => !current)}
               >
                 <ChevronDown
                   size={14}
-                  className={scanLogOpen ? "rotate-180 transition-transform" : "transition-transform"}
+                  className={scanLogOpen ? "rotate-180 transition-transform ledger:duration-200 ledger:ease-[cubic-bezier(0.2,0.8,0.2,1)]" : "transition-transform ledger:duration-200 ledger:ease-[cubic-bezier(0.2,0.8,0.2,1)]"}
                 />
                 Scan log ({scanLogCount})
               </button>
-              <div className="flex flex-wrap items-center justify-end gap-3">
-                <p>
+              <div className="flex flex-wrap items-center justify-end gap-3 max-sm:w-full max-sm:justify-between">
+                <p className="ledger:font-mono ledger:tabular-nums">
                   {completion}% · {formatDuration(elapsedMs)}
                 </p>
                 {showEmptyOutcome ? null : headerStatusActions}
@@ -3867,13 +3961,13 @@ export function ArchiveSearchApp({
           ) : null}
           {hasStartedSearch && scanNotice ? (
             <p
-              className="mt-3 rounded-md border border-amber-300/30 bg-amber-300/10 p-2 text-xs leading-5 text-amber-100"
+              className="mt-3 rounded-md border border-amber-300/30 bg-amber-300/10 p-2 text-xs leading-5 text-amber-100 ledger:rounded-none ledger:border-y-0 ledger:border-r-0 ledger:border-l-[3px] ledger:border-l-amber-300 ledger:px-3 ledger:text-sm"
             >
               {scanNotice}
             </p>
           ) : null}
           {showBlockedRobotsBanner ? (
-            <div className="mt-3 flex flex-col gap-3 rounded-md border border-amber-300/30 bg-amber-300/10 p-3 text-xs leading-5 text-amber-100 sm:flex-row sm:items-center sm:justify-between">
+            <div className="mt-3 flex flex-col gap-3 rounded-md border border-amber-300/30 bg-amber-300/10 p-3 text-xs leading-5 text-amber-100 sm:flex-row sm:items-center sm:justify-between ledger:rounded-none ledger:border-y-0 ledger:border-r-0 ledger:border-l-[3px] ledger:border-l-amber-300 ledger:px-4 ledger:text-sm">
               <p className="max-w-3xl">
                 {pausedReason}
               </p>
@@ -3881,7 +3975,7 @@ export function ArchiveSearchApp({
             </div>
           ) : null}
           {showOptOutNotice ? (
-            <p className="mt-3 rounded-md border border-red-300/30 bg-red-300/10 p-2 text-xs leading-5 text-red-100">
+            <p className="mt-3 rounded-md border border-red-300/30 bg-red-300/10 p-2 text-xs leading-5 text-red-100 ledger:rounded-none ledger:border-y-0 ledger:border-r-0 ledger:border-l-[3px] ledger:border-l-red-500 ledger:px-3 ledger:text-sm">
               This URL is not expected to be in the Common Crawl dataset because it is on the Common Crawl Foundation{" "}
               <a
                 href="https://commoncrawl.org/blog/common-crawl-foundation-opt-out-registry"
@@ -3895,7 +3989,7 @@ export function ArchiveSearchApp({
             </p>
           ) : null}
           {showOptOutNotice && optOutCachedScanAt && captures.length > 0 ? (
-            <p className="mt-3 rounded-md border border-amber-300/30 bg-amber-300/10 p-2 text-xs leading-5 text-amber-100">
+            <p className="mt-3 rounded-md border border-amber-300/30 bg-amber-300/10 p-2 text-xs leading-5 text-amber-100 ledger:rounded-none ledger:border-y-0 ledger:border-r-0 ledger:border-l-[3px] ledger:border-l-amber-300 ledger:px-3 ledger:text-sm">
               Showing {captures.length} cached snapshot{captures.length === 1 ? "" : "s"} from a scan on{" "}
               {new Date(optOutCachedScanAt).toLocaleString([], {
                 year: "numeric",
@@ -3917,7 +4011,7 @@ export function ArchiveSearchApp({
             />
           ) : null}
           {error ? (
-            <div className="mt-3 flex items-start gap-2 text-sm text-red-200">
+            <div className="mt-3 flex items-start gap-2 text-sm text-red-200 ledger:border-solid ledger:border-y-0 ledger:border-r-0 ledger:border-l-[3px] ledger:border-l-red-500 ledger:pl-3">
               <p className="flex-1">{error}</p>
               <button
                 type="button"
@@ -3932,14 +4026,23 @@ export function ArchiveSearchApp({
         </header>
 
         {hasCaptures ? (
-          <section className="grid gap-4 lg:grid-cols-[320px_1fr]">
-            <aside className="grid h-fit gap-4">
-              <section className="archive-panel rounded-md p-4">
-                <div className="flex items-center gap-2 text-sm font-bold uppercase tracking-[0.14em] text-zinc-200">
-                  <Terminal size={16} />
+          <section className="grid gap-4 lg:grid-cols-[320px_1fr] ledger:mt-4 ledger:gap-10 ledger:lg:!grid-cols-[240px_minmax(0,1fr)]">
+            <aside className="grid h-fit gap-4 ledger:gap-7 ledger:lg:sticky ledger:lg:top-5">
+              <section className="archive-panel rounded-md p-4 ledger:!border-0 ledger:!bg-transparent ledger:!shadow-none ledger:rounded-none ledger:p-0">
+                <button
+                  type="button"
+                  aria-expanded={filtersOpen}
+                  onClick={() => setFiltersOpen((open) => !open)}
+                  className="-my-2 flex min-h-11 w-full items-center justify-between gap-2 text-sm font-bold text-zinc-200 lg:hidden"
+                >
+                  Filters &amp; sort
+                  <ChevronDown size={16} className={filtersOpen ? "rotate-180 transition-transform" : "transition-transform"} />
+                </button>
+                <div className="flex items-center gap-2 text-sm font-bold uppercase tracking-[0.14em] text-zinc-200 max-lg:hidden ledger:border-solid ledger:border-x-0 ledger:border-t-0 ledger:border-b-[1.5px] ledger:border-zinc-50 ledger:pb-2 ledger:font-sans ledger:normal-case ledger:text-[0.8125rem] ledger:font-bold ledger:tracking-normal ledger:text-zinc-400">
+                  <Terminal size={16} className="ledger:hidden" />
                   Controls
                 </div>
-                <div className="mt-4 space-y-3">
+                <div className={`mt-4 space-y-3 ledger:mt-3 ${filtersOpen ? "" : "max-lg:hidden"}`}>
                   {viewMode === "list" && <SortSelect value={sortBy} onChange={setSortBy} />}
                   <Filter label="Year" value={yearFilter} onChange={setYearFilter} options={filterOptions.years} />
                   <Filter label="Collection" value={collectionFilter} onChange={setCollectionFilter} options={filterOptions.collections} />
@@ -3954,11 +4057,24 @@ export function ArchiveSearchApp({
                 </div>
               </section>
 
-              <section className="archive-panel rounded-md p-4">
-                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.14em] text-zinc-200">
+              <section className="archive-panel rounded-md p-4 ledger:!border-0 ledger:!bg-transparent ledger:!shadow-none ledger:rounded-none ledger:p-0">
+                <button
+                  type="button"
+                  aria-expanded={exportsOpen}
+                  onClick={() => setExportsOpen((open) => !open)}
+                  className="-my-2 flex min-h-11 w-full items-center justify-between gap-2 text-sm font-bold text-zinc-200 lg:hidden"
+                >
+                  <span className="inline-flex items-center gap-2">
+                    <Download size={14} />
+                    Exports
+                  </span>
+                  <ChevronDown size={16} className={exportsOpen ? "rotate-180 transition-transform" : "transition-transform"} />
+                </button>
+                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.14em] text-zinc-200 max-lg:hidden ledger:border-solid ledger:border-x-0 ledger:border-t-0 ledger:border-b-[1.5px] ledger:border-zinc-50 ledger:pb-2 ledger:font-sans ledger:normal-case ledger:text-[0.8125rem] ledger:font-bold ledger:tracking-normal ledger:text-zinc-400">
                   <Download size={14} />
                   Exports
                 </div>
+                <div className={exportsOpen ? "" : "max-lg:hidden"}>
 
                 {htmlZipDownload.active ? (
                   <div className="mt-2">
@@ -3972,9 +4088,9 @@ export function ArchiveSearchApp({
                       {htmlZipDownload.bytes ? formatBytes(htmlZipDownload.bytes) : "0 B"} exported
                       {htmlZipDownload.failed ? ` · ${htmlZipDownload.failed} failed` : ""}
                     </p>
-                    <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
+                    <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-zinc-800 ledger:h-[5px] ledger:rounded-none">
                       <div
-                        className="h-full rounded-full bg-amber-300 transition-all"
+                        className="h-full rounded-full bg-amber-300 transition-all ledger:rounded-none ledger:bg-zinc-50"
                         style={{
                           width: `${
                             htmlZipDownload.total > 0
@@ -4075,7 +4191,7 @@ export function ArchiveSearchApp({
                   type="button"
                   onClick={() => setExportOptionsOpen((open) => !open)}
                   aria-expanded={exportOptionsOpen}
-                  className="mt-3 flex w-full items-center justify-between gap-2 text-xs font-bold uppercase tracking-[0.14em] text-zinc-400 transition hover:text-zinc-200"
+                  className="mt-3 flex w-full items-center justify-between gap-2 text-xs font-bold uppercase tracking-[0.14em] text-zinc-400 transition hover:text-zinc-200 ledger:normal-case ledger:font-sans ledger:tracking-normal ledger:text-[0.8125rem]"
                 >
                   <span className="inline-flex items-center gap-1.5">
                     <SlidersHorizontal size={12} />
@@ -4090,7 +4206,7 @@ export function ArchiveSearchApp({
                 {exportOptionsOpen ? (
                   <div className="mt-3 space-y-3 border-t border-zinc-800 pt-3">
                     <div>
-                      <span className="mb-1 block text-xs font-bold uppercase tracking-[0.14em] text-zinc-500">
+                      <span className="mb-1 block text-xs font-bold uppercase tracking-[0.14em] text-zinc-500 ledger:font-sans ledger:normal-case ledger:text-[0.8125rem] ledger:tracking-normal ledger:text-zinc-400">
                         Scope
                       </span>
                       <SegmentedToggle
@@ -4105,14 +4221,14 @@ export function ArchiveSearchApp({
                     </div>
 
                     <div>
-                      <span className="mb-1 block text-xs font-bold uppercase tracking-[0.14em] text-zinc-500">
+                      <span className="mb-1 block text-xs font-bold uppercase tracking-[0.14em] text-zinc-500 ledger:font-sans ledger:normal-case ledger:text-[0.8125rem] ledger:tracking-normal ledger:text-zinc-400">
                         CSV columns
                       </span>
                       <div className="grid grid-cols-2 gap-1.5">
                         {CAPTURE_COLUMNS.map((column) => (
                           <label
                             key={column.key}
-                            className="flex cursor-pointer items-center gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-300 transition hover:border-zinc-600"
+                            className="flex cursor-pointer items-center gap-2 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-300 transition hover:border-zinc-600 max-sm:min-h-11"
                           >
                             <input
                               type="checkbox"
@@ -4130,14 +4246,15 @@ export function ArchiveSearchApp({
                     </div>
                   </div>
                 ) : null}
+                </div>
               </section>
             </aside>
 
-            <section className="archive-panel rounded-md">
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 p-4">
+            <section className="archive-panel rounded-md ledger:!border-0 ledger:!bg-transparent ledger:!shadow-none ledger:rounded-none ledger:min-w-0">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 p-4 max-sm:[&>div:last-child]:w-full ledger:border-b-[1.5px] ledger:border-zinc-50 ledger:px-0 ledger:pt-0 ledger:pb-3">
                 <div>
-                  <h2 className="text-sm font-black uppercase tracking-[0.18em]">Captures</h2>
-                  <p className="text-xs text-zinc-400">
+                  <h2 className="text-sm font-black uppercase tracking-[0.18em] ledger:font-sans ledger:normal-case ledger:text-[0.8125rem] ledger:font-bold ledger:tracking-normal ledger:text-zinc-50">Captures</h2>
+                  <p className="text-xs text-zinc-400 ledger:font-mono">
                     Showing {filteredCaptures.length} of {captures.length} HTML captures.
                   </p>
                 </div>
@@ -4147,7 +4264,7 @@ export function ArchiveSearchApp({
                 <div className="grid min-h-80 place-items-center p-8 text-center">
                   <div>
                     <Ban className="mx-auto mb-3 text-zinc-500" size={28} />
-                    <p className="font-semibold text-zinc-300">No captures in the current view.</p>
+                    <p className="font-semibold text-zinc-300 ledger:font-serif ledger:text-3xl ledger:font-normal ledger:text-zinc-50">No captures in the current view.</p>
                     <p className="mt-1 text-sm text-zinc-500">Start a search or loosen the filters.</p>
                   </div>
                 </div>
@@ -4168,6 +4285,7 @@ export function ArchiveSearchApp({
                     captures={filteredCaptures}
                     backContext={resultsBackContext}
                     scanId={activeScanId || undefined}
+                    changedKeys={changedKeys}
                   />
                 </>
               )}
@@ -4191,7 +4309,7 @@ export function ArchiveSearchApp({
           <a
             href="#how-it-works"
             aria-label="Learn how Crawlback works"
-            className="reveal-fade group absolute bottom-[max(1.5rem,env(safe-area-inset-bottom))] left-1/2 flex h-14 w-14 -translate-x-1/2 items-center justify-center rounded-full border border-amber-300/55 bg-zinc-950/70 text-amber-200 shadow-[0_0_0_1px_rgba(250,204,21,0.12)] backdrop-blur-sm transition hover:border-amber-200 hover:bg-amber-300/10 hover:text-amber-100 hover:shadow-[0_0_0_1px_rgba(250,204,21,0.22)]"
+            className="reveal-fade group absolute bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 flex h-12 w-12 sm:bottom-[max(1.5rem,env(safe-area-inset-bottom))] sm:h-14 sm:w-14 -translate-x-1/2 items-center justify-center rounded-full border border-amber-300/55 bg-zinc-950/70 text-amber-200 shadow-[0_0_0_1px_rgba(250,204,21,0.12)] backdrop-blur-sm transition hover:border-amber-200 hover:bg-amber-300/10 hover:text-amber-100 hover:shadow-[0_0_0_1px_rgba(250,204,21,0.22)]"
             style={{ animationDelay: "700ms" }}
           >
             <span className="scroll-hint block">
@@ -4295,7 +4413,7 @@ function LandingScrollTop() {
     <a
       href="#top"
       aria-label="Back to top"
-      className={`landing-scroll-top${scrollState.visible ? " is-visible" : ""}${
+      className={`landing-scroll-top ledger:rounded-[3px]${scrollState.visible ? " is-visible" : ""}${
         scrollState.nearEnd ? " is-near-end" : ""
       }`}
       style={{ "--scroll-progress": scrollState.progress } as CSSProperties}
@@ -4308,16 +4426,16 @@ function LandingScrollTop() {
 function Stat({ label, value, tone = "neutral" }: { label: string; value: string; tone?: "neutral" | "green" | "amber" | "red" }) {
   const valueColor =
     tone === "green"
-      ? "text-emerald-300"
+      ? "text-emerald-300 ledger:text-amber-300"
       : tone === "amber"
       ? "text-amber-300"
       : tone === "red"
       ? "text-red-300"
       : "text-zinc-100";
   return (
-    <div className="flex min-w-0 flex-1 flex-col justify-center gap-1 px-3 py-2 leading-none sm:flex-row sm:items-center sm:justify-between sm:gap-2 sm:py-0">
-      <span className="min-w-0 truncate text-xs font-semibold uppercase tracking-[0.08em] text-zinc-400">{label}</span>
-      <span className={`shrink-0 font-mono text-base font-bold tabular-nums sm:text-sm ${valueColor}`}>{value}</span>
+    <div className="flex min-w-0 flex-1 flex-col justify-center gap-1 px-3 py-2 leading-none sm:flex-row sm:items-center sm:justify-between sm:gap-2 sm:py-0 ledger:gap-2 ledger:px-3 ledger:py-3 ledger:sm:!px-5 ledger:sm:!py-3.5 ledger:sm:!flex-col ledger:sm:!items-start ledger:sm:!py-3.5">
+      <span className="min-w-0 truncate text-xs font-semibold uppercase tracking-[0.08em] text-zinc-400 ledger:font-sans ledger:normal-case ledger:font-bold ledger:text-[0.8125rem] ledger:tracking-normal">{label}</span>
+      <span className={`shrink-0 font-mono text-base font-bold tabular-nums sm:text-sm ${valueColor} ledger:font-serif ledger:font-normal ledger:text-[1.625rem] ledger:min-[400px]:!text-[2rem] ledger:leading-none ledger:sm:!text-[2.5rem] ledger:tracking-[-0.02em] ledger:tabular-nums`}>{value}</span>
     </div>
   );
 }
@@ -4416,10 +4534,10 @@ function EmptyScanOutcome({
     : null;
 
   return (
-    <section className="archive-panel rounded-md p-6">
+    <section className="archive-panel rounded-md p-6 ledger:rounded-none ledger:p-8">
       <div className="mx-auto max-w-2xl text-center">
         <Icon className={iconClass} size={30} />
-        <p className="text-lg font-black uppercase tracking-[0.16em] text-zinc-100">{summary.title}</p>
+        <p className="text-lg font-black uppercase tracking-[0.16em] text-zinc-100 ledger:font-serif ledger:text-[2.5rem] ledger:font-normal ledger:normal-case ledger:leading-none ledger:tracking-[-0.02em]">{summary.title}</p>
         {summary.description ? (
           <p className="mx-auto mt-3 max-w-4xl text-sm leading-relaxed text-zinc-400">{summary.description}</p>
         ) : null}
@@ -4449,7 +4567,7 @@ function scanLogCallMessage(call: CollectionAttemptLog, result: CollectionCheckR
 
 function scanLogCallTone(call: CollectionAttemptLog) {
   if (call.status === "not-checked") return "text-red-200";
-  return call.captureCount && call.captureCount > 0 ? "text-emerald-200" : "text-zinc-500";
+  return call.captureCount && call.captureCount > 0 ? "text-emerald-200" : "text-zinc-500 ledger:text-zinc-300";
 }
 
 function scanLogRowsForResult(result: ScanLogEntry) {
@@ -4468,7 +4586,7 @@ function scanLogEventTone(event: ScanLogEvent) {
   if (event.tone === "red") return "text-red-200";
   if (event.tone === "amber") return "text-amber-200";
   if (event.tone === "green") return "text-emerald-300";
-  return "text-zinc-400";
+  return "text-zinc-400 ledger:text-zinc-300";
 }
 
 type ScanLogRenderRow =
@@ -4630,11 +4748,11 @@ function RobotsScanLogEntry({ status, withDate = false }: { status: RobotsUiStat
   const detail = robotsStatusDetail(status);
   return (
     <div className={scanLogRowClass(withDate)}>
-      <p className="whitespace-nowrap font-mono text-xs text-zinc-500">{formatLogTimestamp(status.checkedAt, withDate)}</p>
-      <p className="whitespace-nowrap font-semibold text-zinc-200">CCBot robots.txt</p>
-      <p className={robotsStatusTone(status)}>
+      <p className="whitespace-nowrap tabular-nums font-mono text-xs text-zinc-500 ledger:text-zinc-300">{formatLogTimestamp(status.checkedAt, withDate)}</p>
+      <p className="min-w-0 truncate whitespace-nowrap font-semibold text-zinc-200 ledger:text-zinc-50">CCBot robots.txt</p>
+      <p className={`min-w-0 ${robotsStatusTone(status)}`}>
         {robotsStatusHeadline(status)}
-        {detail ? <span className="ml-1 text-zinc-500">({detail})</span> : null}
+        {detail ? <span className="ml-1 text-zinc-500 ledger:text-zinc-300">({detail})</span> : null}
       </p>
     </div>
   );
@@ -4651,9 +4769,9 @@ function OptOutScanLogEntry({
 }) {
   return (
     <div className={scanLogRowClass(withDate)}>
-      <p className="whitespace-nowrap font-mono text-xs text-zinc-500">{formatLogTimestamp(checkedAt, withDate)}</p>
-      <p className="whitespace-nowrap font-semibold text-zinc-200">Opt-out registry</p>
-      <p className="text-red-200">
+      <p className="whitespace-nowrap tabular-nums font-mono text-xs text-zinc-500 ledger:text-zinc-300">{formatLogTimestamp(checkedAt, withDate)}</p>
+      <p className="min-w-0 truncate whitespace-nowrap font-semibold text-zinc-200 ledger:text-zinc-50">Opt-out registry</p>
+      <p className="min-w-0 text-red-200">
         {cachedCount > 0
           ? `URL is on the Common Crawl opt-out registry, so it can't be crawled. The ${cachedCount} snapshot${cachedCount === 1 ? "" : "s"} below are from a previous scan.`
           : "Scan aborted — URL is on the Common Crawl opt-out registry."}
@@ -4687,12 +4805,12 @@ function ScanLog({
   }, [rowCount]);
 
   return (
-    <section className="mt-3 rounded-md border border-zinc-800 bg-zinc-950/70">
+    <section className="mt-3 rounded-md border border-zinc-800 bg-zinc-950/70 ledger:rounded-none ledger:border-zinc-600">
       <div ref={scrollRef} className="max-h-64 overflow-auto thin-scrollbar">
         {rows.length === 0 ? (
           <p className="p-3 text-xs text-zinc-500">No collections checked yet.</p>
         ) : (
-          <div className="divide-y divide-zinc-900">
+          <div className="divide-y divide-zinc-900 ledger:divide-zinc-800">
             {rows.map((row) => {
               if (row.kind === "robots") {
                 return <RobotsScanLogEntry key={`robots:${row.timestamp ?? "unknown"}:${row.sequence}`} status={row.status} withDate={showDate} />;
@@ -4723,9 +4841,9 @@ function ScanLog({
 function ScanLogEventEntry({ event, withDate }: { event: ScanLogEvent; withDate: boolean }) {
   return (
     <div className={scanLogRowClass(withDate)}>
-      <p className="whitespace-nowrap font-mono text-xs text-zinc-500">{formatLogTimestamp(event.checkedAt, withDate)}</p>
-      <p className="whitespace-nowrap font-semibold text-zinc-200">Scan</p>
-      <p className={scanLogEventTone(event)}>{event.message}</p>
+      <p className="whitespace-nowrap tabular-nums font-mono text-xs text-zinc-500 ledger:text-zinc-300">{formatLogTimestamp(event.checkedAt, withDate)}</p>
+      <p className="min-w-0 truncate whitespace-nowrap font-semibold text-zinc-200 ledger:text-zinc-50">Scan</p>
+      <p className={`min-w-0 ${scanLogEventTone(event)}`}>{event.message}</p>
     </div>
   );
 }
@@ -4743,9 +4861,9 @@ function ScanLogCollectionEntry({
 }) {
   return (
     <div className={scanLogRowClass(withDate)}>
-      <p className="whitespace-nowrap font-mono text-xs text-zinc-500">{formatLogTimestamp(call.checkedAt ?? result.checkedAt, withDate)}</p>
-      <p className="whitespace-nowrap font-semibold text-zinc-200">{result.collection.id}</p>
-      <p className={scanLogCallTone(call)}>{`${attemptLabel((call.attemptNumber ?? attemptIndex + 1) - 1)} · ${scanLogCallMessage(call, result)}`}</p>
+      <p className="whitespace-nowrap tabular-nums font-mono text-xs text-zinc-500 ledger:text-zinc-300">{formatLogTimestamp(call.checkedAt ?? result.checkedAt, withDate)}</p>
+      <p className="min-w-0 truncate whitespace-nowrap font-semibold text-zinc-200 ledger:text-zinc-50">{result.collection.id}</p>
+      <p className={`min-w-0 ${scanLogCallTone(call)}`}>{`${attemptLabel((call.attemptNumber ?? attemptIndex + 1) - 1)} · ${scanLogCallMessage(call, result)}`}</p>
     </div>
   );
 }
@@ -4753,11 +4871,11 @@ function ScanLogCollectionEntry({
 function SortSelect({ value, onChange }: { value: SortOption; onChange: (value: SortOption) => void }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-xs font-bold uppercase tracking-[0.14em] text-zinc-500">Sort by</span>
+      <span className="mb-1 block text-xs font-bold uppercase tracking-[0.14em] text-zinc-500 ledger:font-sans ledger:normal-case ledger:text-[0.8125rem] ledger:tracking-normal ledger:text-zinc-400">Sort by</span>
       <select
         value={value}
         onChange={(event) => onChange(event.target.value as SortOption)}
-        className="h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100 outline-none focus:border-amber-300"
+        className="h-11 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-base text-zinc-100 outline-none focus:border-amber-300 sm:h-10 sm:text-sm ledger:rounded-[3px]"
       >
         {SORT_OPTIONS.map((option) => (
           <option key={option.value} value={option.value}>
@@ -4784,7 +4902,7 @@ function SegmentedToggle<T extends string>({
     <div
       role="group"
       aria-label={ariaLabel}
-      className="inline-flex w-full items-center overflow-hidden rounded-md border border-zinc-700 bg-zinc-950"
+      className="inline-flex w-full items-center overflow-hidden rounded-md border border-zinc-700 bg-zinc-950 ledger:rounded-[3px] ledger:divide-x ledger:divide-zinc-600"
     >
       {options.map((option) => {
         const active = option.value === value;
@@ -4796,8 +4914,8 @@ function SegmentedToggle<T extends string>({
             onClick={() => onChange(option.value)}
             className={
               active
-                ? "flex h-8 flex-1 items-center justify-center px-2 text-xs font-bold uppercase tracking-[0.1em] text-zinc-950 bg-amber-300"
-                : "flex h-8 flex-1 items-center justify-center px-2 text-xs font-semibold uppercase tracking-[0.1em] text-zinc-300 transition hover:text-amber-100"
+                ? "flex h-11 flex-1 items-center justify-center sm:h-8 px-2 text-xs font-bold uppercase tracking-[0.1em] text-zinc-950 bg-amber-300 ledger:bg-zinc-50 ledger:text-zinc-950 ledger:normal-case ledger:font-sans ledger:tracking-normal ledger:text-[0.8125rem] ledger:transition-colors ledger:duration-200 ledger:motion-safe:active:scale-[0.97]"
+                : "flex h-11 flex-1 items-center justify-center sm:h-8 px-2 text-xs font-semibold uppercase tracking-[0.1em] text-zinc-300 transition hover:text-amber-100 ledger:normal-case ledger:font-sans ledger:tracking-normal ledger:text-[0.8125rem] ledger:hover:text-amber-300 ledger:transition-colors ledger:duration-200 ledger:motion-safe:active:scale-[0.97]"
             }
           >
             {option.label}
@@ -4811,11 +4929,11 @@ function SegmentedToggle<T extends string>({
 function Filter({ label, value, options, onChange }: { label: string; value: string; options: string[]; onChange: (value: string) => void }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-xs font-bold uppercase tracking-[0.14em] text-zinc-500">{label}</span>
+      <span className="mb-1 block text-xs font-bold uppercase tracking-[0.14em] text-zinc-500 ledger:font-sans ledger:normal-case ledger:text-[0.8125rem] ledger:tracking-normal ledger:text-zinc-400">{label}</span>
       <select
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="h-10 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100 outline-none focus:border-amber-300"
+        className="h-11 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 text-base text-zinc-100 outline-none focus:border-amber-300 sm:h-10 sm:text-sm ledger:rounded-[3px]"
       >
         <option value="all">All</option>
         {options.map((option) => (
@@ -4862,7 +4980,7 @@ function GroupedCaptureList({
   }, []);
 
   return (
-    <ul className="divide-y divide-zinc-800">
+    <ul className="divide-y divide-zinc-800 ledger:border-b ledger:border-zinc-800">
       {groups.map((group) => {
         const isOpen = expanded.has(group.url);
         return (
@@ -4871,7 +4989,7 @@ function GroupedCaptureList({
               type="button"
               aria-expanded={isOpen}
               onClick={() => toggle(group.url)}
-              className="flex w-full items-center gap-2 px-4 py-3 text-left hover:bg-zinc-900/60"
+              className="flex min-h-11 w-full items-center gap-2 px-4 py-3 text-left hover:bg-zinc-900/60"
             >
               {isOpen ? (
                 <ChevronDown size={14} className="shrink-0 text-zinc-500" />
@@ -4897,9 +5015,16 @@ function GroupedCaptureList({
                         href={createViewerHref(capture, { scanId, legacyBackContext: backContext })}
                         onMouseEnter={() => prefetchCaptureRecord(capture)}
                         onFocus={() => prefetchCaptureRecord(capture)}
-                        className="flex items-center gap-3 py-2 pl-10 pr-4 text-sm hover:bg-zinc-900/60"
+                        className="flex min-h-11 flex-wrap items-center gap-x-3 gap-y-0.5 py-2 pl-10 pr-4 text-sm hover:bg-zinc-900/60 sm:flex-nowrap"
                       >
-                        <Badge tone={statusTone} className="shrink-0 justify-center">
+                        <Badge
+                          tone={statusTone}
+                          className={
+                            isRedirect
+                              ? "shrink-0 justify-center ledger:font-mono ledger:!border-[#9a6200] ledger:text-[#9a6200]"
+                              : "shrink-0 justify-center ledger:font-mono"
+                          }
+                        >
                           {capture.status}
                         </Badge>
                         <span className="shrink-0 font-mono text-xs tabular-nums text-zinc-300">
@@ -4935,7 +5060,7 @@ function ViewModeToggle({
     <div
       role="group"
       aria-label="View mode"
-      className="inline-flex items-center overflow-hidden rounded-md border border-zinc-700 bg-zinc-950"
+      className="inline-flex w-full items-stretch overflow-hidden sm:w-auto rounded-md border border-zinc-700 bg-zinc-950 ledger:rounded-[3px] ledger:divide-x ledger:divide-zinc-600"
     >
       <button
         type="button"
@@ -4943,8 +5068,8 @@ function ViewModeToggle({
         onClick={() => onChange("list")}
         className={
           value === "list"
-            ? "inline-flex h-8 items-center gap-1.5 bg-amber-300 px-3 text-xs font-bold uppercase tracking-[0.12em] text-zinc-950"
-            : "inline-flex h-8 items-center gap-1.5 px-3 text-xs font-semibold uppercase tracking-[0.12em] text-zinc-300 transition hover:text-amber-100"
+            ? "inline-flex h-11 flex-1 items-center justify-center gap-1.5 sm:h-8 sm:flex-none bg-amber-300 px-3 text-xs font-bold uppercase tracking-[0.12em] text-zinc-950 ledger:bg-zinc-50 ledger:text-zinc-950 ledger:normal-case ledger:font-sans ledger:tracking-normal ledger:text-[0.8125rem] ledger:transition-colors ledger:duration-200 ledger:motion-safe:active:scale-[0.97]"
+            : "inline-flex h-11 flex-1 items-center justify-center gap-1.5 sm:h-8 sm:flex-none px-3 text-xs font-semibold uppercase tracking-[0.12em] text-zinc-300 transition hover:text-amber-100 ledger:normal-case ledger:font-sans ledger:tracking-normal ledger:text-[0.8125rem] ledger:hover:text-amber-300 ledger:transition-colors ledger:duration-200 ledger:motion-safe:active:scale-[0.97]"
         }
       >
         <List size={14} />
@@ -4956,8 +5081,8 @@ function ViewModeToggle({
         onClick={() => onChange("calendar")}
         className={
           value === "calendar"
-            ? "inline-flex h-8 items-center gap-1.5 bg-amber-300 px-3 text-xs font-bold uppercase tracking-[0.12em] text-zinc-950"
-            : "inline-flex h-8 items-center gap-1.5 px-3 text-xs font-semibold uppercase tracking-[0.12em] text-zinc-300 transition hover:text-amber-100"
+            ? "inline-flex h-11 flex-1 items-center justify-center gap-1.5 sm:h-8 sm:flex-none bg-amber-300 px-3 text-xs font-bold uppercase tracking-[0.12em] text-zinc-950 ledger:bg-zinc-50 ledger:text-zinc-950 ledger:normal-case ledger:font-sans ledger:tracking-normal ledger:text-[0.8125rem] ledger:transition-colors ledger:duration-200 ledger:motion-safe:active:scale-[0.97]"
+            : "inline-flex h-11 flex-1 items-center justify-center gap-1.5 sm:h-8 sm:flex-none px-3 text-xs font-semibold uppercase tracking-[0.12em] text-zinc-300 transition hover:text-amber-100 ledger:normal-case ledger:font-sans ledger:tracking-normal ledger:text-[0.8125rem] ledger:hover:text-amber-300 ledger:transition-colors ledger:duration-200 ledger:motion-safe:active:scale-[0.97]"
         }
       >
         <CalendarDays size={14} />
@@ -4969,8 +5094,8 @@ function ViewModeToggle({
         onClick={() => onChange("grouped")}
         className={
           value === "grouped"
-            ? "inline-flex h-8 items-center gap-1.5 bg-amber-300 px-3 text-xs font-bold uppercase tracking-[0.12em] text-zinc-950"
-            : "inline-flex h-8 items-center gap-1.5 px-3 text-xs font-semibold uppercase tracking-[0.12em] text-zinc-300 transition hover:text-amber-100"
+            ? "inline-flex h-11 flex-1 items-center justify-center gap-1.5 sm:h-8 sm:flex-none bg-amber-300 px-3 text-xs font-bold uppercase tracking-[0.12em] text-zinc-950 ledger:bg-zinc-50 ledger:text-zinc-950 ledger:normal-case ledger:font-sans ledger:tracking-normal ledger:text-[0.8125rem] ledger:transition-colors ledger:duration-200 ledger:motion-safe:active:scale-[0.97]"
+            : "inline-flex h-11 flex-1 items-center justify-center gap-1.5 sm:h-8 sm:flex-none px-3 text-xs font-semibold uppercase tracking-[0.12em] text-zinc-300 transition hover:text-amber-100 ledger:normal-case ledger:font-sans ledger:tracking-normal ledger:text-[0.8125rem] ledger:hover:text-amber-300 ledger:transition-colors ledger:duration-200 ledger:motion-safe:active:scale-[0.97]"
         }
       >
         <ListTree size={14} />
@@ -5009,133 +5134,142 @@ function AdvancedSettings({
   disabled: boolean;
   earliestArchiveYear: number;
 }) {
+  const panelId = useId();
   return (
     <div className="mt-3">
-      <div className="flex justify-end">
+      <div className="flex justify-end ledger:justify-start">
         <button
           type="button"
           aria-expanded={open}
+          aria-controls={panelId}
           onClick={onToggle}
-          className="inline-flex min-h-11 items-center gap-1.5 text-sm font-semibold text-zinc-300 transition hover:text-zinc-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300"
+          className="inline-flex min-h-11 items-center gap-1.5 text-sm font-semibold text-zinc-300 ledger:font-sans ledger:text-[0.8125rem] ledger:normal-case ledger:tracking-normal transition hover:text-zinc-50 ledger:duration-200 ledger:hover:text-amber-300 ledger:motion-safe:active:scale-[0.98] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300"
         >
           Advanced search
           <ChevronDown
             size={14}
-            className={open ? "rotate-180 transition-transform" : "transition-transform"}
+            className={open ? "rotate-180 transition-transform duration-300" : "transition-transform duration-300"}
           />
         </button>
       </div>
-      {open ? (
-        <div className="mt-2 rounded-xl border border-zinc-800 bg-zinc-950/70 p-4">
-          <div className="flex flex-col gap-4">
-            <div className="flex flex-col gap-1">
-              <span id="advanced-match-type-label" className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-[0.14em] text-zinc-400">
-                Mode
-                <Tooltip
-                  side="top"
-                  className="left-0 w-72 translate-x-0 whitespace-normal text-left normal-case tracking-normal"
-                  arrowClassName="left-2 translate-x-0"
-                  content={
-                    <span className="block">
+      <div
+        id={panelId}
+        inert={!open}
+        aria-hidden={!open}
+        className={`grid transition-[grid-template-rows,opacity] duration-300 ease-[cubic-bezier(0.2,0.8,0.2,1)] motion-reduce:transition-none ${open ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"}`}
+      >
+        <div className={open ? "min-h-0 overflow-visible" : "min-h-0 overflow-hidden"}>
+          <div className="mt-2 rounded-xl border border-zinc-800 bg-zinc-950/70 p-4 ledger:mt-4 ledger:rounded-none ledger:border-x-0 ledger:border-b-0 ledger:border-t ledger:border-zinc-800 ledger:bg-transparent ledger:px-0 ledger:pb-0">
+            <div className="flex flex-col gap-4">
+              <div className="flex flex-col gap-1">
+                <span id="advanced-match-type-label" className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-[0.14em] text-zinc-400 ledger:font-sans ledger:normal-case ledger:text-[0.8125rem] ledger:tracking-normal">
+                  Mode
+                  <Tooltip
+                    side="top"
+                    className="left-0 w-72 translate-x-0 whitespace-normal text-left normal-case tracking-normal"
+                    arrowClassName="left-2 translate-x-0"
+                    content={
                       <span className="block">
-                        <span className="font-semibold text-amber-200">exact URL:</span> only this exact address.
+                        <span className="block">
+                          <span className="font-semibold text-amber-200 ledger:text-zinc-50">exact URL:</span> only this exact address.
+                        </span>
+                        <span className="mt-1 block">
+                          <span className="font-semibold text-amber-200 ledger:text-zinc-50">host:</span> all paths on this hostname (e.g. <code>example.com/*</code>).
+                        </span>
+                        <span className="mt-1 block">
+                          <span className="font-semibold text-amber-200 ledger:text-zinc-50">domain:</span> all paths on this domain <em>and</em> all subdomains (e.g. <code>*.example.com/*</code>).
+                        </span>
                       </span>
-                      <span className="mt-1 block">
-                        <span className="font-semibold text-amber-200">host:</span> all paths on this hostname (e.g. <code>example.com/*</code>).
-                      </span>
-                      <span className="mt-1 block">
-                        <span className="font-semibold text-amber-200">domain:</span> all paths on this domain <em>and</em> all subdomains (e.g. <code>*.example.com/*</code>).
-                      </span>
-                    </span>
-                  }
-                >
-                  <button
-                    type="button"
-                    aria-label="What is mode?"
-                    className="-m-1.5 grid h-7 w-7 place-items-center rounded-full text-zinc-400 transition hover:text-zinc-100 focus:outline-none focus-visible:text-zinc-100 focus-visible:ring-2 focus-visible:ring-amber-300"
+                    }
                   >
-                    <Info size={14} />
-                  </button>
-                </Tooltip>
-              </span>
-              <select
-                aria-label="Match type"
-                value={matchType}
-                disabled={disabled}
-                onChange={(event) => onMatchTypeChange(event.target.value as MatchType)}
-                className="h-11 rounded-lg border border-zinc-700 bg-zinc-950 px-3 text-base font-semibold text-zinc-100 outline-none focus:border-amber-300 disabled:cursor-not-allowed disabled:opacity-50 sm:text-sm"
-              >
-                <option value="exact">exact URL</option>
-                <option value="host">host (all paths)</option>
-                <option value="domain">domain + subdomains</option>
-              </select>
-            </div>
-            <div className="flex flex-col gap-1">
-              <span id="advanced-scope-label" className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-[0.14em] text-zinc-400">
-                Scope
-                <Tooltip
-                  side="top"
-                  className="left-0 w-64 translate-x-0 whitespace-normal text-left normal-case tracking-normal"
-                  arrowClassName="left-2 translate-x-0"
-                  content={
-                    <span className="block">
-                      <span className="block">
-                        <span className="font-semibold text-amber-200">Default:</span> last 12 months only.
-                      </span>
-                      <span className="mt-1 block">
-                        <span className="font-semibold text-amber-200">Full scan:</span> entire archive — takes much longer.
-                      </span>
-                      <span className="mt-1 block">
-                        <span className="font-semibold text-amber-200">Custom:</span> search only within your chosen date range.
-                      </span>
-                    </span>
-                  }
+                    <button
+                      type="button"
+                      aria-label="What is mode?"
+                      className="-m-1.5 grid h-7 w-7 place-items-center rounded-full text-zinc-400 transition hover:text-zinc-100 focus:outline-none focus-visible:text-zinc-100 focus-visible:ring-2 focus-visible:ring-amber-300"
+                    >
+                      <Info size={14} />
+                    </button>
+                  </Tooltip>
+                </span>
+                <select
+                  aria-label="Match type"
+                  value={matchType}
+                  disabled={disabled}
+                  onChange={(event) => onMatchTypeChange(event.target.value as MatchType)}
+                  className="h-11 rounded-lg border border-zinc-700 bg-zinc-950 px-3 text-base font-semibold text-zinc-100 outline-none focus:border-amber-300 disabled:cursor-not-allowed disabled:opacity-50 sm:text-sm ledger:rounded-[3px] ledger:border-zinc-600 ledger:font-sans ledger:text-sm ledger:font-medium"
                 >
-                  <button
-                    type="button"
-                    aria-label="What is scope?"
-                    className="-m-1.5 grid h-7 w-7 place-items-center rounded-full text-zinc-400 transition hover:text-zinc-100 focus:outline-none focus-visible:text-zinc-100 focus-visible:ring-2 focus-visible:ring-amber-300"
-                  >
-                    <Info size={14} />
-                  </button>
-                </Tooltip>
-              </span>
-              <select
-                aria-label="Scope"
-                value={scope}
-                disabled={disabled}
-                onChange={(event) => onScopeChange(event.target.value as ScanScope)}
-                className="h-11 rounded-lg border border-zinc-700 bg-zinc-950 px-3 text-base font-semibold text-zinc-100 outline-none focus:border-amber-300 disabled:cursor-not-allowed disabled:opacity-50 sm:text-sm"
-              >
-                <option value="recent">last 12 months</option>
-                <option value="all">full scan (entire archive, since {earliestArchiveYear})</option>
-                <option value="custom">custom date range</option>
-              </select>
-            </div>
-            {scope === "custom" ? (
-              <div className="grid gap-3 sm:grid-cols-2">
-                <DateControl
-                  label="From"
-                  value={customDateFrom}
-                  onChange={onCustomDateFromChange}
-                  max={customDateTo || undefined}
-                  disabled={disabled}
-                />
-                <DateControl
-                  label="To"
-                  value={customDateTo}
-                  onChange={onCustomDateToChange}
-                  min={customDateFrom || undefined}
-                  disabled={disabled}
-                />
-                {customRangeIssue ? (
-                  <p className="sm:col-span-2 text-xs text-amber-200">{customRangeIssue}</p>
-                ) : null}
+                  <option value="exact">exact URL</option>
+                  <option value="host">host (all paths)</option>
+                  <option value="domain">domain + subdomains</option>
+                </select>
               </div>
-            ) : null}
+              <div className="flex flex-col gap-1">
+                <span id="advanced-scope-label" className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-[0.14em] text-zinc-400 ledger:font-sans ledger:normal-case ledger:text-[0.8125rem] ledger:tracking-normal">
+                  Scope
+                  <Tooltip
+                    side="top"
+                    className="left-0 w-64 translate-x-0 whitespace-normal text-left normal-case tracking-normal"
+                    arrowClassName="left-2 translate-x-0"
+                    content={
+                      <span className="block">
+                        <span className="block">
+                          <span className="font-semibold text-amber-200 ledger:text-zinc-50">Default:</span> last 12 months only.
+                        </span>
+                        <span className="mt-1 block">
+                          <span className="font-semibold text-amber-200 ledger:text-zinc-50">Full scan:</span> entire archive — takes much longer.
+                        </span>
+                        <span className="mt-1 block">
+                          <span className="font-semibold text-amber-200 ledger:text-zinc-50">Custom:</span> search only within your chosen date range.
+                        </span>
+                      </span>
+                    }
+                  >
+                    <button
+                      type="button"
+                      aria-label="What is scope?"
+                      className="-m-1.5 grid h-7 w-7 place-items-center rounded-full text-zinc-400 transition hover:text-zinc-100 focus:outline-none focus-visible:text-zinc-100 focus-visible:ring-2 focus-visible:ring-amber-300"
+                    >
+                      <Info size={14} />
+                    </button>
+                  </Tooltip>
+                </span>
+                <select
+                  aria-label="Scope"
+                  value={scope}
+                  disabled={disabled}
+                  onChange={(event) => onScopeChange(event.target.value as ScanScope)}
+                  className="h-11 rounded-lg border border-zinc-700 bg-zinc-950 px-3 text-base font-semibold text-zinc-100 outline-none focus:border-amber-300 disabled:cursor-not-allowed disabled:opacity-50 sm:text-sm ledger:rounded-[3px] ledger:border-zinc-600 ledger:font-sans ledger:text-sm ledger:font-medium"
+                >
+                  <option value="recent">last 12 months</option>
+                  <option value="all">full scan (entire archive, since {earliestArchiveYear})</option>
+                  <option value="custom">custom date range</option>
+                </select>
+              </div>
+              {scope === "custom" ? (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <DateControl
+                    label="From"
+                    value={customDateFrom}
+                    onChange={onCustomDateFromChange}
+                    max={customDateTo || undefined}
+                    disabled={disabled}
+                  />
+                  <DateControl
+                    label="To"
+                    value={customDateTo}
+                    onChange={onCustomDateToChange}
+                    min={customDateFrom || undefined}
+                    disabled={disabled}
+                  />
+                  {customRangeIssue ? (
+                    <p className="sm:col-span-2 text-xs text-amber-200">{customRangeIssue}</p>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
           </div>
         </div>
-      ) : null}
+      </div>
     </div>
   );
 }

@@ -15,9 +15,9 @@ export const metadata: Metadata = {
   }
 };
 
-const sectionClass = "space-y-4 py-8 text-base leading-7 text-zinc-300 sm:py-10";
-const headingClass = "text-lg font-semibold leading-snug text-zinc-50 sm:text-xl";
-const linkClass = "text-amber-300 underline decoration-amber-300/40 underline-offset-4 hover:text-amber-200";
+const sectionClass = "space-y-4 py-8 text-base leading-7 text-zinc-300 sm:py-10 ledger:space-y-5 ledger:text-[17px] ledger:leading-[1.65]";
+const headingClass = "text-lg font-semibold leading-snug text-zinc-50 sm:text-xl ledger:font-serif ledger:font-normal ledger:text-[1.75rem] ledger:leading-[1.1] ledger:tracking-[-0.01em] ledger:text-balance ledger:sm:text-[40px]";
+const linkClass = "text-amber-300 underline decoration-amber-300/40 underline-offset-4 hover:text-amber-200 ledger:text-zinc-50 ledger:decoration-amber-300 ledger:decoration-[1.5px] ledger:hover:text-amber-300";
 
 export default function PrivacyPage() {
   return (
@@ -44,7 +44,7 @@ export default function PrivacyPage() {
 
       <section className={sectionClass} aria-labelledby="privacy-searches">
         <h2 id="privacy-searches" className={headingClass}>What happens during a search</h2>
-        <ul className="list-disc space-y-3 pl-5 marker:text-zinc-600">
+        <ul className="list-disc space-y-3 pl-5 marker:text-zinc-600 ledger:marker:text-amber-300">
           <li><strong className="font-semibold text-zinc-100">Archive queries.</strong> Your browser contacts Common Crawl’s index and archive-data servers directly. They receive your IP address, technical request information, and the searched URL, host, or domain or requested archive record. Their processing is covered by <a href="https://www.commoncrawl.org/privacy-policy" className={linkClass}>Common Crawl’s privacy policy</a>.</li>
           <li><strong className="font-semibold text-zinc-100">Robots.txt checks.</strong> If enabled, your target URL is sent to Crawlback’s server to check the target website’s robots.txt. That website receives a request from our server, rather than your browser’s IP address. You can disable these checks in <Link href="/settings#scan-settings" className={linkClass}>App settings</Link>, before starting a scan.</li>
           <li><strong className="font-semibold text-zinc-100">Opt-out registry.</strong> Our server retrieves the public Common Crawl opt-out list from a Google-hosted spreadsheet. Matching your target against that list happens in your browser; the registry request does not send your search target to Google.</li>
@@ -56,7 +56,7 @@ export default function PrivacyPage() {
       <section className={sectionClass} aria-labelledby="privacy-storage">
         <h2 id="privacy-storage" className={headingClass}>Cookies and local browser storage</h2>
         <p>Crawlback’s own code does not set cookies. It uses browser storage to operate the features you use:</p>
-        <dl className="space-y-5 border-l border-amber-300/30 pl-5">
+        <dl className="space-y-5 border-l border-amber-300/30 pl-5 ledger:border-zinc-600">
           <div><dt className="font-semibold text-zinc-100">History, settings, and saved captures</dt><dd>IndexedDB holds your scan history, results, coverage, settings, and optionally cached HTML. A local identifier separates data inside this browser; it is not a login or a tracking identifier sent to us.</dd></div>
           <div><dt className="font-semibold text-zinc-100">Search and request caches</dt><dd>Local storage holds source lists, robots checks, archive-query results, and scan coordination state. The background-scan service worker also caches Common Crawl index responses in the browser.</dd></div>
           <div><dt className="font-semibold text-zinc-100">Storage choice</dt><dd>After you select “Allow browser storage,” a small versioned entry in local storage records that choice so the app can remember it. This record contains the consent version and grant status, not your search history. “No thanks” is remembered only in memory for the current page session.</dd></div>

@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crawlback · Scan results (mockup)</title>
+<link rel="stylesheet" href="mockup.css">
+</head>
+<body>
+
+<header class="topbar">
+  <a class="wordmark" href="landing.html">crawl<i>back</i></a>
+  <nav aria-label="App">
+    <a href="search.html" aria-current="page">Scan</a>
+    <a href="history.html">History</a>
+    <a href="settings.html">Settings</a>
+  </nav>
+  <span class="spacer"></span>
+  <span class="meta">Scan #0412, started 21:14 UTC</span>
+  <a class="btn small" href="landing.html">New scan</a>
+</header>
+
+<main class="wrap">
+  <section class="scan-head">
+    <div class="scan-title">
+      <div><h1>whitehouse.gov/administration</h1><p class="scan-sub">Exact URL match across the full archive.</p></div>
+      <div class="scan-actions">
+        <button class="btn ghost small">Pause</button>
+        <button class="btn ghost small">Export ▾</button>
+      </div>
+    </div>
+
+    <div class="tally">
+      <div><span class="label">Collections</span><div class="v">71<small> / 112</small></div></div>
+      <div><span class="label">Snapshots</span><div class="v red">148</div></div>
+      <div><span class="label">Failed</span><div class="v">3</div></div>
+      <div><span class="label">Elapsed</span><div class="v">6:42</div></div>
+      <div>
+        <span class="label">Progress, one cell per crawl</span>
+        <div class="coll-grid" data-collections="112" data-done="71"></div>
+        <div class="coll-legend">
+          <span><i class="done"></i>scanned</span>
+          <span><i class="hit"></i>has captures</span>
+          <span><i class="fail"></i>failed</span>
+          <span><i></i>queued</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="notice">
+      <span class="tag warn">Robots.txt</span>
+      <p><b>CCBot is currently allowed</b> by whitehouse.gov/robots.txt. Not on the Common Crawl opt-out registry. Requests are spaced 1.2 s apart to stay under Common Crawl's rate limit.</p>
+    </div>
+  </section>
+
+  <section class="timeline" aria-label="Captures over time">
+    <div class="timeline-head">
+      <span class="label">Captures over time, drag to narrow</span>
+      <span class="label" style="color:var(--accent)">Selected: Jan 2017 to Dec 2020, 64 captures</span>
+    </div>
+    <div class="timeline-bars" data-bars="180" data-sel="78-126">
+      <div class="brush" style="left:43.3%; width:27%"></div>
+    </div>
+    <div class="timeline-years"><span>2008</span><span>2011</span><span>2014</span><span>2017</span><span>2020</span><span>2023</span><span>2026</span></div>
+  </section>
+
+  <section class="results">
+    <aside class="filters" aria-label="Filters">
+      <div class="group">
+        <span class="label">Filter URL</span>
+        <input class="field" placeholder="contains…">
+      </div>
+      <div class="group">
+        <span class="label">Status</span>
+        <label class="check"><span><input type="checkbox" checked>200 OK</span><span class="c">131</span></label>
+        <label class="check"><span><input type="checkbox" checked>3xx redirect</span><span class="c">17</span></label>
+      </div>
+      <div class="group">
+        <span class="label">Year</span>
+        <label class="check"><span><input type="checkbox" checked>2020</span><span class="c">22</span></label>
+        <label class="check"><span><input type="checkbox" checked>2019</span><span class="c">14</span></label>
+        <label class="check"><span><input type="checkbox" checked>2018</span><span class="c">17</span></label>
+        <label class="check"><span><input type="checkbox" checked>2017</span><span class="c">11</span></label>
+        <label class="check"><span><input type="checkbox">Earlier</span><span class="c">84</span></label>
+      </div>
+      <div class="group">
+        <span class="label">MIME</span>
+        <select class="field"><option>text/html</option><option>Any</option></select>
+      </div>
+      <div class="group">
+        <span class="label">Collection</span>
+        <select class="field"><option>All collections</option></select>
+      </div>
+      <label class="check"><span><input type="checkbox" checked>Only show content changes</span></label>
+    </aside>
+
+    <div>
+      <div class="res-bar">
+        <p><b style="color:var(--ink)">64</b> of 148 captures, newest first</p>
+        <div class="seg" role="group" aria-label="View mode">
+          <button aria-pressed="true">Ledger</button>
+          <button aria-pressed="false">Calendar</button>
+          <button aria-pressed="false">Grouped</button>
+        </div>
+      </div>
+
+      <div class="month">
+        <div class="month-label"><b>Nov</b><span>2020, 4 captures</span></div>
+        <ul class="cap-list">
+          <li class="cap changed"><span class="when">28 Nov<small>04:12 UTC</small></span><span class="u"><b>whitehouse.gov</b>/administration/</span><span class="tag ok">200</span><span class="coll">CC-MAIN-2020-50</span><a class="btn small ghost open" href="viewer.html">Open</a></li>
+          <li class="cap"><span class="when">24 Nov<small>17:40 UTC</small></span><span class="u"><b>whitehouse.gov</b>/administration</span><span class="tag warn">301</span><span class="coll">CC-MAIN-2020-50</span><a class="btn small ghost open" href="viewer.html">Open</a></li>
+          <li class="cap"><span class="when">19 Nov<small>09:03 UTC</small></span><span class="u"><b>whitehouse.gov</b>/administration/</span><span class="tag ok">200</span><span class="coll">CC-MAIN-2020-50</span><a class="btn small ghost open" href="viewer.html">Open</a></li>
+          <li class="cap"><span class="when">02 Nov<small>22:51 UTC</small></span><span class="u"><b>whitehouse.gov</b>/administration/?utm_source=tw</span><span class="tag ok">200</span><span class="coll">CC-MAIN-2020-45</span><a class="btn small ghost open" href="viewer.html">Open</a></li>
+        </ul>
+      </div>
+
+      <div class="month">
+        <div class="month-label"><b>Sep</b><span>2020, 3 captures</span></div>
+        <ul class="cap-list">
+          <li class="cap changed"><span class="when">30 Sep<small>11:27 UTC</small></span><span class="u"><b>whitehouse.gov</b>/administration/</span><span class="tag ok">200</span><span class="coll">CC-MAIN-2020-40</span><a class="btn small ghost open" href="viewer.html">Open</a></li>
+          <li class="cap"><span class="when">21 Sep<small>06:15 UTC</small></span><span class="u"><b>whitehouse.gov</b>/administration/</span><span class="tag ok">200</span><span class="coll">CC-MAIN-2020-40</span><a class="btn small ghost open" href="viewer.html">Open</a></li>
+          <li class="cap"><span class="when">08 Sep<small>14:58 UTC</small></span><span class="u"><b>whitehouse.gov</b>/administration/</span><span class="tag bad">15.8 MB, manual</span><span class="coll">CC-MAIN-2020-40</span><a class="btn small ghost open" href="viewer.html">Load</a></li>
+        </ul>
+      </div>
+
+      <div class="month">
+        <div class="month-label"><b>Jul</b><span>2020, 2 captures</span></div>
+        <ul class="cap-list">
+          <li class="cap"><span class="when">14 Jul<small>03:31 UTC</small></span><span class="u"><b>whitehouse.gov</b>/administration/</span><span class="tag ok">200</span><span class="coll">CC-MAIN-2020-29</span><a class="btn small ghost open" href="viewer.html">Open</a></li>
+          <li class="cap changed"><span class="when">05 Jul<small>19:09 UTC</small></span><span class="u"><b>whitehouse.gov</b>/administration/</span><span class="tag ok">200</span><span class="coll">CC-MAIN-2020-29</span><a class="btn small ghost open" href="viewer.html">Open</a></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="footer">
+  <div class="wrap">
+    <a class="wordmark" href="landing.html">crawl<i>back</i></a>
+    <nav aria-label="Website information"><a href="#">Privacy</a><a href="#">Terms</a><a href="#">Legal notice</a><a href="#">GitHub</a></nav>
+  </div>
+</footer>
+
+<script src="mockup.js"></script>
+</body>
+</html>

@@ -32,8 +32,9 @@ there is no server-side account data or analytics integration.
 API routes retain per-client IP request limits and non-cacheable responses.
 These in-memory limits apply per server instance, not globally across deployments.
 
-Client identity for those limits comes from `x-real-ip` (set by Vercel), then the
-first entry of `x-forwarded-for`, and otherwise a shared `local` bucket.
+On Vercel (`VERCEL=1`), client identity for those limits comes from `x-real-ip`
+(set by the platform), then the first entry of `x-forwarded-for`. Other hosts
+use a shared `local` bucket rather than trusting caller-supplied proxy headers.
 `cf-connecting-ip` is **not** trusted by default: Vercel neither sets nor overwrites
 it, so any client can rotate it per request to escape the limit. Set
 `TRUST_CLOUDFLARE_HEADERS=1` only when the deployment is actually behind Cloudflare

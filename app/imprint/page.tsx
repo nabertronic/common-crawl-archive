@@ -17,8 +17,8 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false, noarchive: true, nosnippet: true, noimageindex: true }
 };
 
-const sectionClass = "py-8 sm:py-9";
-const headingClass = "text-lg font-semibold leading-snug text-zinc-50 sm:text-xl";
+const sectionClass = "py-8 sm:py-9 ledger:space-y-5";
+const headingClass = "text-lg font-semibold leading-snug text-zinc-50 sm:text-xl ledger:font-serif ledger:font-normal ledger:text-[1.75rem] ledger:leading-[1.1] ledger:tracking-[-0.01em] ledger:text-balance ledger:sm:text-[40px]";
 const textClass = "mt-3 max-w-2xl text-base leading-7 text-zinc-300";
 
 export default function ImprintPage() {
@@ -36,7 +36,7 @@ export default function ImprintPage() {
             width="111"
             height="66"
             alt="Postal address: c/o GAM, Pappelallee 64, 10437 Berlin"
-            className="mt-3 block h-auto w-[111px] max-w-full"
+            className="mt-3 block h-auto w-[111px] max-w-full ledger:opacity-85 ledger:invert"
           />
           <p className="mt-2 text-base text-zinc-200">Germany</p>
         </div>
@@ -45,7 +45,7 @@ export default function ImprintPage() {
       <section className={sectionClass} aria-labelledby="contact-heading">
         <h2 id="contact-heading" className={headingClass}>Contact</h2>
         <p className={textClass}>
-          Email: <a className="text-amber-300 underline decoration-amber-300/40 underline-offset-4 hover:text-amber-200" href="mailto:nabert@pm.me">nabert@pm.me</a>
+          Email: <a className="text-amber-300 underline decoration-amber-300/40 underline-offset-4 hover:text-amber-200 ledger:text-zinc-50 ledger:decoration-amber-300 ledger:decoration-[1.5px] ledger:hover:text-amber-300" href="mailto:nabert@pm.me">nabert@pm.me</a>
         </p>
       </section>
     </LegalPage>

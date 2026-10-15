@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crawlback · Redesign mockups</title>
+<link rel="stylesheet" href="mockup.css">
+</head>
+<body>
+
+<header class="topbar">
+  <a class="wordmark" href="landing.html">crawl<i>back</i></a>
+  <span class="spacer"></span>
+  <span class="meta">Draft 1, 14 Oct 2026</span>
+</header>
+
+<main class="narrow" style="padding-top:64px">
+  <h1 class="serif" style="font-size:clamp(48px,7vw,86px);line-height:.95;letter-spacing:-.02em">The evidence ledger</h1>
+  <p style="margin-top:22px;font-size:18px;color:var(--ink-2);max-width:60ch">
+    Crawlback finds and checks archived copies of web pages. The look is neutral: white cards on a light
+    grey page, near-black text, and one red accent for the element that matters most on each screen.
+    Every capture is shown with its date and provenance trail.
+  </p>
+
+  <div class="swatches">
+    <div><i style="background:var(--paper)"></i><span>Paper #f7f7f8</span></div>
+    <div><i style="background:var(--card)"></i><span>Card #ffffff</span></div>
+    <div><i style="background:var(--ink)"></i><span>Ink #141416</span></div>
+    <div><i style="background:var(--ink-2)"></i><span>Ink 2 #45454d</span></div>
+    <div><i style="background:var(--accent)"></i><span>Accent #c4321a</span></div>
+  </div>
+  <p style="margin-top:18px;font-size:14.5px;color:var(--ink-2)">
+    <b>Type:</b> Instrument Serif for headlines and numbers. Atkinson Hyperlegible Next for body copy and labels.
+    Atkinson Hyperlegible Mono for URLs, dates and data. The Atkinson fonts stay because Il1 and O0 are easy to tell apart in URLs.
+  </p>
+
+  <ol class="toc">
+    <li><a href="landing.html"><div><h2>Landing</h2><p>Plain serif headline with the search form directly below it. Then three steps, the reasons to use Crawlback, the Common Crawl source, and the FAQ.</p></div><span class="go">Open</span></a></li>
+    <li><a href="search.html"><div><h2>Scan results</h2><p>Scan progress is a grid with one cell per Common Crawl collection, so you can see the slow scan moving. A timeline with a selectable range, filter rail, and captures grouped by month in a ledger.</p></div><span class="go">Open</span></a></li>
+    <li><a href="viewer.html"><div><h2>Capture viewer</h2><p>The sandboxed page sits in a framed panel under a scrubber that shows every capture. On the side, a capture record with digest, WARC location, and a ready-to-copy citation. A scrubber moves between captures.</p></div><span class="go">Open</span></a></li>
+    <li><a href="history.html"><div><h2>History</h2><p>A table of past scans, each with a sparkline showing how its captures spread over time.</p></div><span class="go">Open</span></a></li>
+    <li><a href="settings.html"><div><h2>Settings</h2><p>Quiet form rows, and a danger zone set in the accent red.</p></div><span class="go">Open</span></a></li>
+  </ol>
+</main>
+
+<script src="mockup.js"></script>
+</body>
+</html>

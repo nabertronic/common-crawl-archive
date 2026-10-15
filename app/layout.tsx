@@ -1,6 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { headers } from "next/headers";
-import { Atkinson_Hyperlegible_Mono, Atkinson_Hyperlegible_Next } from "next/font/google";
+import { Atkinson_Hyperlegible_Mono, Atkinson_Hyperlegible_Next, Instrument_Serif } from "next/font/google";
 import "./globals.css";
 import { APP_NAME } from "@/lib/app-meta";
 import { DevTools } from "@/components/dev/dev-tools";
@@ -13,10 +13,12 @@ import { StorageConsentGate } from "@/components/storage-consent-gate";
 // readers: unambiguous letterforms (Il1, O0) matter when reading URLs and dates.
 const sans = Atkinson_Hyperlegible_Next({ subsets: ["latin"], variable: "--font-sans-family", display: "swap" });
 const mono = Atkinson_Hyperlegible_Mono({ subsets: ["latin"], variable: "--font-mono-family", display: "swap" });
+// Display serif for headlines and large numbers).
+const serif = Instrument_Serif({ subsets: ["latin"], weight: "400", style: ["normal", "italic"], variable: "--font-serif-family", display: "swap" });
 
 export const viewport: Viewport = {
-  themeColor: "#0a0a0c",
-  colorScheme: "dark",
+  themeColor: "#f3f1ec",
+  colorScheme: "light",
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover"
@@ -37,7 +39,7 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
   return (
     // data-scroll-behavior tells Next that <html> uses CSS smooth scrolling, so it
     // disables that smoothing during route transitions (new pages start at the top).
-    <html lang="en" className={`${sans.variable} ${mono.variable}`} data-scroll-behavior="smooth" suppressHydrationWarning>
+    <html lang="en" className={`${sans.variable} ${mono.variable} ${serif.variable}`} data-theme="ledger" style={{ colorScheme: "light" }} data-scroll-behavior="smooth">
       <body>
         <StorageConsentGate>{children}</StorageConsentGate>
         <SiteFooter />

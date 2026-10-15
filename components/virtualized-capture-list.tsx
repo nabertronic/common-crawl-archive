@@ -15,11 +15,14 @@ import type { CommonCrawlCapture, ResultsBackContext } from "@/lib/common-crawl"
 export function VirtualizedCaptureList({
   captures,
   backContext,
-  scanId
+  scanId,
+  changedKeys
 }: {
   captures: CommonCrawlCapture[];
   backContext: ResultsBackContext;
   scanId?: string;
+  /** captureKeys whose content changed since the previous capture of the URL. */
+  changedKeys?: Set<string>;
 }) {
   const listRef = useRef<HTMLDivElement | null>(null);
 
@@ -51,7 +54,12 @@ export function VirtualizedCaptureList({
               transform: `translateY(${virtualRow.start - virtualizer.options.scrollMargin}px)`
             }}
           >
-            <CaptureRow capture={capture} backContext={backContext} scanId={scanId} />
+            <CaptureRow
+              capture={capture}
+              backContext={backContext}
+              scanId={scanId}
+              changed={changedKeys?.has(captureKey(capture)) ?? false}
+            />
           </div>
         );
       })}

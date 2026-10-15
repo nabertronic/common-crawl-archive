@@ -3,7 +3,7 @@ import { useEffect } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const navigation = vi.hoisted(() => ({ pathname: "/history", push: vi.fn() }));
-vi.mock("next/navigation", () => ({ usePathname: () => navigation.pathname, useRouter: () => ({ push: navigation.push }) }));
+vi.mock("next/navigation", () => ({ usePathname: () => navigation.pathname, useRouter: () => ({ push: navigation.push }), useSearchParams: () => new URLSearchParams(window.location.search) }));
 
 import { StorageConsentGate } from "@/components/storage-consent-gate";
 import { WebsitePreferences } from "@/components/website-preferences";
@@ -13,6 +13,7 @@ describe("StorageConsentGate", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     navigation.pathname = "/history";
+    window.history.replaceState({}, "", "/");
     navigation.push.mockReset();
     const values = new Map<string, string>();
     Object.defineProperty(window, "localStorage", { configurable: true, value: {
@@ -34,6 +35,21 @@ describe("StorageConsentGate", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Allow browser storage" }));
     expect(await screen.findByText("Private app feature")).toBeInTheDocument();
     expect(mounted).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    "/search?url=https%3A%2F%2Fexample.org%2Farticle&match=exact&scope=all",
+    "/search?url=https%3A%2F%2Fexample.org%2Farticle&match=host&scope=all&source=pastpage",
+    "/search?url=https%3A%2F%2Fexample.org%2Farticle&match=exact&scope=recent&source=pastpage",
+    "/search?match=exact&scope=all&source=pastpage",
+    "/search?url=example.org&match=exact&scope=all&source=other",
+    "/search?url=example.org&match=exact&scope=all&source=pastpage&history=1",
+    "/?url=example.org&match=exact&scope=all&source=pastpage"
+  ])("keeps other entries consent-gated: %s", (href) => {
+    window.history.replaceState({}, "", href);
+    navigation.pathname = window.location.pathname;
+    render(<StorageConsentGate><p>Search contents</p></StorageConsentGate>);
+    expect(screen.queryByText("Search contents")).not.toBeInTheDocument();
   });
 
   it("prompts again when blocked history is requested after No thanks", async () => {
@@ -82,7 +98,7 @@ describe("StorageConsentGate", () => {
     navigation.pathname = "/";
     render(<><StorageConsentGate><p>Storage app contents</p></StorageConsentGate><WebsitePreferences /></>);
     expect(screen.getByRole("heading", { name: /crawlback/i })).toBeInTheDocument();
-    expect(screen.getByText("Find archived versions of web pages.")).toBeInTheDocument();
+    expect(screen.getByText((_, el) => el?.tagName === "P" && el.textContent === "Find archived copies of pages the web forgot.")).toBeInTheDocument();
     expect(screen.getByLabelText("URL to search")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /start scan/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Advanced search" })).toBeInTheDocument();

@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crawlback · Landing (mockup)</title>
+<link rel="stylesheet" href="mockup.css">
+</head>
+<body>
+
+<header class="topbar">
+  <a class="wordmark" href="landing.html">crawl<i>back</i></a>
+  <nav aria-label="Sections">
+    <a href="#how" aria-current="true">How it works</a>
+    <a href="#why">Why Crawlback</a>
+    <a href="#source">Data source</a>
+    <a href="#faq">FAQ</a>
+  </nav>
+  <span class="spacer"></span>
+  <a class="btn ghost small" href="history.html">History</a>
+  <a class="btn ghost small" href="settings.html">Settings</a>
+</header>
+
+<main>
+  <section class="hero wrap">
+    <div class="hero-grid">
+      <div>
+        <h1>Find archived versions of web pages.</h1>
+      </div>
+      <p class="hero-aside">
+        Searches <strong>Common Crawl</strong>, an open web archive since 2008, for dated captures of deleted or changed pages.
+      </p>
+    </div>
+
+    <form class="index-card" onsubmit="location.href='search.html'; return false;">
+      <div class="search-row">
+        <input class="url" aria-label="URL to search" placeholder="whitehouse.gov/administration" value="">
+        <button class="btn" type="submit">Start scan</button>
+      </div>
+      <div class="card-options">
+        <span class="label">Match</span>
+        <div class="seg" role="group" aria-label="Match type">
+          <button type="button" aria-pressed="true">Exact URL</button>
+          <button type="button" aria-pressed="false">Host</button>
+          <button type="button" aria-pressed="false">Domain</button>
+        </div>
+        <span class="label">Window</span>
+        <div class="seg" role="group" aria-label="Scope">
+          <button type="button" aria-pressed="true">Full archive</button>
+          <button type="button" aria-pressed="false">Recent</button>
+          <button type="button" aria-pressed="false">Custom…</button>
+        </div>
+        <span class="hint">Enter to scan, 112 collections</span>
+      </div>
+    </form>
+
+  </section>
+
+  <section id="how" class="section wrap">
+    <div class="section-head">
+      <h2>Three steps to a lost page</h2>
+    </div>
+    <ol class="steps">
+      <li>
+        <h3>Enter a URL</h3>
+        <p>Paste a page address to search for that page, or a site address to search more broadly.</p>
+      </li>
+      <li>
+        <h3>Scan the archive</h3>
+        <p>Crawlback checks Common Crawl's index for saved versions, with their capture dates. An empty result does not prove a page never existed.</p>
+      </li>
+      <li>
+        <h3>View snapshots</h3>
+        <p>Open matching snapshots, check them against other sources, and save the results if you want.</p>
+      </li>
+    </ol>
+  </section>
+
+  <section id="why" class="section wrap">
+    <div class="section-head">
+      <h2>An archive that stays out of your way</h2>
+    </div>
+    <ul class="ledger">
+      <li><h3>Alternative archive</h3><p>Finds snapshots the Wayback Machine can miss, including moments it never captured.</p></li>
+      <li><h3>Local-first</h3><p>Searches run from your browser, and your history stays there with no server-side storage. You can wipe everything from Settings.</p></li>
+      <li><h3>Sandboxed viewing</h3><p>Archived HTML renders in a sandbox. No archived scripts execute, nothing phones home.</p></li>
+      <li><h3>Portable results</h3><p>Export capture lists as CSV or JSON, or download raw HTML as ZIP or WARC to keep.</p></li>
+    </ul>
+  </section>
+
+  <section id="source" class="section wrap">
+    <div class="section-head">
+      <h2>Built on Common Crawl</h2>
+    </div>
+    <div class="source-block">
+      <div>
+        <p class="lede">An independent nonprofit has been crawling the web since 2008 and publishing everything as open data.</p>
+        <p style="margin-top:18px;color:var(--ink-2)">It collects samples of the web, so it does not save every page or capture every change. Crawlback uses those crawls to find individual pages inside the archive. Results are captured HTML, not live replays.</p>
+        <div class="links">
+          <a href="https://commoncrawl.org">commoncrawl.org</a>
+          <a href="https://www.commoncrawl.org/faq">Common Crawl FAQ</a>
+          <a href="https://www.commoncrawl.org/terms-of-use">Terms of use</a>
+        </div>
+      </div>
+      <dl class="fact-sheet">
+        <div><dt>Since</dt><dd>2008</dd></div>
+        <div><dt>Pages</dt><dd>300 B+</dd></div>
+        <div><dt>Collections</dt><dd>112</dd></div>
+        <div><dt>Format</dt><dd>WARC / CDX</dd></div>
+        <div><dt>Licence</dt><dd>Open data</dd></div>
+      </dl>
+    </div>
+  </section>
+
+  <section id="faq" class="section wrap faq">
+    <div class="section-head">
+      <h2>Frequently asked</h2>
+    </div>
+    <details open>
+      <summary><span class="q">How is this different from the Wayback Machine?</span><span class="plus">+</span></summary>
+      <div class="a"><p>The Wayback Machine archives on demand and replays full pages. Crawlback searches Common Crawl, a separate archive built by broad crawls since 2008. The two overlap only partially. Common Crawl often holds captures the Wayback Machine is missing, which is exactly when Crawlback is useful.</p></div>
+    </details>
+    <details>
+      <summary><span class="q">Why can a scan take so long?</span><span class="plus">+</span></summary>
+      <div class="a"><p>Common Crawl limits request rates, and everyone on the same network can share one public IP address and its limit. Crawlback slows down on purpose to avoid getting your search blocked, so some scans take 20 minutes or more.</p></div>
+    </details>
+    <details>
+      <summary><span class="q">Why is the preview incomplete?</span><span class="plus">+</span></summary>
+      <div class="a"><p>Common Crawl mostly stores the captured HTML, not the images, stylesheets, and scripts that were loaded with it. Crawlback shows the captured HTML in a sandbox and loads nothing from the original site, so opening a capture does not reveal your visit.</p></div>
+    </details>
+    <details>
+      <summary><span class="q">How should I verify a capture before publishing?</span><span class="plus">+</span></summary>
+      <div class="a"><p>Keep the exact URL and the capture date. The capture date is when Common Crawl saved the page, not when it was first published. Compare the capture with other captures and independent sources.</p></div>
+    </details>
+    <details>
+      <summary><span class="q">Does a scan hit the target website?</span><span class="plus">+</span></summary>
+      <div class="a"><p>Almost never. Archive searches go straight to Common Crawl. Crawlback's server makes one request to the target, a robots.txt check, which you can turn off in Settings.</p></div>
+    </details>
+  </section>
+</main>
+
+<footer class="footer">
+  <div class="wrap">
+    <a class="wordmark" href="landing.html">crawl<i>back</i></a>
+    <nav aria-label="Website information">
+      <a href="#how">How it works</a><a href="#faq">FAQ</a><a href="#">Privacy</a><a href="#">Terms</a><a href="#">Legal notice</a><a href="#">Website settings</a><a href="#">GitHub</a>
+    </nav>
+  </div>
+</footer>
+
+<script src="mockup.js"></script>
+</body>
+</html>

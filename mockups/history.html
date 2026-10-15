@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crawlback · History (mockup)</title>
+<link rel="stylesheet" href="mockup.css">
+</head>
+<body>
+
+<header class="topbar">
+  <a class="wordmark" href="landing.html">crawl<i>back</i></a>
+  <nav aria-label="App">
+    <a href="search.html">Scan</a>
+    <a href="history.html" aria-current="page">History</a>
+    <a href="settings.html">Settings</a>
+  </nav>
+  <span class="spacer"></span>
+  <a class="btn small" href="landing.html">New scan</a>
+</header>
+
+<main class="wrap">
+  <div class="page-head">
+    <div>
+      <h1>History</h1>
+      <p>Every scan you ran, with its captures. Everything is stored in this browser, and nothing here leaves your device.</p>
+    </div>
+    <div class="scan-actions">
+      <button class="btn ghost small">Export CSV</button>
+      <button class="btn ghost small">Export JSON</button>
+    </div>
+  </div>
+
+  <div class="toolbar">
+    <input class="field search" placeholder="Search URLs or cached HTML…">
+    <select class="field"><option>Any scope</option><option>Full</option><option>Recent</option><option>Custom</option></select>
+    <select class="field"><option>Any match</option><option>Exact</option><option>Host</option><option>Domain</option></select>
+    <select class="field"><option>Any status</option><option>Complete</option><option>Partial</option></select>
+  </div>
+
+  <table class="htable">
+    <thead>
+      <tr>
+        <th style="width:28px"><input type="checkbox" aria-label="Select all"></th>
+        <th>Target</th>
+        <th class="hide-sm">Status</th>
+        <th class="hide-sm">Spread, 2008 to 2026</th>
+        <th>Snapshots</th>
+        <th class="hide-sm">Updated</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><input type="checkbox" aria-label="Select"></td>
+        <td class="u">whitehouse.gov/administration<small>exact, full archive</small></td>
+        <td class="hide-sm"><span class="tag warn"><i class="dot"></i>71 / 112</span></td>
+        <td class="hide-sm"><div class="spark" data-spark="0.25"></div></td>
+        <td class="num">148</td>
+        <td class="hide-sm when">today, 21:14</td>
+        <td><div class="row-actions"><a class="btn small" href="search.html">Resume</a></div></td>
+      </tr>
+      <tr>
+        <td><input type="checkbox" aria-label="Select"></td>
+        <td class="u">ministry-example.gov.uk<small>host, recent</small></td>
+        <td class="hide-sm"><span class="tag ok"><i class="dot"></i>complete</span></td>
+        <td class="hide-sm"><div class="spark" data-spark="0.7"></div></td>
+        <td class="num">23</td>
+        <td class="hide-sm when">12 Oct, 09:40</td>
+        <td><div class="row-actions"><a class="btn small ghost" href="search.html">Open</a></div></td>
+      </tr>
+      <tr>
+        <td><input type="checkbox" aria-label="Select"></td>
+        <td class="u">acme-holdings.com/press/2019-statement<small>exact, full archive, 6 cached</small></td>
+        <td class="hide-sm"><span class="tag ok"><i class="dot"></i>complete</span></td>
+        <td class="hide-sm"><div class="spark" data-spark="0.85"></div></td>
+        <td class="num">7</td>
+        <td class="hide-sm when">03 Oct, 16:02</td>
+        <td><div class="row-actions"><a class="btn small ghost" href="search.html">Open</a></div></td>
+      </tr>
+      <tr>
+        <td><input type="checkbox" aria-label="Select"></td>
+        <td class="u">blocked-site.example<small>domain, full archive</small></td>
+        <td class="hide-sm"><span class="tag bad"><i class="dot"></i>opted out</span></td>
+        <td class="hide-sm"><div class="spark" data-spark="0.95"></div></td>
+        <td class="num">0</td>
+        <td class="hide-sm when">28 Sep, 11:17</td>
+        <td><div class="row-actions"><button class="btn small ghost">Retry</button></div></td>
+      </tr>
+      <tr>
+        <td><input type="checkbox" aria-label="Select"></td>
+        <td class="u">news.example.org/article/48213<small>exact, custom 2015 to 2018</small></td>
+        <td class="hide-sm"><span class="tag ok"><i class="dot"></i>complete</span></td>
+        <td class="hide-sm"><div class="spark" data-spark="0.6"></div></td>
+        <td class="num">31</td>
+        <td class="hide-sm when">17 Sep, 20:45</td>
+        <td><div class="row-actions"><a class="btn small ghost" href="search.html">Open</a></div></td>
+      </tr>
+    </tbody>
+  </table>
+</main>
+
+<footer class="footer">
+  <div class="wrap">
+    <a class="wordmark" href="landing.html">crawl<i>back</i></a>
+    <nav aria-label="Website information"><a href="#">Privacy</a><a href="#">Terms</a><a href="#">Legal notice</a><a href="#">GitHub</a></nav>
+  </div>
+</footer>
+
+<script src="mockup.js"></script>
+</body>
+</html>

@@ -1,9 +1,15 @@
 @import "tailwindcss";
+@import "./theme-ledger.css";
+
+/* `ledger:` applies a utility only under the experimental theme (see theme-ledger.css). */
+@custom-variant ledger (&:where([data-theme="ledger"], [data-theme="ledger"] *));
 
 @theme {
   /* Proportional face for reading, mono reserved for URLs, data and labels. */
   --font-sans: var(--font-sans-family), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: var(--font-mono-family), ui-monospace, "SFMono-Regular", Menlo, monospace;
+  /* Display serif, used by the experimental ledger theme via `ledger:font-serif`. */
+  --font-serif: var(--font-serif-family), "Iowan Old Style", Georgia, serif;
 
   /* Legibility floor: the smallest step is 12.5px, captions read at 13–14px. */
   --text-xs: 0.78125rem;
@@ -663,16 +669,14 @@ summary:active {
 
 /* Scroll-triggered reveal for below-fold landing sections. */
 .scroll-reveal {
-  opacity: 0;
-  transform: translateY(18px);
   transition:
     opacity 640ms cubic-bezier(0.2, 0.7, 0.2, 1),
     transform 640ms cubic-bezier(0.2, 0.7, 0.2, 1);
 }
 
-.scroll-reveal.is-visible {
-  opacity: 1;
-  transform: none;
+.scroll-reveal:not(.is-visible) {
+  opacity: 0;
+  transform: translateY(18px);
 }
 
 .landing-scroll-top {
@@ -796,7 +800,8 @@ html {
   .terminal-caret {
     animation: none;
   }
-  .scroll-reveal {
+  .scroll-reveal,
+  .scroll-reveal:not(.is-visible) {
     opacity: 1;
     transform: none;
     transition: none;
@@ -880,4 +885,10 @@ html {
     background: #0c0c0e;
     border-color: #71717a;
   }
+}
+
+/* The fixed back-to-top button sits in the bottom-right corner; at the end of
+   the page it would cover the last footer links, so reserve room under them. */
+body:has(.landing-scroll-top) footer {
+  padding-bottom: calc(3.25rem + 2 * max(clamp(1rem, 2.5vw, 1.75rem), env(safe-area-inset-bottom)));
 }

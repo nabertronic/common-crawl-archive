@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crawlback · Capture viewer (mockup)</title>
+<link rel="stylesheet" href="mockup.css">
+</head>
+<body>
+
+<header class="topbar">
+  <a class="wordmark" href="landing.html">crawl<i>back</i></a>
+  <a class="btn ghost small" href="search.html">Back to 148 captures</a>
+  <span class="spacer"></span>
+  <button class="btn ghost small">Prev</button>
+  <span class="meta">12 / 148</span>
+  <button class="btn ghost small">Next</button>
+</header>
+
+<main class="viewer">
+  <section class="viewer-main">
+    <div class="viewer-bar">
+      <span class="tag ok">200</span>
+      <span class="u">https://www.whitehouse.gov/administration/</span>
+      <div class="seg" role="group" aria-label="View">
+        <button aria-pressed="true">Rendered</button>
+        <button aria-pressed="false">Source</button>
+        <button aria-pressed="false">Diff vs prev</button>
+      </div>
+    </div>
+
+    <div class="scrubber">
+      <div class="scrubber-track" data-scrub="148" data-cur="95" aria-hidden="true"></div>
+      <div class="scrubber-meta"><span>Jun 2009</span><span style="color:var(--accent)">▲ 28 Nov 2020, 04:12 UTC</span><span>Aug 2026</span></div>
+    </div>
+
+    <div class="frame-wrap">
+      <article class="frame">
+        <div class="frame-label"><span>Sandboxed: scripts off, no external requests</span><span>text/html · 84.2 KB</span></div>
+        <div class="fake-page">
+          <div class="nav"><span>Home</span><span>Briefing Room</span><span>Issues</span><span>The Administration</span><span>Contact</span></div>
+          <h2>The Administration</h2>
+          <p>Meet the people who serve in the Executive Office of the President, the Cabinet, and the agencies that carry out the work of the federal government every day.</p>
+          <div class="missing">image not archived<br>(assets are not replayed)</div>
+          <p>The Cabinet includes the Vice President and the heads of 15 executive departments, the Secretaries of Agriculture, Commerce, Defense, Education, Energy, Health and Human Services, Homeland Security…</p>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <aside class="dossier" aria-label="Capture record">
+    <h2>Capture of 28 November 2020</h2>
+    <dl>
+      <div><dt>Captured (UTC)</dt><dd>2020-11-28T04:12:37Z</dd></div>
+      <div><dt>Original URL</dt><dd>https://www.whitehouse.gov/administration/</dd></div>
+      <div><dt>Collection</dt><dd>CC-MAIN-2020-50</dd></div>
+      <div><dt>Digest (SHA-1)</dt><dd>B3K7QZ2XWPJ4N6YH5R2V9TQ8LMC4DF1A</dd></div>
+      <div><dt>WARC</dt><dd>crawl-data/CC-MAIN-2020-50/segments/1606141195198.31/warc/…-00412.warc.gz</dd></div>
+      <div><dt>Offset and length</dt><dd>612 847 302 · 18 211</dd></div>
+    </dl>
+    <div class="actions">
+      <button class="btn">Download WARC record</button>
+      <button class="btn ghost">Save HTML</button>
+      <button class="btn ghost">Copy citation</button>
+    </div>
+    <div class="cite">“The Administration.” whitehouse.gov. Captured 28 Nov 2020 04:12 UTC by Common Crawl (CC-MAIN-2020-50). Retrieved via Crawlback, 14 Oct 2026.</div>
+    <p class="warnline">The capture date is when Common Crawl saved the page, not when it was published. Verify against other captures and sources.</p>
+  </aside>
+</main>
+
+<script src="mockup.js"></script>
+</body>
+</html>

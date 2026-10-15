@@ -1,0 +1,900 @@
+/* ============================================================
+   The "ledger" theme, the app's only theme: neutral light surfaces, near-black text,
+   one red accent. (Variable names still say "paper"/"stamp" from the first
+   draft; the values are warm paper tones now.)
+   Always active: <html data-theme="ledger"> is set in app/layout.tsx. Mockups: /mockups.
+
+   Layer 1 (this block) remaps Tailwind's colour tokens, so every existing
+   utility class follows the theme without touching markup:
+     zinc-950 (darkest surface)  -> white card
+     zinc-50  (brightest text)   -> near-black ink
+     amber-*  (accent)           -> red accent
+   Layer 2 is the `ledger:` variant in markup, for anything that should look
+   different rather than just be recoloured (type, borders, radii, layout).
+   Layer 3 (below) overrides hand-written classes from globals.css.
+   ============================================================ */
+
+[data-theme="ledger"] {
+  color-scheme: light;
+
+  --ledger-paper: #f3f1ec;
+  --ledger-paper-2: #e9e6df;
+  --ledger-card: #fbfaf7;
+  --ledger-ink: #141416;
+  --ledger-ink-2: #45454d;
+  --ledger-ink-3: #63636b;
+  --ledger-rule: #dedad2;
+  --ledger-rule-strong: #b3aea4;
+  --ledger-stamp: #c4321a;
+  --ledger-stamp-soft: rgba(196, 50, 26, 0.09);
+  --ledger-ok: #2f6b3a;
+  --ledger-warn: #9a6200;
+
+  --background: var(--ledger-paper);
+  --foreground: var(--ledger-ink);
+
+  /* Neutral scale, inverted: low numbers are text, high numbers are surfaces. */
+  --color-zinc-50: #141416;
+  --color-zinc-100: #1d1d21;
+  --color-zinc-200: #2b2b31;
+  --color-zinc-300: #45454d;
+  --color-zinc-400: #55555d;
+  --color-zinc-500: #63636b;
+  --color-zinc-600: #b3aea4;
+  --color-zinc-700: #cbc6bc;
+  --color-zinc-800: #dedad2;
+  --color-zinc-900: #e9e6df;
+  --color-zinc-950: #fbfaf7;
+  --color-white: #141416;
+  --color-black: #141416;
+
+  /* Accent: amber becomes red. Light steps are darker here because they are
+     used as text on a light background. */
+  --color-amber-50: #6b1b0e;
+  --color-amber-100: #7a1f10;
+  --color-amber-200: #962814;
+  --color-amber-300: #c4321a;
+  --color-amber-400: #c4321a;
+  --color-amber-500: #b02d17;
+  --color-amber-600: #962814;
+
+  /* Status colours, darkened for text on a light background. */
+  --color-red-100: #6b1b0e;
+  --color-red-200: #7a1f10;
+  --color-red-300: #962814;
+  --color-red-400: #b02d17;
+  --color-red-500: #c4321a;
+  --color-emerald-100: #1f4a27;
+  --color-emerald-200: #24552d;
+  --color-emerald-300: #2f6b3a;
+  --color-emerald-400: #2f6b3a;
+  --color-emerald-500: #2f6b3a;
+  --color-sky-200: #183a99;
+  --color-sky-300: #1d44b8;
+  --color-sky-400: #1d44b8;
+}
+
+/* Paper: a faint red wash top-left, a cool wash bottom-right, and grain. */
+[data-theme="ledger"] body {
+  background-color: var(--ledger-paper);
+  background-image:
+    radial-gradient(ellipse 60% 45% at 0% 0%, rgba(196, 50, 26, 0.07), transparent 70%),
+    radial-gradient(ellipse 50% 40% at 100% 100%, rgba(40, 60, 90, 0.05), transparent 70%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.055'/%3E%3C/svg%3E");
+  /* Resets the classic body's 48px grid sizing, which would tile the washes. */
+  background-size: auto, auto, 180px 180px;
+  background-repeat: no-repeat, no-repeat, repeat;
+  background-attachment: fixed;
+}
+
+[data-theme="ledger"] ::selection {
+  background: rgba(196, 50, 26, 0.18);
+}
+
+/* ---------- surfaces ---------- */
+
+[data-theme="ledger"] .archive-panel {
+  border: 1px solid var(--ledger-rule-strong);
+  background: var(--ledger-card);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+[data-theme="ledger"] .thin-scrollbar {
+  scrollbar-color: var(--ledger-rule-strong) transparent;
+}
+
+[data-theme="ledger"] .menu-popover {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: var(--ledger-card);
+  border: 1px solid var(--ledger-rule);
+  border-radius: 4px;
+  padding: 8px;
+  transform-origin: top right;
+  box-shadow: 0 1px 0 rgba(20, 20, 22, 0.04), 0 18px 40px -12px rgba(20, 20, 22, 0.22);
+  animation: ledger-menu-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes ledger-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-theme="ledger"] .menu-popover {
+    animation: none;
+  }
+}
+
+/* ---------- landing atmosphere: no phosphor glow on paper ---------- */
+
+[data-theme="ledger"] .landing-atmosphere::before,
+[data-theme="ledger"] .landing-scanlines,
+[data-theme="ledger"] .landing-grain,
+[data-theme="ledger"] .landing-vignette {
+  display: none;
+}
+
+/* URL field: card surface, hairline, ink on focus with a soft red ring. */
+[data-theme="ledger"] .terminal-input {
+  border: 1px solid var(--ledger-rule-strong);
+  background: var(--ledger-card);
+  color: var(--ledger-ink);
+}
+
+[data-theme="ledger"] .terminal-input:focus {
+  outline: none;
+  border-color: var(--ledger-ink);
+  box-shadow: 0 0 0 3px rgba(196, 50, 26, 0.12);
+}
+
+/* Primary action (Start scan): solid ink, red on hover, pressed feedback. */
+[data-theme="ledger"] .ledger-start-button {
+  border: 0;
+  border-radius: 3px;
+  background: var(--ledger-ink);
+  color: var(--ledger-card);
+  font-family: var(--font-sans);
+  font-weight: 600;
+  box-shadow: none;
+  transition: background-color 160ms ease, opacity 160ms ease;
+}
+
+[data-theme="ledger"] .ledger-start-button:not(:disabled):hover {
+  background: var(--ledger-stamp);
+  color: var(--ledger-card);
+}
+
+[data-theme="ledger"] .ledger-start-button:not(:disabled):active {
+  transform: scale(0.98);
+  transition-duration: 0ms;
+}
+
+[data-theme="ledger"] .ledger-start-button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  pointer-events: auto;
+  transform: none;
+}
+
+[data-theme="ledger"] .ledger-start-arrow {
+  display: inline-block;
+  transition: transform 160ms ease;
+}
+
+[data-theme="ledger"] .ledger-start-button:not(:disabled):hover .ledger-start-arrow {
+  transform: translateX(2px);
+}
+
+[data-theme="ledger"] .ledger-start-button:focus-visible {
+  outline: 2px solid var(--ledger-stamp);
+  outline-offset: 2px;
+}
+
+[data-theme="ledger"] .terminal-caret {
+  box-shadow: none;
+}
+
+/* Hero decoration (components/ledger/hero-stamp.tsx): static red and cool
+   radial glows behind the first viewport. Fills the hero box, so it scrolls away.
+   Deliberately not animated: drifting glows made the hero feel restless. */
+[data-theme="ledger"] .ledger-hero-stamp__glow {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 600px;
+  height: 600px;
+  margin: -300px 0 0 -300px;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(196, 50, 26, 0.1), rgba(196, 50, 26, 0) 100%);
+}
+
+[data-theme="ledger"] .ledger-hero-stamp__cool-glow {
+  position: absolute;
+  right: 4%;
+  top: 54%;
+  width: 420px;
+  height: 420px;
+  margin: -210px -210px 0 0;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(40, 60, 90, 0.06), rgba(40, 60, 90, 0) 100%);
+}
+
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  [data-theme="ledger"] .ledger-hero-stamp__glow,
+  [data-theme="ledger"] .ledger-hero-stamp__cool-glow {
+    display: none;
+  }
+}
+
+[data-theme="ledger"] .landing-glow-card::before {
+  display: none;
+}
+
+[data-theme="ledger"] .landing-glow-card:hover {
+  border-color: var(--ledger-ink);
+  box-shadow: none;
+}
+
+[data-theme="ledger"] .landing-mini-header {
+  top: 0;
+  right: 0;
+  left: 0;
+  width: 100%;
+  min-height: 3.75rem;
+  box-sizing: border-box;
+  padding-inline: max(1.25rem, calc((100vw - 72rem) / 2 + 2.5rem));
+  gap: 0.5rem;
+  border: 0;
+  border-bottom: 1px solid var(--ledger-rule);
+  border-radius: 0;
+  background: color-mix(in srgb, var(--ledger-paper) 85%, transparent);
+  box-shadow: none;
+  transform: translateY(-0.75rem);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+}
+
+[data-theme="ledger"] .landing-mini-header.is-visible {
+  transform: translateY(0);
+}
+
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  [data-theme="ledger"] .landing-mini-header {
+    background: var(--ledger-paper);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
+[data-theme="ledger"] .landing-mini-header__brand {
+  color: var(--ledger-ink);
+}
+
+[data-theme="ledger"] .landing-mini-header__links a {
+  border-color: transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ledger-ink-2);
+}
+
+[data-theme="ledger"] .landing-mini-header__links a:hover,
+[data-theme="ledger"] .landing-mini-header__links a:focus-visible,
+[data-theme="ledger"] .landing-mini-header__links a.is-active,
+[data-theme="ledger"] .landing-mini-header__links a[aria-current="true"] {
+  border-color: transparent;
+  border-bottom-color: var(--ledger-stamp);
+  background: transparent;
+  color: var(--ledger-ink);
+}
+
+[data-theme="ledger"] .landing-scroll-top {
+  border-color: var(--ledger-ink);
+  background: var(--ledger-card);
+  color: var(--ledger-ink);
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+[data-theme="ledger"] .landing-scroll-top::before {
+  background: conic-gradient(var(--ledger-stamp) var(--scroll-progress), var(--ledger-rule) 0);
+}
+
+[data-theme="ledger"] .landing-scroll-top::after {
+  background: var(--ledger-card);
+  box-shadow: none;
+}
+
+[data-theme="ledger"] .landing-scroll-top svg {
+  filter: none;
+}
+
+[data-theme="ledger"] .landing-scroll-top.is-near-end,
+[data-theme="ledger"] .landing-scroll-top:hover {
+  border-color: var(--ledger-stamp);
+  color: var(--ledger-stamp);
+  box-shadow: none;
+}
+
+[data-theme="ledger"] .landing-scroll-top:focus-visible {
+  outline-color: var(--ledger-stamp);
+}
+
+/* ---------- shared ledger primitives (use from markup) ---------- */
+/* In the components layer so utility classes on the same element still win. */
+@layer components {
+
+  /* Quiet sentence-case label for table heads and field names. Not for
+     decorative kickers above headings: the ledger theme has none. */
+  .ledger-label {
+    font-family: var(--font-sans);
+    font-size: 0.8125rem;
+    font-weight: 700;
+    letter-spacing: 0;
+    line-height: 1.3;
+    text-transform: none;
+    color: var(--ledger-ink-3);
+  }
+}
+
+@media (prefers-contrast: more) {
+  [data-theme="ledger"] {
+    --color-zinc-400: #3c3c43;
+    --color-zinc-500: #45454d;
+  }
+  [data-theme="ledger"] .archive-panel {
+    border-color: var(--ledger-ink);
+  }
+}
+
+/* Plain paper when transparency or contrast is reduced: no washes, grain or rules. */
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  [data-theme="ledger"] body {
+    background-image: none;
+  }
+  [data-theme="ledger"] body {
+    background-attachment: scroll;
+  }
+}
+
+/* history */
+/* Hook classes live in components/history-app.tsx. Classic never sees these. */
+
+/* Plain surfaces: paper with rules, not boxes. Beats the .archive-panel rule above. */
+[data-theme="ledger"] .history-page .history-plain {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+[data-theme="ledger"] .history-page .history-head {
+  padding: 0;
+}
+
+[data-theme="ledger"] .history-page .history-cached {
+  border-bottom: 1px solid var(--ledger-rule);
+  padding-inline: 0;
+}
+
+/* Toolbar: one row, hairline below. */
+[data-theme="ledger"] .history-page .history-toolbar {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--ledger-rule);
+}
+
+[data-theme="ledger"] .history-page .history-search-row {
+  flex-direction: row;
+  align-items: center;
+}
+
+/* Square controls. */
+[data-theme="ledger"] .history-page :is(button, input, select, [role="group"], .history-actions a) {
+  border-radius: 3px;
+}
+
+/* Bulk bar and pager: ink rules, mono. */
+[data-theme="ledger"] .history-page .history-bulkbar {
+  border-bottom: 1px solid var(--ledger-ink);
+  font-family: var(--font-mono);
+}
+
+[data-theme="ledger"] .history-page .history-pager {
+  border-top: 1px solid var(--ledger-ink);
+  font-family: var(--font-mono);
+}
+
+/* Column heads: sentence-case sans labels over an ink rule. */
+[data-theme="ledger"] .history-page .history-thead {
+  border-bottom: 1.5px solid var(--ledger-ink);
+}
+
+[data-theme="ledger"] .history-page .history-thead :is(span, button) {
+  font-family: var(--font-sans);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* Rows: hairlines come from divide-y; hover lifts to card. */
+[data-theme="ledger"] .history-page .history-row:hover {
+  background: var(--ledger-card);
+}
+
+[data-theme="ledger"] .history-page .history-url-host {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ledger-ink);
+}
+
+[data-theme="ledger"] .history-page .history-url-path {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ledger-ink-3);
+}
+
+[data-theme="ledger"] .history-page .history-meta {
+  font-family: var(--font-mono);
+  color: var(--ledger-ink-2);
+}
+
+/* Snapshot counts: big serif numerals. */
+[data-theme="ledger"] .history-page .history-snapshots p {
+  font-family: var(--font-serif);
+  font-size: 26px;
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: -0.01em;
+}
+
+/* Status: outlined square tags, sentence case. */
+[data-theme="ledger"] .history-page .history-status > div > span {
+  border-radius: 2px;
+  background: transparent;
+  border-color: currentColor;
+  font-family: var(--font-sans);
+  font-weight: 700;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+[data-theme="ledger"] .history-page .history-status .text-amber-200 {
+  color: var(--ledger-warn);
+}
+
+/* Actions: primary is ink, hover turns stamp red. */
+[data-theme="ledger"] .history-page .history-actions .bg-amber-300 {
+  background-color: var(--ledger-ink);
+  border-color: var(--ledger-ink);
+  color: var(--ledger-card);
+}
+
+[data-theme="ledger"] .history-page .history-actions .bg-amber-300:hover {
+  background-color: var(--ledger-stamp);
+  border-color: var(--ledger-stamp);
+}
+
+/* Empty states: serif heading. */
+[data-theme="ledger"] .history-page .history-empty p {
+  font-family: var(--font-serif);
+  font-size: clamp(28px, 4vw, 40px);
+  font-weight: 400;
+  line-height: 1.05;
+  letter-spacing: -0.01em;
+  color: var(--ledger-ink);
+}
+
+/* Capture-year spread under each URL (ledger only, see CaptureSpread). */
+[data-theme="ledger"] .history-page .history-spread {
+  gap: 1px;
+}
+
+[data-theme="ledger"] .history-page .history-spread-label {
+  letter-spacing: 0;
+  color: var(--ledger-ink-3);
+}
+
+/* ---------- motion ---------- */
+/* Landing micro-interactions. Movement lives inside the prefers-reduced-motion
+   guards; colour and opacity changes stay on for everyone. Ease-out only, no
+   bounce, no loops, nothing over 400ms. Classic never sees these rules. */
+
+[data-theme="ledger"] {
+  --ledger-ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* Section heading rule. The border became a pseudo-element so it can draw in
+   from the left on reveal. The final look (1.5px ink, same spot) is unchanged. */
+[data-theme="ledger"] .landing-section-heading {
+  position: relative;
+}
+
+[data-theme="ledger"] .landing-section-heading::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1.5px;
+  background: var(--ledger-ink);
+  transform-origin: left center;
+}
+
+/* The FAQ heading is sticky beside its list at md+, and it never had a rule there. */
+@media (min-width: 768px) {
+  [data-theme="ledger"] #faq .landing-section-heading::after {
+    display: none;
+  }
+}
+
+/* Staggered reveal for step, benefit and FAQ lists. Children fade and rise 8px
+   once their Reveal wrapper becomes visible (the wrapper only ever sets it once). */
+@media (prefers-reduced-motion: no-preference) {
+  /* Hidden states only apply while a Reveal is armed and not yet visible. */
+  [data-theme="ledger"] .scroll-reveal .landing-section-heading::after {
+    transition: transform 400ms var(--ledger-ease-out);
+  }
+
+  [data-theme="ledger"] .scroll-reveal:not(.is-visible) .landing-section-heading::after {
+    transform: scaleX(0);
+  }
+
+  [data-theme="ledger"] .scroll-reveal .ledger-stagger > * {
+    transition:
+      opacity 360ms var(--ledger-ease-out),
+      transform 360ms var(--ledger-ease-out);
+  }
+
+  [data-theme="ledger"] .scroll-reveal:not(.is-visible) .ledger-stagger > * {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  [data-theme="ledger"] .ledger-stagger > :nth-child(2) { transition-delay: 60ms; }
+  [data-theme="ledger"] .ledger-stagger > :nth-child(3) { transition-delay: 120ms; }
+  [data-theme="ledger"] .ledger-stagger > :nth-child(4) { transition-delay: 180ms; }
+  [data-theme="ledger"] .ledger-stagger > :nth-child(5) { transition-delay: 240ms; }
+  [data-theme="ledger"] .ledger-stagger > :nth-child(6) { transition-delay: 300ms; }
+}
+
+/* Step and benefit hover: the red number or icon lifts 2px, the title shifts 2px right. */
+@media (prefers-reduced-motion: no-preference) and (hover: hover) {
+  [data-theme="ledger"] .ledger-nudge,
+  [data-theme="ledger"] .ledger-shift {
+    transition: transform 200ms var(--ledger-ease-out);
+  }
+
+  [data-theme="ledger"] .ledger-item:hover .ledger-nudge {
+    transform: translateY(-2px);
+  }
+
+  [data-theme="ledger"] .ledger-item:hover .ledger-shift {
+    transform: translateX(2px);
+  }
+}
+
+/* FAQ "+" to "×": 220ms ease-out rotation. The answer keeps its existing
+   height, opacity and translateY(-4px to 0) transitions from globals.css. */
+@media (prefers-reduced-motion: no-preference) {
+  [data-theme="ledger"] .ledger-faq-plus {
+    transition:
+      rotate 220ms var(--ledger-ease-out),
+      transform 220ms var(--ledger-ease-out);
+  }
+}
+
+/* Text links ending in an arrow. The underline rests in ink and turns stamp red;
+   the arrow slides 3px right on hover or keyboard focus. */
+[data-theme="ledger"] .ledger-arrow-link {
+  text-decoration-color: var(--ledger-ink);
+  text-decoration-thickness: 1.5px;
+  transition:
+    text-decoration-color 200ms var(--ledger-ease-out),
+    color 200ms var(--ledger-ease-out);
+}
+
+[data-theme="ledger"] .ledger-arrow-link:hover,
+[data-theme="ledger"] .ledger-arrow-link:focus-visible {
+  text-decoration-color: var(--ledger-stamp);
+}
+
+[data-theme="ledger"] .ledger-arrow {
+  display: inline-block;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  [data-theme="ledger"] .ledger-arrow {
+    transition: transform 200ms var(--ledger-ease-out);
+  }
+
+  [data-theme="ledger"] .ledger-arrow-link:hover .ledger-arrow,
+  [data-theme="ledger"] .ledger-arrow-link:focus-visible .ledger-arrow {
+    transform: translateX(3px);
+  }
+}
+
+/* Bookmark key: on hover it presses in 1px and its bottom edge thins, like a real key. */
+@media (prefers-reduced-motion: no-preference) and (hover: hover) {
+  [data-theme="ledger"] .ledger-key {
+    transition:
+      transform 120ms var(--ledger-ease-out),
+      border-bottom-width 120ms var(--ledger-ease-out);
+  }
+
+  [data-theme="ledger"] .ledger-key:hover {
+    transform: translateY(1px);
+    border-bottom-width: 1px;
+  }
+}
+
+/* Footer links: a red underline grows from the left on hover or focus.
+   Reduced motion gets the same underline without the grow. */
+[data-theme="ledger"] .ledger-underline {
+  position: relative;
+}
+
+[data-theme="ledger"] .ledger-underline::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0.8rem;
+  height: 1.5px;
+  background: transparent;
+  transform-origin: left center;
+  pointer-events: none;
+}
+
+[data-theme="ledger"] .ledger-underline:hover::after,
+[data-theme="ledger"] .ledger-underline:focus-visible::after {
+  background: var(--ledger-stamp);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  [data-theme="ledger"] .ledger-underline::after {
+    transform: scaleX(0);
+    transition:
+      transform 240ms var(--ledger-ease-out),
+      background-color 240ms var(--ledger-ease-out);
+  }
+
+  [data-theme="ledger"] .ledger-underline:hover::after,
+  [data-theme="ledger"] .ledger-underline:focus-visible::after {
+    transform: scaleX(1);
+  }
+}
+
+/* Back-to-top: no lift on hover. The arrow nudges up 2px, and a press scales the
+   button to 0.95 in 90ms. The press rule comes last so it wins over hover. */
+[data-theme="ledger"] .landing-scroll-top:hover {
+  transform: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  [data-theme="ledger"] .landing-scroll-top svg {
+    transition: transform 200ms var(--ledger-ease-out);
+  }
+
+  [data-theme="ledger"] .landing-scroll-top:hover svg {
+    transform: translateY(-2px);
+  }
+
+  [data-theme="ledger"] .landing-scroll-top:active {
+    transform: scale(0.95);
+    transition-duration: 90ms;
+  }
+}
+
+/* Hero entrance: one slow, editorial sequence instead of classic's blur +
+   letter-spacing "decode". The headline slides up out of a clip edge like type
+   lifted from a forme, then the red rule under "archived" is drawn, then the
+   form settles in. Inline animation delays from the markup are overridden. */
+@keyframes ledger-hero-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes ledger-hero-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes ledger-hero-type {
+  from {
+    clip-path: inset(0 -0.2em 100% -0.2em);
+    transform: translateY(0.35em);
+  }
+  to {
+    clip-path: inset(-0.2em -0.2em -0.3em -0.2em);
+    transform: none;
+  }
+}
+
+@keyframes ledger-hero-rule {
+  from { background-size: 0% 0.06em; }
+  to { background-size: 100% 0.06em; }
+}
+
+/* The "archived" underline, drawn as a background so it can animate. */
+[data-theme="ledger"] .ledger-hero-mark {
+  background-image: linear-gradient(var(--ledger-stamp), var(--ledger-stamp));
+  background-repeat: no-repeat;
+  background-position: 0 84%;
+  background-size: 100% 0.06em;
+  padding-bottom: 0.04em;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  [data-theme="ledger"] .decode-in {
+    animation: ledger-hero-fade 1100ms cubic-bezier(0.25, 0.1, 0.25, 1) 0ms both !important;
+  }
+
+  [data-theme="ledger"] .ledger-hero-title {
+    opacity: 1;
+    animation: ledger-hero-type 1300ms cubic-bezier(0.16, 1, 0.3, 1) 250ms both !important;
+  }
+
+  [data-theme="ledger"] .ledger-hero-mark {
+    animation: ledger-hero-rule 900ms cubic-bezier(0.65, 0, 0.35, 1) 1200ms both;
+  }
+
+  [data-theme="ledger"] .ledger-hero-form {
+    animation: ledger-hero-rise 1000ms cubic-bezier(0.16, 1, 0.3, 1) 1500ms both !important;
+  }
+
+  [data-theme="ledger"] .reveal-fade {
+    animation: ledger-hero-fade 1000ms cubic-bezier(0.25, 0.1, 0.25, 1) 2100ms both !important;
+  }
+}
+
+/* ---------- phones (<= 639px): landing hero, mini header, scroll-top ---------- */
+[data-theme="ledger"] .landing-mini-header__links {
+  position: relative; /* offsetParent for the active-link centring in LandingMiniHeader */
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 639px) {
+  /* Display headline: scales with the viewport (2.25rem at 320 -> 3rem from ~457), balanced wrap. */
+  [data-theme="ledger"] .ledger-hero-title {
+    max-width: 14em;
+    font-size: clamp(2.25rem, 10.5vw, 3rem);
+    line-height: 1;
+    letter-spacing: -0.025em;
+    text-wrap: balance;
+    overflow-wrap: break-word;
+  }
+
+  /* Input over full-width button, comfortable gap; 16px+ everywhere to stop iOS focus-zoom. */
+  [data-theme="ledger"] .ledger-hero-form {
+    gap: 0.75rem;
+  }
+
+  [data-theme="ledger"] .ledger-hero-form input,
+  [data-theme="ledger"] .ledger-hero-form select {
+    font-size: 1rem;
+    min-height: 3rem;
+  }
+
+  [data-theme="ledger"] .ledger-hero-form .ledger-start-button {
+    width: 100%;
+    height: 3.25rem;
+    min-height: 3.25rem;
+    font-size: 1rem;
+  }
+
+  /* Tooltips inside the Advanced panel must never run past the screen edge. */
+  [data-theme="ledger"] .ledger-hero-form [role="tooltip"] {
+    width: min(18rem, calc(100vw - 3rem));
+  }
+
+  /* Sticky mini header: honour the notch, 44pt link targets, strip scrolls under a fade. */
+  [data-theme="ledger"] .landing-mini-header {
+    min-height: calc(3.75rem + env(safe-area-inset-top));
+    padding-top: env(safe-area-inset-top);
+    padding-inline: max(0.75rem, env(safe-area-inset-left)) max(0.75rem, env(safe-area-inset-right));
+    gap: 0.25rem;
+  }
+
+  [data-theme="ledger"] .landing-mini-header__links {
+    padding: 0.25rem 0;
+  }
+
+  [data-theme="ledger"] .landing-mini-header__links a {
+    height: 2.75rem;
+    padding: 0 0.625rem;
+    font-size: 0.875rem;
+    white-space: nowrap;
+  }
+
+  [data-theme="ledger"] .landing-mini-header__menu {
+    padding-right: 0;
+  }
+
+  /* Back-to-top: 48pt, clear of the home indicator, instant press feedback. */
+  [data-theme="ledger"] .landing-scroll-top {
+    width: 3rem;
+    height: 3rem;
+    right: max(0.875rem, env(safe-area-inset-right));
+    bottom: max(0.875rem, env(safe-area-inset-bottom));
+  }
+
+  body:has(.landing-scroll-top) footer {
+    padding-bottom: calc(3rem + 2 * max(0.875rem, env(safe-area-inset-bottom)));
+  }
+}
+
+/* Never let the landing page scroll sideways. */
+[data-theme="ledger"] body {
+  overflow-x: clip;
+}
+
+/* ---------- mobile: results & app ---------- */
+/* History rows on phones (<520px): stack as cards. Column areas come from
+   .history-grid in globals.css; this redefines them for narrow screens. */
+@media (max-width: 519.98px) {
+  .history-page .history-thead {
+    display: none;
+  }
+
+  .history-page .history-row.history-grid {
+    grid-template-areas:
+      "select url url url"
+      ". status updated snapshots"
+      ". actions actions actions";
+    grid-template-columns: 44px auto minmax(0, 1fr) auto;
+    row-gap: 0.5rem;
+  }
+
+  .history-page .history-row .history-col-status,
+  .history-page .history-row .history-col-updated,
+  .history-page .history-row .history-col-snapshots {
+    display: flex;
+    align-items: center;
+  }
+
+  .history-page .history-row .history-col-snapshots {
+    gap: 0.25rem;
+  }
+
+  .history-page .history-row .history-col-snapshots::after {
+    content: "snapshots";
+    font-size: 0.75rem;
+    color: #8a877f;
+  }
+
+  .history-page .history-row .history-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    overflow: visible;
+  }
+
+  .history-page .history-row .history-actions > * {
+    width: auto !important;
+    padding-inline: 0.875rem !important;
+  }
+
+  .history-page .history-row .history-actions span.hidden {
+    display: inline !important;
+  }
+}
+
+/* Never let the page scroll sideways. */
+html,
+body {
+  overflow-x: clip;
+}

@@ -8,8 +8,14 @@ type BrandLockupProps = {
 
 export function BrandWordmark({ className }: { className?: string }) {
   return (
-    <span className={cn("font-mono font-extrabold tracking-[-0.04em] text-zinc-50", className)}>
-      crawl<span className="text-amber-300">back</span>
+    <span
+      className={cn(
+        "font-mono font-extrabold tracking-[-0.04em] text-zinc-50",
+        "ledger:inline-flex ledger:items-baseline ledger:font-serif ledger:font-normal ledger:tracking-[-0.01em]",
+        className
+      )}
+    >
+      crawl<span className="text-amber-300 ledger:italic">back</span>
     </span>
   );
 }
