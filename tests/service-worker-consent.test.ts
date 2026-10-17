@@ -44,11 +44,12 @@ async function runPrefetch(data: Record<string, unknown>) {
       }
     });
     const message = worker.handlers.get("message");
-    message?.({ data: { type: "consent:grant" }, source: { id: "client-1" } });
+    const source = { id: "client-1", postMessage: vi.fn() };
+    message?.({ data: { type: "consent:grant" }, source });
     let work: Promise<unknown> | undefined;
     message?.({
       data: { type: "scan:prefetch", ...data },
-      source: { id: "client-1" },
+      source,
       waitUntil: (value: Promise<unknown>) => { work = value; }
     });
     const pending = work;
@@ -61,7 +62,79 @@ async function runPrefetch(data: Record<string, unknown>) {
   }
 }
 
+const restartedHandlers = new Map<string, (event: any) => void>();
+
 describe("service worker consent", () => {
+  it("keeps concurrent prefetches isolated by client and cancels only the sender's job", async () => {
+    let releaseFetch!: () => void;
+    const fetchGate = new Promise<void>((resolve) => { releaseFetch = resolve; });
+    const clientMessages = new Map<string, unknown[]>();
+    const worker = createWorkerHarness({
+      fetch: vi.fn(async (_url: string, init?: { signal?: AbortSignal }) => {
+        await fetchGate;
+        return new Response("ok", { status: 200 });
+      })
+    });
+    const message = worker.handlers.get("message");
+    const sources = ["client-a", "client-b"].map((id) => ({ id, postMessage: (value: unknown) => clientMessages.get(id)?.push(value) }));
+    for (const source of sources) {
+      clientMessages.set(source.id, []);
+      message?.({ data: { type: "consent:grant" }, source });
+    }
+    const jobs: Promise<unknown>[] = [];
+    for (const [index, source] of sources.entries()) {
+      message?.({
+        data: { type: "scan:prefetch", urls: [`https://index.commoncrawl.org/${source.id}`], spacingMs: 1000 },
+        source,
+        waitUntil: (job: Promise<unknown>) => { jobs[index] = job; }
+      });
+    }
+    await vi.waitFor(() => expect((worker.context as any).fetch).toHaveBeenCalledTimes(2));
+    const signals = (worker.context as any).fetch.mock.calls.map((call: any[]) => call[1].signal as AbortSignal);
+    message?.({ data: { type: "scan:cancel" }, source: sources[1] });
+    expect(signals[0].aborted).toBe(false);
+    expect(signals[1].aborted).toBe(true);
+    releaseFetch();
+    await Promise.all(jobs);
+    expect(clientMessages.get("client-a")).toEqual([
+      { type: "scan:prefetch-progress", completed: 1, total: 1 },
+      { type: "scan:prefetch-done" }
+    ]);
+    expect(clientMessages.get("client-b")).toEqual([]);
+  });
+
+  it("stops an obsolete same-client prefetch after replacement", async () => {
+    let releaseFirstFetch!: () => void;
+    const firstFetch = new Promise<void>((resolve) => { releaseFirstFetch = resolve; });
+    const clientMessages: unknown[] = [];
+    const worker = createWorkerHarness({
+      fetch: vi.fn(async (url: string) => {
+        if (url.endsWith("old")) await firstFetch;
+        return new Response("ok", { status: 200 });
+      })
+    });
+    const message = worker.handlers.get("message");
+    const source = { id: "client-a", postMessage: (value: unknown) => clientMessages.push(value) };
+    message?.({ data: { type: "consent:grant" }, source });
+    const jobs: Promise<unknown>[] = [];
+    const start = (urls: string[], index: number) => message?.({
+      data: { type: "scan:prefetch", urls, spacingMs: 1000 }, source,
+      waitUntil: (job: Promise<unknown>) => { jobs[index] = job; }
+    });
+    start(["https://index.commoncrawl.org/old", "https://index.commoncrawl.org/old-next"], 0);
+    await vi.waitFor(() => expect((worker.context as any).fetch).toHaveBeenCalledTimes(1));
+    start(["https://index.commoncrawl.org/new"], 1);
+    await vi.waitFor(() => expect((worker.context as any).fetch).toHaveBeenCalledTimes(2));
+    releaseFirstFetch();
+    await Promise.all(jobs);
+    const fetched = (worker.context as any).fetch.mock.calls.map((call: any[]) => String(call[0]));
+    expect(fetched).toEqual(["https://index.commoncrawl.org/old", "https://index.commoncrawl.org/new"]);
+    expect(clientMessages).toEqual([
+      { type: "scan:prefetch-progress", completed: 1, total: 1 },
+      { type: "scan:prefetch-done" }
+    ]);
+  });
+
   it("does not open Cache Storage for a request from an unapproved client", async () => {
     const worker = createWorkerHarness();
     let response: Promise<unknown> | undefined;
@@ -190,5 +263,61 @@ describe("service worker consent", () => {
       spacingMs
     });
     expect(delays).toEqual([expected]);
+  });
+
+  it("restores approved clients after the browser restarts an idle worker", async () => {
+    const stored = new Map<string, Response>();
+    const stateCache = {
+      match: vi.fn(async () => undefined),
+      put: vi.fn(async (url: string, response: Response) => { stored.set(url, response); }),
+      delete: vi.fn(async () => true),
+      keys: vi.fn(async () => [] as Request[])
+    };
+    const caches = {
+      open: vi.fn(async () => stateCache),
+      delete: vi.fn(async () => true),
+      match: vi.fn(async (url: string) => stored.get(url)?.clone())
+    };
+    const first = createWorkerHarness({ caches });
+    let persisted: Promise<unknown> | undefined;
+    first.handlers.get("message")?.({ data: { type: "consent:grant" }, source: { id: "client-1" }, waitUntil: (value: Promise<unknown>) => { persisted = value; } });
+    await persisted;
+
+    // A restarted worker starts with empty globals but the same Cache Storage.
+    const restarted = createWorkerHarness({ caches, self: {
+      addEventListener: function (this: any, name: string, handler: (event: any) => void) { restartedHandlers.set(name, handler); },
+      skipWaiting: vi.fn(), clients: { claim: vi.fn(), matchAll: vi.fn(async () => [{ id: "client-1" }]) }
+    } });
+    expect(runInNewContext('authorizedClients.has("client-1")', restarted.context)).toBe(false);
+    let job: Promise<unknown> | undefined;
+    restartedHandlers.get("message")?.({
+      data: { type: "scan:prefetch", urls: ["https://index.commoncrawl.org/warm"], spacingMs: 1000 },
+      source: { id: "client-1", postMessage: vi.fn() },
+      waitUntil: (value: Promise<unknown>) => { job = value; }
+    });
+    await job;
+    expect(runInNewContext('authorizedClients.has("client-1")', restarted.context)).toBe(true);
+    expect((restarted.context as any).fetch).toHaveBeenCalledWith("https://index.commoncrawl.org/warm", expect.anything());
+  });
+
+  it("stops background warming on a rate-limit response", async () => {
+    vi.useFakeTimers();
+    try {
+      const worker = createWorkerHarness({ fetch: vi.fn(async () => new Response("slow down", { status: 429 })) });
+      const message = worker.handlers.get("message");
+      const source = { id: "client-1", postMessage: vi.fn() };
+      message?.({ data: { type: "consent:grant" }, source });
+      let job: Promise<unknown> | undefined;
+      message?.({
+        data: { type: "scan:prefetch", urls: ["https://index.commoncrawl.org/a", "https://index.commoncrawl.org/b"], spacingMs: 1000 },
+        source,
+        waitUntil: (value: Promise<unknown>) => { job = value; }
+      });
+      await vi.advanceTimersByTimeAsync(60_000);
+      await job;
+      expect((worker.context as any).fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

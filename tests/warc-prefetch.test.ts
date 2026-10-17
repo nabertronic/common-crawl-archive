@@ -2,9 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const loadCaptureRecord = vi.fn(async (_arg?: unknown) => ({ record: {}, source: "network" as const }));
 const getSettings = vi.fn(async () => ({ htmlCacheEnabled: true }));
+const consent = vi.hoisted(() => ({ granted: true }));
 
 vi.mock("@/lib/warc", () => ({ loadCaptureRecord: (arg: unknown) => loadCaptureRecord(arg) }));
 vi.mock("@/lib/capture-store", () => ({ getSettings: () => getSettings() }));
+vi.mock("@/lib/website-preferences", () => ({ hasStorageConsent: () => consent.granted }));
 
 import { prefetchCaptureRecord, __resetPrefetchStateForTests } from "@/lib/warc-prefetch";
 import type { CommonCrawlCapture } from "@/lib/common-crawl";
@@ -33,6 +35,7 @@ beforeEach(() => {
   __resetPrefetchStateForTests();
   loadCaptureRecord.mockClear();
   getSettings.mockClear();
+  consent.granted = true;
   getSettings.mockResolvedValue({ htmlCacheEnabled: true });
 });
 
@@ -66,6 +69,25 @@ describe("prefetchCaptureRecord", () => {
     getSettings.mockResolvedValue({ htmlCacheEnabled: false });
     prefetchCaptureRecord(capture());
     await flush();
+    expect(loadCaptureRecord).not.toHaveBeenCalled();
+  });
+
+  it("does not read settings or warm cache without consent", async () => {
+    consent.granted = false;
+    prefetchCaptureRecord(capture());
+    await flush();
+    expect(getSettings).not.toHaveBeenCalled();
+    expect(loadCaptureRecord).not.toHaveBeenCalled();
+  });
+
+  it("checks consent again after reading cache settings", async () => {
+    getSettings.mockImplementationOnce(async () => {
+      consent.granted = false;
+      return { htmlCacheEnabled: true };
+    });
+    prefetchCaptureRecord(capture());
+    await flush();
+    expect(getSettings).toHaveBeenCalledTimes(1);
     expect(loadCaptureRecord).not.toHaveBeenCalled();
   });
 });

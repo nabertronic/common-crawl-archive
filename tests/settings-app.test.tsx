@@ -183,4 +183,29 @@ describe("SettingsApp", () => {
       expect(cacheSwitch).toHaveAttribute("aria-checked", "false");
     });
   });
+
+  it("restores an emptied number field instead of saving its minimum", async () => {
+    render(<SettingsApp />);
+
+    const field = await screen.findByRole("spinbutton", { name: "History page size" });
+    fireEvent.change(field, { target: { value: "" } });
+    fireEvent.blur(field);
+
+    expect(updateSettings).not.toHaveBeenCalled();
+    expect(field).toHaveValue(25);
+  });
+
+  it("rejects a default date range whose start is after its end", async () => {
+    const { getSettings } = await import("@/lib/capture-store");
+    vi.mocked(getSettings).mockResolvedValueOnce({
+      ...settings, defaultScanScope: "custom", defaultCustomDateFrom: "2024-01-01", defaultCustomDateTo: "2024-06-30"
+    });
+    render(<SettingsApp />);
+
+    const from = await screen.findByLabelText("Default from");
+    fireEvent.change(from, { target: { value: "2025-01-01" } });
+    expect(updateSettings).not.toHaveBeenCalled();
+    fireEvent.change(from, { target: { value: "2024-02-01" } });
+    expect(updateSettings).toHaveBeenCalledWith({ defaultCustomDateFrom: "2024-02-01" });
+  });
 });

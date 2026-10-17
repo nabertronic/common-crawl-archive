@@ -110,6 +110,36 @@ describe("HistoryApp", () => {
     window.history.pushState({}, "", "/history");
   });
 
+  it("renders the year spread for a scan with 200,000 distinct captures", async () => {
+    storedRecords = [{
+      ...baseRecords[1],
+      captures: Array.from({ length: 200_000 }, (_, index) => ({
+        ...capture,
+        filename: `crawl-data/CC-MAIN-${index === 0 ? "2015-14" : "2020-50"}/file.warc.gz`,
+        offset: String(index)
+      }))
+    }];
+
+    render(<HistoryApp />);
+
+    const spread = await screen.findByRole("img", { name: "Captures by year, 2015 to 2020" });
+    expect(spread.children).toHaveLength(new Date().getUTCFullYear() - 2008 + 1);
+    expect(spread.children[2015 - 2008]).toHaveStyle({ height: "2px" });
+    expect(spread.children[2020 - 2008]).toHaveStyle({ height: "22px" });
+  });
+
+  it("labels empty and single-year spreads", async () => {
+    storedRecords = [baseRecords[0], {
+      ...baseRecords[1],
+      captures: [{ ...capture, filename: "crawl-data/CC-MAIN-2020-50/file.warc.gz" }]
+    }];
+
+    render(<HistoryApp />);
+
+    expect(await screen.findByRole("img", { name: "No captures by year" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Captures by year, 2020" })).toBeInTheDocument();
+  });
+
   it("syncs browser-restored history filter values before filtering rows", async () => {
     render(<HistoryApp />);
 
@@ -185,6 +215,24 @@ describe("HistoryApp", () => {
     await waitFor(() => expect(screen.getByText("blog.example.com")).toBeInTheDocument());
     expect(screen.getByText("example.com")).toBeInTheDocument();
     expect(screen.getByText("1-4 of 4")).toBeInTheDocument();
+  });
+
+  it("keeps cached HTML that another saved scan still lists when deleting a scan", async () => {
+    const { deleteCachedCaptureKeys } = await import("@/lib/capture-store");
+    storedRecords = [
+      baseRecords[1],
+      { ...baseRecords[1], key: "live:exact:https://beta.example/:scan:all", scanScope: "all", updatedAt: 3 }
+    ];
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<HistoryApp />);
+
+    const deleteButtons = await screen.findAllByRole("button", { name: "Delete saved scan" });
+    expect(deleteButtons).toHaveLength(2);
+    fireEvent.click(deleteButtons[0]);
+
+    await waitFor(() => expect(deleteCachedCaptureKeys).toHaveBeenCalled());
+    expect(vi.mocked(deleteCachedCaptureKeys).mock.calls.at(-1)?.[0]).toEqual([]);
+    vi.mocked(window.confirm).mockRestore();
   });
 
   it("renders global export and delete actions only once in the top toolbar", async () => {

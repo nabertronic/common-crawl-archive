@@ -2,7 +2,7 @@ import * as React from "react";
 import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
-const buttonVariants = cva(
+export const buttonVariants = cva(
   "inline-flex h-10 items-center justify-center gap-2 rounded-md border text-sm font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 disabled:pointer-events-none disabled:opacity-45 ledger:rounded-[3px] ledger:shadow-none ledger:font-bold ledger:transition-[background-color,color,border-color,transform] ledger:duration-200 ledger:ease-[cubic-bezier(0.2,0.8,0.2,1)] ledger:motion-safe:active:scale-[0.97] ledger:active:duration-75",
   {
     variants: {

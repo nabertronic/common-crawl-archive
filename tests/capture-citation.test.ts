@@ -41,6 +41,13 @@ describe("formatCaptureCitation", () => {
     expect(citation).toContain("Captured 2026-04-20 by Common Crawl (CC-MAIN-2026-18).");
   });
 
+  it("does not format impossible capture dates as valid", () => {
+    const citation = formatCaptureCitation({ url: "https://example.org/", timestamp: "20260231141200", retrievedAt });
+    expect(citation).toContain("Captured 20260231141200 by Common Crawl.");
+    expect(formatCaptureDateLong("20260231141200")).toBe("");
+    expect(formatCaptureDateLong("20240229141200")).toBe("29 February 2024");
+  });
+
   it("uses the raw URL when it cannot be parsed", () => {
     const citation = formatCaptureCitation({ url: "not a url", timestamp: "20260420141200", retrievedAt });
     expect(citation.startsWith("“not a url.”")).toBe(true);

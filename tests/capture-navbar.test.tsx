@@ -49,4 +49,58 @@ describe("CaptureTimeline hooks", () => {
     fireEvent.keyDown(slider, { key: "ArrowRight" });
     expect(onJump).toHaveBeenCalledTimes(1);
   });
+
+  it("navigates for a primary click or drag, but rejects unrelated pointer releases", () => {
+    const onJump = vi.fn();
+    const second = { ...capture, timestamp: "20260520141200", offset: "20" } as CommonCrawlCapture;
+    render(<CaptureTimeline sorted={[capture, second]} currentIndex={0} onJump={onJump} />);
+    const slider = screen.getByRole("slider", { name: "Capture timeline" });
+    const track = slider.querySelector("div.absolute.inset-x-3") as HTMLDivElement;
+    vi.spyOn(track, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, left: 0, top: 0, right: 100, bottom: 56, width: 100, height: 56,
+      toJSON: () => ({})
+    } as DOMRect);
+    Object.defineProperty(slider, "setPointerCapture", { value: vi.fn() });
+
+    fireEvent.pointerUp(slider, { pointerId: 1, pointerType: "mouse", isPrimary: true, button: 0, clientX: 100 });
+    fireEvent.pointerDown(slider, { pointerId: 2, pointerType: "mouse", isPrimary: true, button: 2, clientX: 100 });
+    fireEvent.pointerUp(slider, { pointerId: 2, pointerType: "mouse", isPrimary: true, button: 2, clientX: 100 });
+    fireEvent.pointerDown(slider, { pointerId: 3, pointerType: "mouse", isPrimary: true, button: 1, clientX: 100 });
+    fireEvent.pointerUp(slider, { pointerId: 3, pointerType: "mouse", isPrimary: true, button: 1, clientX: 100 });
+    expect(onJump).not.toHaveBeenCalled();
+
+    fireEvent.pointerDown(slider, { pointerId: 4, pointerType: "mouse", isPrimary: true, button: 0, clientX: 100 });
+    fireEvent.pointerUp(slider, { pointerId: 5, pointerType: "mouse", isPrimary: true, button: 0, clientX: 100 });
+    expect(onJump).not.toHaveBeenCalled();
+    fireEvent.pointerUp(slider, { pointerId: 4, pointerType: "mouse", isPrimary: true, button: 0, clientX: 100 });
+    expect(onJump).toHaveBeenCalledWith(1);
+
+    onJump.mockClear();
+    fireEvent.pointerDown(slider, { pointerId: 9, pointerType: "mouse", isPrimary: true, button: 0, clientX: 0 });
+    fireEvent.pointerUp(slider, { pointerId: 9, pointerType: "mouse", isPrimary: true, button: 0, clientX: 0 });
+    expect(onJump).not.toHaveBeenCalled();
+
+    fireEvent.pointerDown(slider, { pointerId: 10, pointerType: "mouse", isPrimary: true, button: 0, clientX: 0 });
+    fireEvent.pointerUp(slider, { pointerId: 11, pointerType: "mouse", isPrimary: true, button: 0, clientX: 100 });
+    expect(onJump).not.toHaveBeenCalled();
+    fireEvent.pointerUp(slider, { pointerId: 10, pointerType: "mouse", isPrimary: true, button: 0, clientX: 100 });
+    expect(onJump).toHaveBeenCalledWith(1);
+
+    onJump.mockClear();
+    fireEvent.pointerDown(slider, { pointerId: 12, pointerType: "touch", isPrimary: true, button: 0, clientX: 0 });
+    fireEvent.pointerCancel(slider, { pointerId: 12, pointerType: "touch", isPrimary: true, button: 0, clientX: 100 });
+    fireEvent.pointerUp(slider, { pointerId: 12, pointerType: "touch", isPrimary: true, button: 0, clientX: 100 });
+    expect(onJump).not.toHaveBeenCalled();
+
+    fireEvent.pointerDown(slider, { pointerId: 13, pointerType: "mouse", isPrimary: true, button: 0, clientX: 0 });
+    fireEvent.pointerUp(slider, { pointerId: 13, pointerType: "mouse", isPrimary: true, button: 0, clientX: 100 });
+    expect(onJump).toHaveBeenCalledWith(1);
+
+    onJump.mockClear();
+    fireEvent.pointerDown(slider, { pointerId: 14, pointerType: "mouse", isPrimary: true, button: 0, clientX: 0 });
+    fireEvent.pointerMove(slider, { pointerId: 15, pointerType: "mouse", isPrimary: true, button: 0, clientX: 100 });
+    fireEvent.lostPointerCapture(slider, { pointerId: 14, pointerType: "mouse", isPrimary: true, button: 0, clientX: 100 });
+    fireEvent.pointerUp(slider, { pointerId: 14, pointerType: "mouse", isPrimary: true, button: 0, clientX: 100 });
+    expect(onJump).not.toHaveBeenCalled();
+  });
 });

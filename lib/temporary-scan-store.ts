@@ -21,7 +21,21 @@ export function createTemporaryScanStore() {
   const ensureScanSession: typeof Store.ensureScanSession = async (input) => {
     const target = await ensureTarget(input.url, input.matchType, input.mock);
     const scanId = input.scanId ?? `temporary_${crypto.randomUUID()}`;
-    const session = { ...sessions.get(scanId), ...target, ...input, scanId, targetId: target.targetId };
+    const existing = sessions.get(scanId);
+    const now = Date.now();
+    const session: Store.ScanSession = {
+      ...existing,
+      ...target,
+      ...input,
+      scanId,
+      targetId: target.targetId,
+      collectionIds: input.collectionIds ?? existing?.collectionIds,
+      collectionListFetchedAt: input.collectionListFetchedAt ?? existing?.collectionListFetchedAt,
+      scanWindowFrom: input.scanWindowFrom ?? existing?.scanWindowFrom,
+      scanWindowTo: input.scanWindowTo ?? existing?.scanWindowTo,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now
+    };
     sessions.set(scanId, session);
     return session;
   };
@@ -46,5 +60,23 @@ export function createTemporaryScanStore() {
     coverage.collectionResults[result.collection.id] = mergeCollectionResult(coverage.collectionResults[result.collection.id], result);
     return coverage;
   };
-  return { ensureTarget, ensureScanSession, getCoverage, startCoverageRun, addCoverageDuration, appendCoverageScanLogEntry, upsertCoverageResult };
+  return {
+    ensureTarget, ensureScanSession, getCoverage, startCoverageRun, addCoverageDuration,
+    appendCoverageScanLogEntry, upsertCoverageResult,
+    getScanSession: async (scanId: string) => sessions.get(scanId),
+    hasScanSession: (scanId: string) => sessions.has(scanId),
+    clear: () => { sessions.clear(); coverages.clear(); }
+  };
+}
+
+/** Shared for this browser visit so client-side route changes can restore a scan. */
+export const temporaryScanStore = createTemporaryScanStore();
+
+export function isTemporaryScanId(scanId: string | null | undefined): boolean {
+  return Boolean(scanId && temporaryScanStore.hasScanSession(scanId));
+}
+
+/** Reset visit-local state between isolated tests. */
+export function resetTemporaryScanStoreForTests(): void {
+  temporaryScanStore.clear();
 }

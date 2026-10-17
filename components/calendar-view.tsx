@@ -2,8 +2,10 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
+import Link from "next/link";
 import { type CommonCrawlCapture, type ResultsBackContext } from "@/lib/common-crawl";
 import { createViewerHref } from "@/lib/navigation-state";
+import { isTemporaryScanId } from "@/lib/temporary-scan-store";
 import { measureSync } from "@/lib/performance";
 
 type DateParts = {
@@ -150,6 +152,7 @@ export function CalendarView({
     const target = sorted.find((c) => !/^3\d\d$/.test(c.status)) ?? sorted[0];
     return createViewerHref(target, { scanId, legacyBackContext: backContext });
   };
+  const openViewersInCurrentTab = isTemporaryScanId(scanId);
 
   const yearStripRange = useMemo(() => {
     const earliest = firstDate?.year ?? years[0] ?? new Date().getUTCFullYear();
@@ -181,9 +184,9 @@ export function CalendarView({
         {firstDate && lastDate ? (
           <>
             {" "}between{" "}
-            <DateLink parts={firstDate} href={firstBlueViewerUrl(firstDate)} />
+            <DateLink parts={firstDate} href={firstBlueViewerUrl(firstDate)} openInCurrentTab={openViewersInCurrentTab} />
             {" "}and{" "}
-            <DateLink parts={lastDate} href={firstBlueViewerUrl(lastDate)} />
+            <DateLink parts={lastDate} href={firstBlueViewerUrl(lastDate)} openInCurrentTab={openViewersInCurrentTab} />
             .
           </>
         ) : (
@@ -230,15 +233,15 @@ export function CalendarView({
   );
 }
 
-function DateLink({ parts, href }: { parts: DateParts; href: string | null }) {
+function DateLink({ parts, href, openInCurrentTab = false }: { parts: DateParts; href: string | null; openInCurrentTab?: boolean }) {
   const label = formatDateLabel(parts);
   const className =
     "font-semibold text-amber-300 underline-offset-2 transition hover:text-amber-200 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300";
   if (!href) return <span className={className}>{label}</span>;
   return (
-    <a href={href} target="_blank" rel="noreferrer" className={className}>
+    <Link href={href} target={openInCurrentTab ? undefined : "_blank"} rel={openInCurrentTab ? undefined : "noreferrer"} className={className}>
       {label}
-    </a>
+    </Link>
   );
 }
 
@@ -475,7 +478,7 @@ function DayCell({
       >
         {day}
       </button>
-      {isSelected ? <DayPopover dateKey={dateKey} captures={captures} backContext={backContext} scanId={scanId} /> : null}
+      {isSelected ? <DayPopover dateKey={dateKey} captures={captures} backContext={backContext} scanId={scanId} openInCurrentTab={isTemporaryScanId(scanId)} /> : null}
     </div>
   );
 }
@@ -484,12 +487,14 @@ function DayPopover({
   dateKey,
   captures,
   backContext,
-  scanId
+  scanId,
+  openInCurrentTab = false
 }: {
   dateKey: string;
   captures: CommonCrawlCapture[];
   backContext: ResultsBackContext;
   scanId?: string;
+  openInCurrentTab?: boolean;
 }) {
   const parts = parseDayKey(dateKey);
   const sorted = useMemo(
@@ -523,10 +528,10 @@ function DayPopover({
                 className="flex items-center gap-2 text-sm leading-6 max-sm:min-h-11"
               >
                 <span className="text-zinc-500">•</span>
-                <a
+                <Link
                   href={viewerUrl}
-                  target="_blank"
-                  rel="noreferrer"
+                  target={openInCurrentTab ? undefined : "_blank"}
+                  rel={openInCurrentTab ? undefined : "noreferrer"}
                   className={
                     (isRedirect
                       ? "font-mono font-bold text-emerald-300 hover:text-amber-200 hover:underline"
@@ -535,7 +540,7 @@ function DayPopover({
                   title={capture.url}
                 >
                   {time}
-                </a>
+                </Link>
               </li>
             );
           })}

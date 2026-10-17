@@ -233,6 +233,7 @@ export function CaptureTimeline({
   const ticks = useMemo(() => (domain ? yearTicks(domain, MAX_YEAR_LABELS) : []), [domain]);
 
   const trackRef = useRef<HTMLDivElement>(null);
+  const activePointerId = useRef<number | null>(null);
   const [preview, setPreview] = useState<{ index: number; dragging: boolean } | null>(null);
 
   if (!domain || sorted.length === 0) return null;
@@ -283,20 +284,35 @@ export function CaptureTimeline({
           if (target !== currentIndex) onJump(target);
         }}
         onPointerDown={(event) => {
+          if (!event.isPrimary || event.button !== 0) return;
+          activePointerId.current = event.pointerId;
           event.currentTarget.setPointerCapture(event.pointerId);
           setPreview({ index: indexAtPointer(event.clientX), dragging: true });
         }}
         onPointerMove={(event) => {
+          if (activePointerId.current !== null && event.pointerId !== activePointerId.current) return;
+          if (activePointerId.current !== null && !event.isPrimary) return;
           if (event.pointerType === "touch" && !preview?.dragging) return;
           const index = indexAtPointer(event.clientX);
           setPreview((value) => (value?.index === index ? value : { index, dragging: value?.dragging ?? false }));
         }}
         onPointerUp={(event) => {
+          if (activePointerId.current !== event.pointerId || !event.isPrimary || event.button !== 0) return;
+          activePointerId.current = null;
           const index = indexAtPointer(event.clientX);
           setPreview(event.pointerType === "mouse" ? { index, dragging: false } : null);
           if (index >= 0 && index !== currentIndex) onJump(index);
         }}
-        onPointerCancel={() => setPreview(null)}
+        onPointerCancel={(event) => {
+          if (activePointerId.current !== event.pointerId) return;
+          activePointerId.current = null;
+          setPreview(null);
+        }}
+        onLostPointerCapture={(event) => {
+          if (activePointerId.current !== event.pointerId) return;
+          activePointerId.current = null;
+          setPreview(null);
+        }}
         onPointerLeave={() => setPreview((value) => (value?.dragging ? value : null))}
         className="group relative h-14 cursor-pointer touch-none rounded-md border border-zinc-800 bg-zinc-950 px-3 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-amber-300 ledger:rounded-[3px] ledger:hover:border-zinc-700"
       >

@@ -46,9 +46,10 @@ import {
   type CommonCrawlCapture,
   type CommonCrawlCollection
 } from "@/lib/common-crawl";
-import { buildSpread, captureYearsFromKeys } from "@/lib/history-spread";
+import { buildSpread } from "@/lib/history-spread";
 import { createViewerHref } from "@/lib/navigation-state";
 import { markPerformance, measureAsync } from "@/lib/performance";
+import { downloadBlob } from "@/lib/utils";
 import { computeCsv } from "@/lib/compute-client";
 import { toJsonText } from "@/lib/json-export";
 
@@ -278,6 +279,12 @@ export function HistoryApp() {
   const totalPages = Math.max(1, Math.ceil(sortedRecords.length / pageSize));
   const currentPage = Math.min(page, totalPages);
   const pageStart = (currentPage - 1) * pageSize;
+
+  // Keep the stored page in range after deletions shrink the list, so Prev
+  // moves from the page actually shown.
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
   const visibleRecords = useMemo(
     () => sortedRecords.slice(pageStart, pageStart + pageSize),
     [pageSize, pageStart, sortedRecords]
@@ -344,7 +351,7 @@ export function HistoryApp() {
     if (!window.confirm("Delete this saved scan?")) return;
     const deleteCache = record.captureCount > 0 && window.confirm("Also delete cached HTML files for this scan?");
     await deleteSearches(record.storageKeys ?? [record.key]);
-    if (deleteCache) await deleteCachedCaptureKeys(record.captureKeys ?? []);
+    if (deleteCache) await deleteCachedCaptureKeys(unsharedCaptureKeys(records, [record]));
     await refreshRecords();
   }
 
@@ -358,7 +365,7 @@ export function HistoryApp() {
       .flatMap((record) => record.storageKeys ?? [record.key]);
     await deleteSearches(Array.from(new Set(keys)));
     if (deleteCache) {
-      await deleteCachedCaptureKeys(selected.flatMap((record) => record.captureKeys ?? []));
+      await deleteCachedCaptureKeys(unsharedCaptureKeys(records, selected));
     }
     setSelectedKeys([]);
     await refreshRecords();
@@ -515,7 +522,7 @@ export function HistoryApp() {
                 size="sm"
                 variant="secondary"
                 disabled={selectedRecords.length === 0}
-                onClick={() => void downloadHistoryExport(selectedRecords, "selected", exportFormat)}
+                onClick={() => void downloadHistoryExport(selectedRecords, "selected", exportFormat, currentCollections)}
                 suppressHydrationWarning
               >
                 <Download size={14} />
@@ -527,7 +534,7 @@ export function HistoryApp() {
                   size="sm"
                   variant="secondary"
                   disabled={sortedRecords.length === 0}
-                  onClick={() => void downloadHistoryExport(sortedRecords, "filtered", exportFormat)}
+                  onClick={() => void downloadHistoryExport(sortedRecords, "filtered", exportFormat, currentCollections)}
                   suppressHydrationWarning
                 >
                   <Download size={14} />
@@ -539,7 +546,7 @@ export function HistoryApp() {
                 size="sm"
                 variant="secondary"
                 disabled={records.length === 0}
-                onClick={() => void downloadHistoryExport(records, "all", exportFormat)}
+                onClick={() => void downloadHistoryExport(records, "all", exportFormat, currentCollections)}
                 suppressHydrationWarning
               >
                 <Download size={14} />
@@ -777,11 +784,13 @@ const SPREAD_STUB_PX = 2;
 function CaptureSpread({ keys }: { keys: string[] }) {
   const counts = buildSpread(keys, SPREAD_FROM_YEAR, SPREAD_TO_YEAR);
   const max = Math.max(0, ...counts);
-  const yearsWithCaptures = captureYearsFromKeys(keys).filter(
-    (year) => year >= SPREAD_FROM_YEAR && year <= SPREAD_TO_YEAR
-  );
-  const firstYear = yearsWithCaptures.length > 0 ? Math.min(...yearsWithCaptures) : undefined;
-  const lastYear = yearsWithCaptures.length > 0 ? Math.max(...yearsWithCaptures) : undefined;
+  // Work on the bounded year bins, rather than spreading every capture into
+  // Math.min/max: large domain scans can exceed the function argument limit.
+  const firstIndex = counts.findIndex((count) => count > 0);
+  let lastIndex = counts.length - 1;
+  while (lastIndex >= 0 && counts[lastIndex] === 0) lastIndex -= 1;
+  const firstYear = firstIndex >= 0 ? SPREAD_FROM_YEAR + firstIndex : undefined;
+  const lastYear = lastIndex >= 0 ? SPREAD_FROM_YEAR + lastIndex : undefined;
   const label =
     firstYear === undefined || lastYear === undefined
       ? "No captures by year"
@@ -946,7 +955,9 @@ function mergeHistoryRecords(records: HistoryRecord[]) {
     if (!current) {
       byScan.set(identity, {
         ...record,
-        key: scanSearchKey(record.url, record.matchType, record.mock, record.scanScope, {
+        // Key on the canonical URL so the merged key does not depend on which
+        // twin (raw legacy input or canonical) happens to be merged first.
+        key: scanSearchKey(normalizeScanUrl(record.url), record.matchType, record.mock, record.scanScope, {
           dateFrom: record.dateFrom,
           dateTo: record.dateTo
         }),
@@ -974,7 +985,7 @@ function mergeHistoryRecords(records: HistoryRecord[]) {
     const captureKeys = Array.from(new Set([...(current.captureKeys ?? []), ...(record.captureKeys ?? [])]));
     byScan.set(identity, {
       ...current,
-      key: scanSearchKey(record.url, record.matchType, record.mock, mergedScope, {
+      key: scanSearchKey(normalizeScanUrl(record.url), record.matchType, record.mock, mergedScope, {
         dateFrom: record.dateFrom ?? current.dateFrom,
         dateTo: record.dateTo ?? current.dateTo
       }),
@@ -1176,21 +1187,27 @@ function CachedHtmlSearchPanel() {
   const [searching, setSearching] = useState(false);
   const [open, setOpen] = useState(false);
   const lastQueryRef = useRef("");
+  // Only the newest search may write results, so a slow older query cannot
+  // overwrite a newer one.
+  const searchSequenceRef = useRef(0);
 
   const runSearch = useCallback(async () => {
     const trimmed = query.trim();
+    const sequence = ++searchSequenceRef.current;
     lastQueryRef.current = trimmed;
     if (!trimmed) {
       setResults(null);
+      setSearching(false);
       return;
     }
     setSearching(true);
     try {
-      setResults(await searchCachedHtml(trimmed, { limit: 100 }));
+      const found = await searchCachedHtml(trimmed, { limit: 100 });
+      if (sequence === searchSequenceRef.current) setResults(found);
     } catch {
-      setResults([]);
+      if (sequence === searchSequenceRef.current) setResults([]);
     } finally {
-      setSearching(false);
+      if (sequence === searchSequenceRef.current) setSearching(false);
     }
   }, [query]);
 
@@ -1262,7 +1279,7 @@ function CachedHtmlSearchPanel() {
 
 type HistoryExportMode = "all" | "filtered" | "selected";
 
-function historyExportRecord(record: HistoryRecord, mode: HistoryExportMode, exportedAt: string) {
+function historyExportRecord(record: HistoryRecord, mode: HistoryExportMode, exportedAt: string, currentCollections: CommonCrawlCollection[]) {
   return {
     exportedAt,
     mode,
@@ -1271,27 +1288,35 @@ function historyExportRecord(record: HistoryRecord, mode: HistoryExportMode, exp
     url: record.url,
     matchType: record.matchType,
     scanScope: record.scanScope,
-    outcome: scanOutcome(record),
+    outcome: scanOutcome(record, currentCollections),
     captures: record.captureCount,
-    checkedCollections: sourceCounts(record, []).processed,
-    failedCollections: failedCount(record),
+    checkedCollections: sourceCounts(record, currentCollections).processed,
+    failedCollections: failedCount(record, currentCollections),
     storedCollections: record.collectionIds?.length ?? record.collections?.length ?? record.sourceTotal
   };
 }
 
-function triggerDownload(blob: Blob, filename: string) {
-  const objectUrl = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = objectUrl;
-  link.download = filename;
-  link.click();
-  URL.revokeObjectURL(objectUrl);
+// Cached HTML is keyed per capture, not per scan, so keep entries that a scan
+// which is not being deleted still lists.
+function unsharedCaptureKeys(records: HistoryRecord[], deleted: HistoryRecord[]): string[] {
+  const deletedKeys = new Set(deleted.map((record) => record.key));
+  const keptCaptureKeys = new Set(
+    records.filter((record) => !deletedKeys.has(record.key)).flatMap((record) => record.captureKeys ?? [])
+  );
+  return deleted.flatMap((record) => record.captureKeys ?? []).filter((key) => !keptCaptureKeys.has(key));
 }
 
+function triggerDownload(blob: Blob, filename: string) {
+  downloadBlob(blob, filename);
+}
+
+// Exports use the same current collection list as the table, so the exported
+// outcome and counts match what the user sees.
 async function downloadHistoryExport(
   records: HistoryRecord[],
   mode: HistoryExportMode,
-  format: "csv" | "json"
+  format: "csv" | "json",
+  currentCollections: CommonCrawlCollection[]
 ) {
   const date = new Date().toISOString().slice(0, 10);
   if (format === "json") {
@@ -1301,15 +1326,15 @@ async function downloadHistoryExport(
       exportedAt,
       mode,
       recordCount: records.length,
-      records: records.map((record) => historyExportRecord(record, mode, exportedAt))
+      records: records.map((record) => historyExportRecord(record, mode, exportedAt, currentCollections))
     });
     triggerDownload(new Blob([json], { type: "application/json;charset=utf-8" }), `common-crawl-history-${mode}-${date}.json`);
     return;
   }
-  await downloadCsv(records, mode);
+  await downloadCsv(records, mode, currentCollections);
 }
 
-async function downloadCsv(records: HistoryRecord[], mode: "all" | "filtered" | "selected") {
+async function downloadCsv(records: HistoryRecord[], mode: "all" | "filtered" | "selected", currentCollections: CommonCrawlCollection[]) {
   const rows = [
     [
       "exportedAt",
@@ -1333,20 +1358,15 @@ async function downloadCsv(records: HistoryRecord[], mode: "all" | "filtered" | 
       record.url,
       record.matchType,
       record.scanScope,
-      scanOutcome(record),
+      scanOutcome(record, currentCollections),
       String(record.captureCount),
-      String(sourceCounts(record, []).processed),
-      String(failedCount(record)),
+      String(sourceCounts(record, currentCollections).processed),
+      String(failedCount(record, currentCollections)),
       String(record.collectionIds?.length ?? record.collections?.length ?? record.sourceTotal)
     ])
   ];
   const csv = await computeCsv(rows);
   const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
-  const objectUrl = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = objectUrl;
-  link.download = `common-crawl-history-${mode}-${new Date().toISOString().slice(0, 10)}.csv`;
-  link.click();
-  URL.revokeObjectURL(objectUrl);
+  downloadBlob(blob, `common-crawl-history-${mode}-${new Date().toISOString().slice(0, 10)}.csv`);
 }
 

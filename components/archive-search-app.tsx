@@ -54,7 +54,7 @@ import {
   type SearchStopReason,
   warcRecordUrl
 } from "@/lib/common-crawl";
-import { captureYear, formatBytes } from "@/lib/utils";
+import { captureYear, downloadBlob, formatBytes } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DateControl } from "@/components/ui/date-control";
@@ -116,7 +116,7 @@ import { groupCapturesByUrl } from "@/lib/capture-grouping";
 import { findChangedCaptures } from "@/lib/capture-changes";
 import { describeScanSettings } from "@/lib/scan-description";
 import { prefetchCaptureRecord } from "@/lib/warc-prefetch";
-import { planScanFetches, prefetchScanInBackground } from "@/lib/background-scan";
+import { cancelBackgroundScan, planScanFetches, prefetchScanInBackground } from "@/lib/background-scan";
 import { fetchRawWarcRecordBytes, loadCaptureRecord } from "@/lib/warc";
 import {
   buildWarcResponseRecord,
@@ -133,7 +133,7 @@ import { findOptOutMatch, type OptOutMatch } from "@/lib/opt-out-registry";
 import { createLegacySearchHref, createSearchHref, createViewerHref } from "@/lib/navigation-state";
 import { hasStorageConsent, subscribeStorageConsent } from "@/lib/website-preferences";
 import * as persistentScanStore from "@/lib/capture-store";
-import { createTemporaryScanStore } from "@/lib/temporary-scan-store";
+import { isTemporaryScanId, temporaryScanStore } from "@/lib/temporary-scan-store";
 import { isPastPageEntry } from "@/lib/pastpage-entry";
 
 type ViewMode = "list" | "calendar" | "grouped";
@@ -837,6 +837,10 @@ function sanitizeArchiveFilename(value: string) {
   return cleaned || "capture";
 }
 
+function filterSignature(filters: { collection: string; mime: string; sort: string; status: string; filter: string; year: string }) {
+  return JSON.stringify([filters.collection, filters.mime, filters.sort, filters.status, filters.filter, filters.year]);
+}
+
 function htmlArchiveFilename(capture: CommonCrawlCapture, index: number) {
   return [
     String(index + 1).padStart(4, "0"),
@@ -1074,15 +1078,6 @@ function htmlZipFilename(part: number, parts: number) {
   const date = new Date().toISOString().slice(0, 10);
   if (parts <= 1) return `common-crawl-html-${date}.zip`;
   return `common-crawl-html-${date}-part-${String(part).padStart(2, "0")}.zip`;
-}
-
-function downloadBlob(blob: Blob, filename: string) {
-  const objectUrl = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = objectUrl;
-  link.download = filename;
-  link.click();
-  URL.revokeObjectURL(objectUrl);
 }
 
 function scanScopesForStoredMerge(scope: ScanScope): ScanScope[] {
@@ -1425,10 +1420,10 @@ export function ArchiveSearchApp({
   const pastPageEntry = autoStart && isPastPageEntry("/search", {
     get: (key) => routeParams[key as keyof ArchiveSearchInitialParams] ?? null
   });
-  const [temporaryScanStore] = useState(createTemporaryScanStore);
+  const temporaryRoute = isTemporaryScanId(routeParams.scan);
   const { ensureTarget, ensureScanSession, getCoverage, startCoverageRun,
     addCoverageDuration, appendCoverageScanLogEntry, upsertCoverageResult } =
-    pastPageEntry ? temporaryScanStore : persistentScanStore;
+    pastPageEntry || temporaryRoute ? temporaryScanStore : persistentScanStore;
   const initialUrl = normalizeInitialUrl(routeParams.url ?? null);
   const initialMatchType = normalizeInitialMatchType(routeParams.match ?? null);
   const initialDateFrom = normalizeDateInput(routeParams.from);
@@ -1527,6 +1522,9 @@ export function ArchiveSearchApp({
   const autoStartedSignatureRef = useRef<string | null>(null);
   const blockedRobotsApprovedScanIdsRef = useRef<Set<string>>(new Set());
   const filterResetMountedRef = useRef(false);
+  // Signature of filters restored together with a page. The filter-change
+  // effect skips its page reset for exactly that restore.
+  const restoredFilterSignatureRef = useRef<string | undefined>(undefined);
   const targetUrlInputRef = useRef<HTMLInputElement | null>(null);
   const loggedAutoRetryAtRef = useRef<number | undefined>(undefined);
   const scanLogRef = useRef<ScanLogEntry[]>([]);
@@ -1538,10 +1536,10 @@ export function ArchiveSearchApp({
       warcAbortRef.current?.abort();
     };
     const unsubscribe = subscribeStorageConsent(() => {
-      if (!pastPageEntry && !hasStorageConsent()) stop();
+      if (!pastPageEntry && !temporaryRoute && !hasStorageConsent()) stop();
     });
     return () => { unsubscribe(); stop(); };
-  }, [pastPageEntry]);
+  }, [pastPageEntry, temporaryRoute]);
   const autoStartSignature = [
     routeParams.source ?? "",
     initialMockMode ? "mock" : "live",
@@ -1590,6 +1588,11 @@ export function ArchiveSearchApp({
   }, []);
 
   const applyRouteResultParams = useCallback(() => {
+    restoredFilterSignatureRef.current = filterSignature({
+      collection: routeParams.collection ?? "all", mime: routeParams.mime ?? "all",
+      sort: normalizeInitialSort(routeParams.sort ?? null), status: routeParams.status ?? "all",
+      filter: routeParams.filter ?? "", year: routeParams.year ?? "all"
+    });
     setYearFilter(routeParams.year ?? "all");
     setCollectionFilter(routeParams.collection ?? "all");
     setMimeFilter(routeParams.mime ?? "all");
@@ -1743,6 +1746,11 @@ export function ArchiveSearchApp({
       filterResetMountedRef.current = true;
       return;
     }
+    const restoredSignature = restoredFilterSignatureRef.current;
+    restoredFilterSignatureRef.current = undefined;
+    if (restoredSignature === filterSignature({
+      collection: collectionFilter, mime: mimeFilter, sort: sortBy, status: statusFilter, filter: urlFilter, year: yearFilter
+    })) return;
     setPage(1);
   }, [collectionFilter, mimeFilter, sortBy, statusFilter, urlFilter, yearFilter]);
 
@@ -1819,6 +1827,11 @@ export function ArchiveSearchApp({
   }
 
   function applySessionFilters(session: ScanSession) {
+    restoredFilterSignatureRef.current = filterSignature({
+      collection: session.collection ?? "all", mime: session.mime ?? "all",
+      sort: normalizeInitialSort(session.sort ?? null), status: session.status ?? "all",
+      filter: session.filter ?? "", year: session.year ?? "all"
+    });
     setYearFilter(session.year ?? "all");
     setCollectionFilter(session.collection ?? "all");
     setMimeFilter(session.mime ?? "all");
@@ -1934,7 +1947,9 @@ export function ArchiveSearchApp({
   }
 
   async function loadSessionById(scanId: string, signal?: AbortSignal) {
-    const session = await getScanSession(scanId);
+    const session = await (pastPageEntry || temporaryRoute
+      ? temporaryScanStore.getScanSession(scanId)
+      : getScanSession(scanId));
     if (signal?.aborted) return false;
     if (!session) return false;
     const loadedCollections = collections.length > 0 ? collections : await fetchCollections(signal);
@@ -2313,7 +2328,15 @@ export function ArchiveSearchApp({
         );
       }
       if (activeOptOutMatch) {
-        const activeCollections = collectionsForScope(collections, activeScope, activeDateFrom, activeDateTo);
+        // The source list is not URL-specific, so loading it does not contact
+        // the opted-out site. Without it, a first search after page load would
+        // rebuild the stored view against an empty collection list.
+        let optOutCollections = collections;
+        if (optOutCollections.length === 0) {
+          try { optOutCollections = await loadCollectionsIfNeeded(controller); }
+          catch (error) { if (controller.signal.aborted) throw error; }
+        }
+        const activeCollections = collectionsForScope(optOutCollections, activeScope, activeDateFrom, activeDateTo);
         const storedRecords = loadStoredForMode
           ? await getStoredScanVariants(url, activeMatchType, false, activeScope, activeDateFrom, activeDateTo)
           : [];
@@ -2508,6 +2531,26 @@ export function ArchiveSearchApp({
       });
 
       let didQueueImmediateFailureRetry = mode === "retry-failed" || mode === "auto-retry";
+      // Once the last queued source is done (checked or skipped), retry the
+      // failed ones a single time before finishing.
+      const queueImmediateFailureRetry = (searchIndex: number) => {
+        if (
+          didQueueImmediateFailureRetry ||
+          searchIndex !== searchSet.length - 1 ||
+          currentFailedResults.length === 0
+        ) return;
+        didQueueImmediateFailureRetry = true;
+        const retryIds = new Set(currentFailedResults.map((failedResult) => failedResult.collection.id));
+        const retryCollections = activeCollections.filter((activeCollection) => retryIds.has(activeCollection.id));
+        if (retryCollections.length > 0) {
+          appendRunLogEvent(scanLogEvent(
+            "scan-restarted",
+            `Retrying ${retryCollections.length} failed source${retryCollections.length === 1 ? "" : "s"} before finishing.`,
+            "amber"
+          ));
+          searchSet = [...searchSet, ...retryCollections];
+        }
+      };
       for (let searchIndex = 0; searchIndex < searchSet.length; searchIndex += 1) {
         const collection = searchSet[searchIndex];
         if (controller.signal.aborted) break;
@@ -2534,6 +2577,7 @@ export function ArchiveSearchApp({
           currentCheckedIds = resultCollectionIds(currentResults);
           setCaptures(currentCaptures);
           setCheckedCollectionIds(currentCheckedIds);
+          queueImmediateFailureRetry(searchIndex);
           continue;
         }
 
@@ -2603,23 +2647,7 @@ export function ArchiveSearchApp({
           break;
         }
 
-        if (
-          !didQueueImmediateFailureRetry &&
-          searchIndex === searchSet.length - 1 &&
-          currentFailedResults.length > 0
-        ) {
-          didQueueImmediateFailureRetry = true;
-          const retryIds = new Set(currentFailedResults.map((failedResult) => failedResult.collection.id));
-          const retryCollections = activeCollections.filter((activeCollection) => retryIds.has(activeCollection.id));
-          if (retryCollections.length > 0) {
-            appendRunLogEvent(scanLogEvent(
-              "scan-restarted",
-              `Retrying ${retryCollections.length} failed source${retryCollections.length === 1 ? "" : "s"} before finishing.`,
-              "amber"
-            ));
-            searchSet = [...searchSet, ...retryCollections];
-          }
-        }
+        queueImmediateFailureRetry(searchIndex);
       }
       unsubscribeRateLimitChanges?.();
       unsubscribeRateLimitChanges = undefined;
@@ -2834,7 +2862,10 @@ export function ArchiveSearchApp({
         parts = Math.max(parts, part);
         updateZipProgress();
         const zipBytes = await computeZipBytes(entries);
-        downloadBlob(new Blob([zipBytes], { type: "application/zip" }), htmlZipFilename(part, parts));
+        // A mid-stream flush means more parts follow, so even part 1 gets a
+        // suffix; only a lone final part stays un-suffixed.
+        const onlyPart = force && part === 1;
+        downloadBlob(new Blob([zipBytes], { type: "application/zip" }), htmlZipFilename(part, onlyPart ? 1 : Math.max(parts, part + 1)));
         await waitForBrowserDownload(HTML_ZIP_DOWNLOAD_PAUSE_MS);
         downloadedParts += 1;
         part += 1;
@@ -2983,13 +3014,14 @@ export function ArchiveSearchApp({
     let partBytes = 0;
     let partCaptureCount = 0;
 
-    // The total part count is only known once streaming finishes, so name each
-    // part by its own number: a lone part stays un-suffixed, extra parts get a
-    // "-part-NN" suffix (filenames never collide either way).
-    const flushPart = async () => {
+    // The total part count is only known once streaming finishes. A mid-stream
+    // flush means more parts follow, so even part 1 gets a "-part-NN" suffix;
+    // only a lone final part stays un-suffixed.
+    const flushPart = async (final = false) => {
       if (members.length === 0) return;
       const bytes = concatByteChunks(members);
-      downloadBlob(new Blob([bytes], { type: "application/warc" }), warcExportFilename(part, part));
+      const onlyPart = final && part === 1;
+      downloadBlob(new Blob([bytes], { type: "application/warc" }), warcExportFilename(part, onlyPart ? 1 : part + 1));
       await waitForBrowserDownload(HTML_ZIP_DOWNLOAD_PAUSE_MS);
       part += 1;
       parts = Math.max(parts, part);
@@ -3050,7 +3082,7 @@ export function ArchiveSearchApp({
         });
       }
 
-      await flushPart();
+      await flushPart(true);
       setWarcDownload({
         active: false,
         completed: capturesToDownload.length,
@@ -3098,7 +3130,9 @@ export function ArchiveSearchApp({
             setState("error");
             return;
           }
-          const session = await getScanSession(initialScanId);
+          const session = await (pastPageEntry || temporaryRoute
+            ? temporaryScanStore.getScanSession(initialScanId)
+            : getScanSession(initialScanId));
           if (controller.signal.aborted || !session || !initialAction) return;
           if (initialAction === "fresh") {
             resetCommonCrawlRateLimitState();
@@ -3270,23 +3304,40 @@ export function ArchiveSearchApp({
   // warming the CDX pages of the not-yet-checked collections so the scan makes
   // progress in the background and resumes fast when the user returns. No-op when
   // there is no controlling worker (dev, or first load before activation).
+  // Warming stops when the tab is visible again or the scan ends, so the worker
+  // never runs alongside the page scan. The plan inputs live in a ref so routine
+  // progress updates do not cancel the warming job.
+  const backgroundWarmInputRef = useRef({ collections, checkedCollectionIds, scanScope, customDateFrom, customDateTo, targetUrl, matchType });
+  useEffect(() => {
+    backgroundWarmInputRef.current = { collections, checkedCollectionIds, scanScope, customDateFrom, customDateTo, targetUrl, matchType };
+  }, [collections, checkedCollectionIds, scanScope, customDateFrom, customDateTo, targetUrl, matchType]);
   useEffect(() => {
     if (!isRunning) return;
-    const warmRemaining = () => {
-      if (typeof document === "undefined" || document.visibilityState !== "hidden") return;
-      const remaining = collections.filter((collection) => !checkedCollectionIds.has(collection.id));
+    let warming = false;
+    const onVisibilityChange = () => {
+      if (typeof document === "undefined") return;
+      if (document.visibilityState !== "hidden") {
+        if (warming) cancelBackgroundScan();
+        warming = false;
+        return;
+      }
+      const input = backgroundWarmInputRef.current;
+      const remaining = input.collections.filter((collection) => !input.checkedCollectionIds.has(collection.id));
       if (remaining.length === 0) return;
       const dateWindow =
-        scanScope === "custom" && hasValidCustomDateRange(customDateFrom, customDateTo)
-          ? { from: customDateFrom, to: customDateTo }
+        input.scanScope === "custom" && hasValidCustomDateRange(input.customDateFrom, input.customDateTo)
+          ? { from: input.customDateFrom, to: input.customDateTo }
           : undefined;
-      prefetchScanInBackground(
-        planScanFetches({ url: targetUrl, matchType, collections: remaining, dateWindow })
+      warming = prefetchScanInBackground(
+        planScanFetches({ url: input.targetUrl, matchType: input.matchType, collections: remaining, dateWindow })
       );
     };
-    document.addEventListener("visibilitychange", warmRemaining);
-    return () => document.removeEventListener("visibilitychange", warmRemaining);
-  }, [isRunning, collections, checkedCollectionIds, scanScope, customDateFrom, customDateTo, targetUrl, matchType]);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      if (warming) cancelBackgroundScan();
+    };
+  }, [isRunning]);
 
   const currentNoticeFailedResults = liveFailedResults;
   const availabilityIssue = currentNoticeFailedResults.some((result) =>
@@ -3583,7 +3634,7 @@ export function ArchiveSearchApp({
 
     return () => window.clearTimeout(timeoutId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canAutoRetryFailed, canScheduleAutoRetry, failedResults.length, uncheckedCount, targetUrl, matchType, scanScope, nextAutoRetryAt]);
+  }, [canAutoRetryFailed, canScheduleAutoRetry, failedResults.length, uncheckedCount, targetUrl, matchType, scanScope, customDateFrom, customDateTo, nextAutoRetryAt]);
 
   useEffect(() => {
     const trimmedUrl = targetUrl.trim();

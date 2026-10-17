@@ -1,11 +1,24 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LARGE_CAPTURE_LIMIT_BYTES } from "@/lib/common-crawl";
-import { fetchAndParseWarcRecord, fetchRawWarcRecordBytes, parseHeaderBlock, parseWarcRecord, sanitizeHtmlForPreview } from "@/lib/warc";
+import { decodeWarcRecordBytes, fetchAndParseWarcRecord, fetchRawWarcRecordBytes, parseHeaderBlock, parseWarcRecord, sanitizeHtmlForPreview } from "@/lib/warc";
 
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
+
+// Builds an uncompressed WARC response record whose HTTP body is raw bytes.
+function warcRecordBytes(contentType: string, body: Uint8Array | string): Uint8Array {
+  const encoder = new TextEncoder();
+  const head = encoder.encode(
+    `WARC/1.0\r\nWARC-Type: response\r\nWARC-Target-URI: https://example.com/\r\n\r\nHTTP/1.1 200 OK\r\n${contentType}\r\n\r\n`
+  );
+  const bodyBytes = typeof body === "string" ? encoder.encode(body) : body;
+  const record = new Uint8Array(head.length + bodyBytes.length);
+  record.set(head, 0);
+  record.set(bodyBytes, head.length);
+  return record;
+}
 
 describe("WARC parser", () => {
   it("parses header blocks", () => {
@@ -33,6 +46,40 @@ describe("WARC parser", () => {
     expect(record.statusLine).toBe("HTTP/1.1 200 OK");
     expect(record.httpHeaders["Content-Type"]).toBe("text/html");
     expect(record.html).toContain("Saved");
+  });
+
+  it("decodes a latin-1 body using the HTTP Content-Type charset", () => {
+    const record = parseWarcRecord(decodeWarcRecordBytes(
+      warcRecordBytes("Content-Type: text/html; charset=iso-8859-1", new Uint8Array([0x3c, 0x70, 0x3e, 0xe4, 0xf6, 0xfc, 0x3c, 0x2f, 0x70, 0x3e]))
+    ));
+
+    expect(record.html).toBe("<p>äöü</p>");
+    expect(record.httpHeaders["Content-Type"]).toBe("text/html; charset=iso-8859-1");
+  });
+
+  it("decodes a body using a <meta charset> declaration when the header has none", () => {
+    const head = new TextEncoder().encode('<html><head><meta charset="windows-1252"></head><body>caf');
+    const bytes = new Uint8Array([...head, 0xe9, ...new TextEncoder().encode("</body></html>")]);
+
+    const record = parseWarcRecord(decodeWarcRecordBytes(warcRecordBytes("Content-Type: text/html", bytes)));
+
+    expect(record.html).toContain("café");
+  });
+
+  it("keeps UTF-8 as the default when no charset is declared", () => {
+    const record = parseWarcRecord(decodeWarcRecordBytes(
+      warcRecordBytes("Content-Type: text/html", "<p>Grüße ✓</p>")
+    ));
+
+    expect(record.html).toBe("<p>Grüße ✓</p>");
+  });
+
+  it("falls back to UTF-8 for an unknown charset label", () => {
+    const record = parseWarcRecord(decodeWarcRecordBytes(
+      warcRecordBytes("Content-Type: text/html; charset=not-a-real-charset", "<p>✓</p>")
+    ));
+
+    expect(record.html).toBe("<p>✓</p>");
   });
 
   it("removes script and external load attributes for sandbox preview", () => {

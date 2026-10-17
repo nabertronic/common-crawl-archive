@@ -5,6 +5,7 @@ import { AlertTriangle, Check, Copy, Download, FileCode2, Loader2, ShieldAlert }
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   LARGE_CAPTURE_LIMIT_BYTES,
+  isSafeWarcFilename,
   warcRecordUrl,
   type CommonCrawlCapture,
   type MatchType
@@ -12,7 +13,7 @@ import {
 import { loadCaptureRecord, type ParsedWarcRecord } from "@/lib/warc";
 import { buildCapturePreviewDocument } from "@/lib/capture-preview";
 import { markPerformance, measureAsync } from "@/lib/performance";
-import { cn, formatBytes, formatTimestamp } from "@/lib/utils";
+import { cn, downloadBlob, formatBytes, formatTimestamp } from "@/lib/utils";
 import { formatCaptureCitation, formatCaptureDateLong } from "@/lib/capture-citation";
 import { Button } from "@/components/ui/button";
 import { HtmlPrivacyWarningDialog } from "@/components/html-privacy-warning-dialog";
@@ -40,6 +41,8 @@ import {
   updateSettings
 } from "@/lib/capture-store";
 import { createViewerHref, parseViewerRoute, viewerBackHref } from "@/lib/navigation-state";
+import { hasStorageConsent } from "@/lib/website-preferences";
+import { temporaryScanStore, isTemporaryScanId } from "@/lib/temporary-scan-store";
 
 type ViewerState =
   | { kind: "loading"; source?: "cache" | "network" }
@@ -196,6 +199,7 @@ export function CaptureViewerApp() {
   }, [citationText]);
 
   useEffect(() => {
+    if (!hasStorageConsent()) return;
     void getSettings()
       .then((settings) => {
         setShowHtmlPrivacyWarning(settings.showHtmlPrivacyWarning);
@@ -228,6 +232,10 @@ export function CaptureViewerApp() {
       setState({ kind: "error", message: "Missing WARC metadata in the viewer URL." });
       return;
     }
+    if (!isMockCaptureFilename(filename) && !isSafeWarcFilename(filename)) {
+      setState({ kind: "error", message: "Invalid WARC filename in the viewer URL." });
+      return;
+    }
     if (isMockCaptureFilename(filename)) {
       setState({
         kind: "loaded",
@@ -246,7 +254,10 @@ export function CaptureViewerApp() {
       () => loadCaptureRecord({ capture: routeCapture, allowLarge: allowLargeLoad, signal: controller.signal }),
       { allowLarge: allowLargeLoad }
     )
-      .then(({ record, source }) => setState({ kind: "loaded", record, source }))
+      .then(({ record, source }) => {
+        if (controller.signal.aborted) return;
+        setState({ kind: "loaded", record, source });
+      })
       .catch((error) => {
         if (controller.signal.aborted) return;
         setState({ kind: "error", message: error instanceof Error ? error.message : "Could not load WARC record." });
@@ -261,7 +272,9 @@ export function CaptureViewerApp() {
       let cancelled = false;
       const load = () => {
         measureAsync("viewer-capture-manifest-load", () =>
-          getScanSession(scanId).then((session) => session ? getCoverage(session.targetId) : undefined)
+          isTemporaryScanId(scanId)
+            ? temporaryScanStore.getScanSession(scanId).then((session) => session ? temporaryScanStore.getCoverage(session.targetId) : undefined)
+            : getScanSession(scanId).then((session) => session ? getCoverage(session.targetId) : undefined)
         )
           .then((coverage) => {
             if (!cancelled) setCaptures(coverageCaptures(coverage));
@@ -358,12 +371,7 @@ export function CaptureViewerApp() {
     // Downloaded HTML carries a CSP so opening it locally cannot run scripts or
     // fetch remote assets. Copy HTML stays the raw archived markup.
     const blob = new Blob([buildDownloadedHtml(state.record.html)], { type: "text/html;charset=utf-8" });
-    const downloadUrl = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = downloadUrl;
-    anchor.download = `${timestamp || "capture"}.html`;
-    anchor.click();
-    URL.revokeObjectURL(downloadUrl);
+    downloadBlob(blob, `${timestamp || "capture"}.html`);
   }, [state, timestamp]);
 
   const confirmPendingHtmlAction = useCallback(() => {
@@ -410,7 +418,13 @@ export function CaptureViewerApp() {
                   ? "Loading the full WARC range from Common Crawl."
                   : "Checking local cache before requesting Common Crawl."}
               </p>
-              <p className="mt-1 text-xs text-zinc-500">{isMockCaptureFilename(filename) ? filename : warcRecordUrl(filename)}</p>
+              <p className="mt-1 text-xs text-zinc-500">
+                {isMockCaptureFilename(filename)
+                  ? filename
+                  : isSafeWarcFilename(filename)
+                    ? warcRecordUrl(filename)
+                    : "WARC metadata is missing or invalid."}
+              </p>
             </div>
           </section>
         ) : null}
@@ -561,7 +575,7 @@ export function CaptureViewerApp() {
         onContinue={({ dontShowAgain }) => {
           if (dontShowAgain) {
             setShowHtmlPrivacyWarning(false);
-            void updateSettings({ showHtmlPrivacyWarning: false }).catch(() => undefined);
+            if (hasStorageConsent()) void updateSettings({ showHtmlPrivacyWarning: false }).catch(() => undefined);
           }
           confirmPendingHtmlAction();
         }}

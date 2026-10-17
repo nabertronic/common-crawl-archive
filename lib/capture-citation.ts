@@ -1,5 +1,6 @@
 // Plain-text citation for a Common Crawl capture. Pure and locale-free: every
 // date is formatted by hand in UTC so the output is the same in every runtime.
+import { parseCaptureTime } from "@/lib/capture-timeline";
 
 const SHORT_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const LONG_MONTHS = [
@@ -37,7 +38,7 @@ export function formatCaptureCitation({ url, timestamp, collection, retrievedAt 
 /** Long-form UTC date for a 14-digit capture timestamp, e.g. "20 April 2026". Returns "" when malformed. */
 export function formatCaptureDateLong(timestamp: string): string {
   const match = TIMESTAMP_PATTERN.exec(timestamp);
-  if (!match) return "";
+  if (!match || parseCaptureTime(timestamp) === null) return "";
   const month = LONG_MONTHS[Number(match[2]) - 1];
   if (!month) return "";
   return `${Number(match[3])} ${month} ${match[1]}`;
@@ -59,7 +60,7 @@ function citationTitle(url: string): string {
 function formatCitationCapturedAt(timestamp: string): string {
   const match = TIMESTAMP_PATTERN.exec(timestamp);
   const month = match ? SHORT_MONTHS[Number(match[2]) - 1] : undefined;
-  if (!match || !month) return timestamp.trim() || "at an unknown date";
+  if (!match || !month || parseCaptureTime(timestamp) === null) return timestamp.trim() || "at an unknown date";
   return `${Number(match[3])} ${month} ${match[1]}, ${match[4]}:${match[5]} UTC`;
 }
 

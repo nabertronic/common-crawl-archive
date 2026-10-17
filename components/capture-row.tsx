@@ -1,14 +1,17 @@
 "use client";
 
 import { memo, useRef, useState } from "react";
+import Link from "next/link";
 import { ArrowDown, ArrowUp, ArrowUpRight, ChevronsUpDown, CornerDownRight, PencilLine } from "lucide-react";
 import { type CommonCrawlCapture, type ResultsBackContext } from "@/lib/common-crawl";
 import { createViewerHref } from "@/lib/navigation-state";
 import { captureKey } from "@/lib/scan-results";
 import { prefetchCaptureRecord } from "@/lib/warc-prefetch";
+import { isTemporaryScanId } from "@/lib/temporary-scan-store";
+import { cn } from "@/lib/utils";
 import { describeHttpStatus, formatBytes, formatTimestamp } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
-import { LinkButton } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
 
 export type SortDir = "asc" | "desc";
@@ -99,6 +102,9 @@ type CaptureRowProps = {
 
 function CaptureRowImpl({ capture, backContext, scanId, changed = false }: CaptureRowProps) {
   const viewerUrl = createViewerHref(capture, { scanId, legacyBackContext: backContext });
+  // A temporary scan lives only in this tab's memory, so a new tab could not
+  // restore it. Open its viewer with client-side navigation instead.
+  const openInCurrentTab = isTemporaryScanId(scanId);
   const isRedirect = /^3\d\d$/.test(capture.status);
   const statusTone = capture.status === "200" ? "green" : isRedirect ? "amber" : "neutral";
   const isHtml = capture.mime === "text/html";
@@ -225,16 +231,15 @@ function CaptureRowImpl({ capture, backContext, scanId, changed = false }: Captu
       </div>
 
       <div className="mt-3 flex justify-end lg:mt-0">
-        <LinkButton
+        <Link
           href={viewerUrl}
-          target="_blank"
-          rel="noreferrer"
-          size="sm"
-          className="w-full whitespace-nowrap sm:w-auto lg:w-full lg:justify-center ledger:border-zinc-50 ledger:bg-transparent ledger:text-zinc-50 ledger:group-hover:bg-zinc-50 ledger:group-hover:text-zinc-950 ledger:motion-safe:active:scale-[0.97] ledger:duration-100"
+          target={openInCurrentTab ? undefined : "_blank"}
+          rel={openInCurrentTab ? undefined : "noreferrer"}
+          className={cn(buttonVariants({ size: "sm" }), "w-full whitespace-nowrap sm:w-auto lg:w-full lg:justify-center ledger:border-zinc-50 ledger:bg-transparent ledger:text-zinc-50 ledger:group-hover:bg-zinc-50 ledger:group-hover:text-zinc-950 ledger:motion-safe:active:scale-[0.97] ledger:duration-100")}
         >
           <ArrowUpRight size={14} className="ledger:motion-safe:transition-transform ledger:motion-safe:duration-200 ledger:motion-safe:ease-[cubic-bezier(0.2,0.8,0.2,1)] ledger:motion-safe:group-hover:translate-x-0.5" />
           View
-        </LinkButton>
+        </Link>
       </div>
     </article>
   );

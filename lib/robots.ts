@@ -197,13 +197,22 @@ export function evaluateRobots(
   };
 }
 
+// RFC 9309 section 2.2.1: a crawler matches the product token of its user agent
+// (the part before "/") against each User-agent line, case-insensitively.
 function matchingGroups(groups: RobotsGroup[], userAgent: string) {
-  const normalizedAgent = userAgent.toLowerCase();
+  const productToken = userAgentProductToken(userAgent);
   const specific = groups.filter((group) =>
-    group.userAgents.some((agent) => agent !== "*" && normalizedAgent.startsWith(agent))
+    group.userAgents.some((agent) => {
+      const agentToken = userAgentProductToken(agent);
+      return agentToken !== "" && agentToken !== "*" && agentToken === productToken;
+    })
   );
   if (specific.length > 0) return specific;
   return groups.filter((group) => group.userAgents.includes("*"));
+}
+
+function userAgentProductToken(value: string) {
+  return (value.split("/")[0] ?? "").trim().toLowerCase();
 }
 
 function strongestRule(rules: RobotsRule[], targetPath: string): RobotsRule | undefined {

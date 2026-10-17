@@ -881,9 +881,11 @@ describe("Common Crawl client", () => {
     );
 
     expect(capped.captures).toHaveLength(2);
+    expect(capped.truncated).toBe(true);
     expect(uncapped.fromCache).toBeUndefined();
     expect(uncapped.captures).toHaveLength(4);
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    // Capped: page 0 lands on the cap, page 1 proves truncation. Uncapped: pages 0-2.
+    expect(fetchMock).toHaveBeenCalledTimes(5);
   });
 
   it("sends the date window to the API, records it on the result, and caches per-window", async () => {
@@ -1327,3 +1329,53 @@ describe("cached CDX results", () => {
   });
 });
 
+
+describe("CDX request timeout and pacing", () => {
+  const pacedCollection = {
+    id: "CC-MAIN-2026-01", name: "Jan 2026", from: "2026-01-01", to: "2026-01-31",
+    cdxApi: "https://index.commoncrawl.org/CC-MAIN-2026-01-index"
+  } as CommonCrawlCollection;
+
+  beforeEach(() => {
+    grantStorageConsent();
+    resetCommonCrawlRateLimitState();
+  });
+
+  it("does not count a Retry-After cooldown in the queue against the request timeout", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) return new Response("", { status: 429, headers: { "Retry-After": "1" } });
+      return new Response("", { status: 404 });
+    }));
+    await queryCollection("https://example.com/paced", pacedCollection, undefined, 5_000, 0, 1, 1);
+    const second = await queryCollection(
+      "https://example.com/paced",
+      { ...pacedCollection, id: "CC-MAIN-2026-02", cdxApi: "https://index.commoncrawl.org/CC-MAIN-2026-02-index" },
+      undefined, 300, 0, 1, 1
+    );
+    expect(second.status).toBe("checked");
+    expect(calls).toBe(2);
+    vi.unstubAllGlobals();
+  });
+
+  it("does not flag a result as truncated when it ends exactly on the capture cap", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const requested = String(input);
+      if (requested.includes("page=0")) {
+        return new Response([
+          JSON.stringify({ timestamp: "20260101000000", url: "https://example.com/", status: "200", mime: "text/html", filename: "crawl-data/a.warc.gz", offset: "1", length: "2" }),
+          JSON.stringify({ timestamp: "20260102000000", url: "https://example.com/", status: "200", mime: "text/html", filename: "crawl-data/a.warc.gz", offset: "3", length: "2" })
+        ].join("\n"), { status: 200 });
+      }
+      return new Response("", { status: 400 });
+    }));
+    const result = await queryCollection(
+      "https://example.com/exact-cap", pacedCollection, undefined, 1_000, 0, undefined, undefined,
+      "exact", undefined, undefined, 2
+    );
+    expect(result.captures).toHaveLength(2);
+    expect(result.truncated).toBeUndefined();
+    vi.unstubAllGlobals();
+  });
+});

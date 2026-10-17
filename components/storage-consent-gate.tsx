@@ -12,6 +12,7 @@ import { HeroStamp } from "@/components/ledger/hero-stamp";
 import { grantStorageConsent, hasStorageConsent, openWebsitePreferences, subscribeStorageConsent } from "@/lib/website-preferences";
 
 import { isPastPageEntry } from "@/lib/pastpage-entry";
+import { isTemporaryScanId } from "@/lib/temporary-scan-store";
 
 const STORAGE_ROUTES = new Set(["/", "/search", "/history", "/settings", "/view"]);
 
@@ -21,6 +22,7 @@ export function StorageConsentGate({ children }: { children: React.ReactNode }) 
   const router = useRouter();
   const searchParams = useSearchParams();
   const pastPageEntry = isPastPageEntry(pathname, searchParams);
+  const temporaryScanRoute = isTemporaryScanId(searchParams.get("scan"));
   const [granted, setGranted] = useState(false);
   const [url, setUrl] = useState("");
   const [pendingUrl, setPendingUrl] = useState<string | null>(null);
@@ -52,7 +54,7 @@ export function StorageConsentGate({ children }: { children: React.ReactNode }) 
     setPendingUrl(url.trim());
     blocked();
   };
-  if (!protectedRoute || granted || pastPageEntry) return <>{children}</>;
+  if (!protectedRoute || granted || pastPageEntry || (pathname === "/view" && temporaryScanRoute) || (pathname === "/search" && temporaryScanRoute)) return <>{children}</>;
 
   // These short explanations keep deep links useful without loading app code.
   if (pathname === "/") {

@@ -17,6 +17,16 @@ describe("capture timeline helpers", () => {
     expect(parseCaptureTime("not-a-date")).toBeNull();
   });
 
+  it("accepts complete timestamp precisions and rejects invalid dates, times, and suffixes", () => {
+    expect(parseCaptureTime("20240229")).toBe(Date.UTC(2024, 1, 29));
+    expect(parseCaptureTime("2024022912")).toBe(Date.UTC(2024, 1, 29, 12));
+    expect(parseCaptureTime("202402291230")).toBe(Date.UTC(2024, 1, 29, 12, 30));
+    for (const value of [
+      "20230229", "20240231", "20241301", "20240101x", "202401011", "2024010112300",
+      "2024010124", "202401011260", "20240101123060", "20240101123000junk"
+    ]) expect(parseCaptureTime(value), value).toBeNull();
+  });
+
   it("pads the domain and centres a single capture in a one-week window", () => {
     const single = timelineDomain([t("20200101000000")]);
     expect(single).not.toBeNull();

@@ -40,6 +40,29 @@ Disallow: /private
     expect(blocked.matchedRule).toMatchObject({ directive: "disallow", path: "/private" });
   });
 
+  it("does not let an empty User-agent line capture CCBot", () => {
+    const parsed = parseRobotsTxt("User-agent:\nDisallow: /\n\nUser-agent: *\nAllow: /\n");
+
+    expect(evaluateRobots(parsed, "/page", "https://example.com/robots.txt", 1).status).toBe("allowed");
+  });
+
+  it("does not match a User-agent value that is only a prefix of CCBot", () => {
+    const parsed = parseRobotsTxt("User-agent: c\nDisallow: /\n\nUser-agent: cc\nDisallow: /cc\n\nUser-agent: *\nAllow: /\n");
+
+    expect(evaluateRobots(parsed, "/page", "https://example.com/robots.txt", 1).status).toBe("allowed");
+    expect(evaluateRobots(parsed, "/cc", "https://example.com/robots.txt", 1).status).toBe("allowed");
+  });
+
+  it("matches the CCBot product token case-insensitively and ignoring a version suffix", () => {
+    const upper = parseRobotsTxt("User-agent: CCBot\nDisallow: /private\n");
+    const versioned = parseRobotsTxt("User-agent: ccbot/2.0\nDisallow: /private\n");
+    const padded = parseRobotsTxt("User-agent:   CCBOT  \nDisallow: /private\n");
+
+    for (const parsed of [upper, versioned, padded]) {
+      expect(evaluateRobots(parsed, "/private", "https://example.com/robots.txt", 1).status).toBe("blocked");
+    }
+  });
+
   it("lets longer allow rules win over broader disallow rules", () => {
     const parsed = parseRobotsTxt(`
 User-agent: CCBot

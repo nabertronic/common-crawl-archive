@@ -624,9 +624,16 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-function createChildSignal(parent: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+// The timeout starts only when `start` is called, so time spent queued for a
+// paced host slot does not count against the request itself.
+function createChildSignal(parent: AbortSignal | undefined, timeoutMs: number): { signal: AbortSignal; start: () => void } {
   const controller = new AbortController();
-  const timeoutId = globalThis.setTimeout(() => controller.abort("timeout"), timeoutMs);
+  let timeoutId: ReturnType<typeof globalThis.setTimeout> | undefined;
+  const start = () => {
+    if (timeoutId === undefined && !controller.signal.aborted) {
+      timeoutId = globalThis.setTimeout(() => controller.abort("timeout"), timeoutMs);
+    }
+  };
   const abort = () => controller.abort(parent?.reason);
 
   if (parent) {
@@ -646,7 +653,7 @@ function createChildSignal(parent: AbortSignal | undefined, timeoutMs: number): 
     { once: true }
   );
 
-  return controller.signal;
+  return { signal: controller.signal, start };
 }
 
 function describeRequestError(
@@ -969,10 +976,17 @@ function freshHostRateState(hostname?: string): HostRateState {
   };
 }
 
-export async function commonCrawlFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+export async function commonCrawlFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  options: { onSlotAcquired?: () => void } = {}
+): Promise<Response> {
   const hostname = commonCrawlHost(input);
   const requestInit = withCommonCrawlHeaders(init);
-  if (!hostname) return fetch(input, requestInit);
+  if (!hostname) {
+    options.onSlotAcquired?.();
+    return fetch(input, requestInit);
+  }
 
   const state = hostStates.get(hostname) ?? freshHostRateState(hostname);
   const run = state.chain
@@ -986,6 +1000,7 @@ export async function commonCrawlFetch(input: RequestInfo | URL, init?: RequestI
       state.lastDelayReason =
         delay > hostPaceIntervalMs(hostname, state) ? "shared-tab" : delay > 0 ? "minimum-interval" : undefined;
       if (delay > 0) await wait(delay, requestInit.signal ?? undefined);
+      options.onSlotAcquired?.();
       state.requestCount += 1;
       try {
         const response = await fetch(input, requestInit);
@@ -1173,13 +1188,13 @@ export async function queryCollection(
 
     for (let attempt = 0; attempt <= retryCount; attempt += 1) {
       attempts += 1;
-      const requestSignal = createChildSignal(signal, timeoutMs);
+      const { signal: requestSignal, start: startTimeout } = createChildSignal(signal, timeoutMs);
       const requestUrl = buildCdxjUrl(targetUrl, collection, matchType, page, dateWindow);
       try {
         const response = await commonCrawlFetch(requestUrl, {
           headers: { Accept: "application/json" },
           signal: requestSignal
-        });
+        }, { onSlotAcquired: startTimeout });
 
         if (response.status === 404) {
           // pywb returns 404 with a JSON error body when there are no captures.
@@ -1288,7 +1303,9 @@ export async function queryCollection(
 
     allCaptures.push(...outcome.captures);
 
-    if (allCaptures.length >= captureLimit) {
+    // Only more captures than the cap prove the list is cut off. Landing exactly
+    // on the cap walks one more page, which ends the loop if it is empty.
+    if (allCaptures.length > captureLimit) {
       truncated = true;
       break;
     }

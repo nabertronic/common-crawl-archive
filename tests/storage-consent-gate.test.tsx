@@ -8,6 +8,7 @@ vi.mock("next/navigation", () => ({ usePathname: () => navigation.pathname, useR
 import { StorageConsentGate } from "@/components/storage-consent-gate";
 import { WebsitePreferences } from "@/components/website-preferences";
 import { hasStorageConsent, resetStorageConsentSession, STORAGE_CONSENT_STORAGE_KEY } from "@/lib/website-preferences";
+import { isTemporaryScanId, temporaryScanStore } from "@/lib/temporary-scan-store";
 
 describe("StorageConsentGate", () => {
   beforeEach(() => {
@@ -35,6 +36,29 @@ describe("StorageConsentGate", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Allow browser storage" }));
     expect(await screen.findByText("Private app feature")).toBeInTheDocument();
     expect(mounted).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows only a known visit-local scan through viewer and restored scan routes", async () => {
+    const session = await temporaryScanStore.ensureScanSession({
+      url: "https://example.org/report", matchType: "exact", mock: false, scope: "all"
+    });
+    expect(isTemporaryScanId(session.scanId)).toBe(true);
+    window.history.replaceState({}, "", `/view?scan=${encodeURIComponent(session.scanId)}`);
+    navigation.pathname = "/view";
+    const rendered = render(<StorageConsentGate><p>Visit local capture</p></StorageConsentGate>);
+    expect(screen.getByText("Visit local capture")).toBeInTheDocument();
+
+    rendered.unmount();
+    window.history.replaceState({}, "", `/search?scan=${encodeURIComponent(session.scanId)}`);
+    navigation.pathname = "/search";
+    const restored = render(<StorageConsentGate><p>Restored visit local scan</p></StorageConsentGate>);
+    expect(screen.getByText("Restored visit local scan")).toBeInTheDocument();
+
+    window.history.replaceState({}, "", "/view?scan=temporary_unknown");
+    navigation.pathname = "/view";
+    restored.rerender(<StorageConsentGate><p>Unknown capture</p></StorageConsentGate>);
+    expect(screen.queryByText("Unknown capture")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Archived page" })).toBeInTheDocument();
   });
 
   it.each([

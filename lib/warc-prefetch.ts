@@ -2,6 +2,7 @@ import { isHtmlCaptureMime, type CommonCrawlCapture } from "@/lib/common-crawl";
 import { captureKey } from "@/lib/scan-results";
 import { getSettings } from "@/lib/capture-store";
 import { loadCaptureRecord } from "@/lib/warc";
+import { hasStorageConsent } from "@/lib/website-preferences";
 
 // Best-effort warming of the capture cache when the user hovers/focuses a result
 // row, so opening the viewer feels instant. Each capture is attempted at most
@@ -30,13 +31,14 @@ async function htmlCacheEnabled(): Promise<boolean> {
 }
 
 export function prefetchCaptureRecord(capture: CommonCrawlCapture): void {
+  if (!hasStorageConsent()) return;
   if (!isHtmlCaptureMime(capture.mime)) return;
   const key = captureKey(capture);
   if (attempted.has(key)) return;
   attempted.add(key);
   void (async () => {
     try {
-      if (!(await htmlCacheEnabled())) return;
+      if (!hasStorageConsent() || !(await htmlCacheEnabled()) || !hasStorageConsent()) return;
       await loadCaptureRecord({ capture, cacheMode: "read-write" });
     } catch {
       // Prefetch is best-effort; a failure just means no warm cache. Allow a

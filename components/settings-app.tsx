@@ -343,12 +343,21 @@ export function SettingsApp() {
                   <DateControl
                     label="Default from"
                     value={settings.defaultCustomDateFrom ?? ""}
-                    onChange={(value) => void saveSettings({ defaultCustomDateFrom: value })}
+                    max={settings.defaultCustomDateTo || undefined}
+                    onChange={(value) => {
+                      // A reversed range would make every default scan silently refuse to start.
+                      if (value && settings.defaultCustomDateTo && value > settings.defaultCustomDateTo) return;
+                      void saveSettings({ defaultCustomDateFrom: value });
+                    }}
                   />
                   <DateControl
                     label="Default to"
                     value={settings.defaultCustomDateTo ?? ""}
-                    onChange={(value) => void saveSettings({ defaultCustomDateTo: value })}
+                    min={settings.defaultCustomDateFrom || undefined}
+                    onChange={(value) => {
+                      if (value && settings.defaultCustomDateFrom && value < settings.defaultCustomDateFrom) return;
+                      void saveSettings({ defaultCustomDateTo: value });
+                    }}
                   />
                 </div>
               ) : null}
@@ -720,7 +729,8 @@ function NumberField({
   }, [value]);
 
   function commit() {
-    const numeric = Number(draft);
+    // Number("") is 0, so an emptied or non-numeric field would save the minimum.
+    const numeric = draft.trim() === "" ? Number.NaN : Number(draft);
     if (!Number.isFinite(numeric)) {
       setDraft(String(value));
       return;
@@ -808,6 +818,11 @@ function formatStorageBytes(bytes: number) {
   let size = bytes;
   let unit = 0;
   while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  // 1023.99 KB would print as "1024 KB"; promote it to the next unit instead.
+  if (unit < units.length - 1 && Number(size >= 10 ? size.toFixed(0) : size.toFixed(1)) >= 1024) {
     size /= 1024;
     unit += 1;
   }

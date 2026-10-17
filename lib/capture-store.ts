@@ -281,8 +281,26 @@ export function normalizeTargetUrl(url: string): string {
 }
 
 export function targetIdFor(url: string, matchType: MatchType | string, mock: boolean): string {
-  const raw = JSON.stringify({ url: normalizeTargetUrl(url), matchType, mock });
-  return `target_${fnv1a(raw)}`;
+  // Keep the complete identity in the key. A short hash can alias unrelated
+  // URLs, causing one scan's coverage to appear on another URL.
+  return `target_v2:${encodeURIComponent(JSON.stringify({ url: normalizeTargetUrl(url), matchType, mock }))}`;
+}
+
+function legacyTargetIdFor(url: string, matchType: MatchType | string, mock: boolean): string {
+  return `target_${fnv1a(JSON.stringify({ url: normalizeTargetUrl(url), matchType, mock }))}`;
+}
+
+function sameTargetIdentity(record: { url: string; matchType: string; mock: boolean }, identity: { url: string; matchType: string; mock: boolean }): boolean {
+  return normalizeTargetUrl(record.url) === identity.url && record.matchType === identity.matchType && record.mock === identity.mock;
+}
+
+function identityFromTargetId(targetId: string): { url: string; matchType: string; mock: boolean } | undefined {
+  if (!targetId.startsWith("target_v2:")) return undefined;
+  try {
+    const value = JSON.parse(decodeURIComponent(targetId.slice("target_v2:".length)));
+    if (typeof value.url === "string" && typeof value.matchType === "string" && typeof value.mock === "boolean") return value;
+  } catch { /* An unrecognized key is not a canonical identity. */ }
+  return undefined;
 }
 
 export function newScanId(): string {
@@ -788,7 +806,11 @@ export async function deleteSearches(keys: string[]): Promise<void> {
 
 export async function ensureTarget(url: string, matchType: MatchType, mock: boolean): Promise<SearchTarget> {
   const targetId = targetIdFor(url, matchType, mock);
-  const existing = await getTarget(targetId);
+  let existing = await getTarget(targetId);
+  if (!existing) {
+    await migrateLegacyTargetIdentity({ url: normalizeTargetUrl(url), matchType, mock }, targetId);
+    existing ??= await getTarget(targetId);
+  }
   const now = Date.now();
   const ownerId = await activeOwnerId();
   const next: SearchTarget = {
@@ -802,6 +824,47 @@ export async function ensureTarget(url: string, matchType: MatchType, mock: bool
   };
   await putTarget(next);
   return next;
+}
+
+/** Copy legacy hash-keyed target/coverage rows only when their stored identity
+ * proves a match. Keep old rows so existing links and older tabs can still
+ * read them. Canonical coverage is populated conditionally in the same
+ * transaction, so concurrent tabs cannot replace a newer canonical row.
+ */
+async function migrateLegacyTargetIdentity(identity: { url: string; matchType: string; mock: boolean }, targetId: string): Promise<void> {
+  const legacyId = legacyTargetIdFor(identity.url, identity.matchType, identity.mock);
+  if (legacyId === targetId) return;
+  try {
+    const db = await openDB();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const tx = openTransaction(db, [TARGET_STORE, COVERAGE_STORE], "readwrite");
+        const targets = tx.objectStore(TARGET_STORE);
+        const coverages = tx.objectStore(COVERAGE_STORE);
+        const existingTarget = targets.get(targetId);
+        const oldTarget = targets.get(legacyId);
+        const existingCoverage = coverages.get(targetId);
+        existingTarget.onsuccess = () => {
+          const canonical = existingTarget.result as SearchTarget | undefined;
+          oldTarget.onsuccess = () => {
+            const legacy = oldTarget.result as SearchTarget | undefined;
+            if (!canonical && legacy && sameTargetIdentity(legacy, identity)) targets.put({ ...legacy, targetId });
+          };
+          existingCoverage.onsuccess = () => {
+            const canonical = existingCoverage.result as CoverageRecord | undefined;
+            const legacyCoverage = coverages.get(legacyId);
+            legacyCoverage.onsuccess = () => {
+              const record = legacyCoverage.result as CoverageRecord | undefined;
+              if (!canonical && record && sameTargetIdentity(record, identity)) coverages.put({ ...record, targetId });
+            };
+          };
+        };
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      });
+    } finally { releaseDb(db); }
+  } catch { /* Best effort migration; normal reads remain available. */ }
 }
 
 export async function getTarget(targetId: string): Promise<SearchTarget | undefined> {
@@ -826,7 +889,14 @@ export async function putTarget(target: SearchTarget): Promise<void> {
 
 export async function getCoverage(targetId: string): Promise<CoverageRecord | undefined> {
   try {
-    return withOwner(await withStore<CoverageRecord>(COVERAGE_STORE, "readonly", (store) => store.get(targetId)));
+    const existing = await withStore<CoverageRecord>(COVERAGE_STORE, "readonly", (store) => store.get(targetId));
+    if (existing) return withOwner(existing);
+    const identity = identityFromTargetId(targetId);
+    if (identity) {
+      await migrateLegacyTargetIdentity(identity, targetId);
+      return withOwner(await withStore<CoverageRecord>(COVERAGE_STORE, "readonly", (store) => store.get(targetId)));
+    }
+    return undefined;
   } catch {
     return undefined;
   }
@@ -1075,7 +1145,14 @@ function historySourceTotal(record: StoredSearch, results: CollectionCheckResult
 
 export async function getScanSession(scanId: string): Promise<ScanSession | undefined> {
   try {
-    return withOwner(await withStore<ScanSession>(SESSION_STORE, "readonly", (store) => store.get(scanId)));
+    const session = withOwner(await withStore<ScanSession>(SESSION_STORE, "readonly", (store) => store.get(scanId)));
+    if (session) {
+      const targetId = targetIdFor(session.url, session.matchType, session.mock);
+      // Derive the canonical identity from the session itself. Leave the
+      // persisted row untouched so a read cannot overwrite concurrent edits.
+      return session.targetId === targetId ? session : { ...session, targetId };
+    }
+    return undefined;
   } catch {
     return undefined;
   }
@@ -1489,28 +1566,47 @@ export async function updateSettings(
     | "largeCaptureLimitBytes"
   >>
 ): Promise<AppSettings> {
-  const current = await getSettings();
-  const next = normalizeSettings({
-    ...current,
-    htmlCacheEnabled: input.htmlCacheEnabled ?? current.htmlCacheEnabled,
-    htmlCacheLimitBytes: normalizeCacheLimit(input.htmlCacheLimitBytes ?? current.htmlCacheLimitBytes),
-    autoPruneEnabled: input.autoPruneEnabled ?? current.autoPruneEnabled,
-    showHtmlPrivacyWarning: input.showHtmlPrivacyWarning ?? current.showHtmlPrivacyWarning ?? true,
-    robotsTxtChecksEnabled: input.robotsTxtChecksEnabled ?? current.robotsTxtChecksEnabled ?? true,
-    defaultMatchType: input.defaultMatchType ?? current.defaultMatchType,
-    defaultScanScope: input.defaultScanScope ?? current.defaultScanScope,
-    defaultScanScopeChosen: input.defaultScanScope !== undefined ? true : current.defaultScanScopeChosen,
-    defaultCustomDateFrom: input.defaultCustomDateFrom ?? current.defaultCustomDateFrom,
-    defaultCustomDateTo: input.defaultCustomDateTo ?? current.defaultCustomDateTo,
-    defaultViewMode: input.defaultViewMode ?? current.defaultViewMode,
-    defaultSort: input.defaultSort ?? current.defaultSort,
-    searchPageSize: input.searchPageSize ?? current.searchPageSize,
-    historyPageSize: input.historyPageSize ?? current.historyPageSize,
-    defaultExportColumns: input.defaultExportColumns ?? current.defaultExportColumns,
-    largeCaptureLimitBytes: input.largeCaptureLimitBytes ?? current.largeCaptureLimitBytes,
-    updatedAt: Date.now()
-  });
-  await writeSettings(next);
+  await getSettings();
+  const db = await openDB();
+  let next!: AppSettings;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = openTransaction(db, SETTINGS_STORE, "readwrite");
+      const store = tx.objectStore(SETTINGS_STORE);
+      const request = store.get(ACTIVE_SETTINGS_ID);
+      request.onsuccess = () => {
+        const current = normalizeSettings((request.result as AppSettings | undefined) ?? defaultSettings(DEFAULT_LOCAL_USER_ID));
+        next = normalizeSettings({
+          ...current,
+          htmlCacheEnabled: input.htmlCacheEnabled ?? current.htmlCacheEnabled,
+          htmlCacheLimitBytes: normalizeCacheLimit(input.htmlCacheLimitBytes ?? current.htmlCacheLimitBytes),
+          autoPruneEnabled: input.autoPruneEnabled ?? current.autoPruneEnabled,
+          showHtmlPrivacyWarning: input.showHtmlPrivacyWarning ?? current.showHtmlPrivacyWarning ?? true,
+          robotsTxtChecksEnabled: input.robotsTxtChecksEnabled ?? current.robotsTxtChecksEnabled ?? true,
+          defaultMatchType: input.defaultMatchType ?? current.defaultMatchType,
+          defaultScanScope: input.defaultScanScope ?? current.defaultScanScope,
+          defaultScanScopeChosen: input.defaultScanScope !== undefined ? true : current.defaultScanScopeChosen,
+          defaultCustomDateFrom: input.defaultCustomDateFrom ?? current.defaultCustomDateFrom,
+          defaultCustomDateTo: input.defaultCustomDateTo ?? current.defaultCustomDateTo,
+          defaultViewMode: input.defaultViewMode ?? current.defaultViewMode,
+          defaultSort: input.defaultSort ?? current.defaultSort,
+          searchPageSize: input.searchPageSize ?? current.searchPageSize,
+          historyPageSize: input.historyPageSize ?? current.historyPageSize,
+          defaultExportColumns: input.defaultExportColumns ?? current.defaultExportColumns,
+          largeCaptureLimitBytes: input.largeCaptureLimitBytes ?? current.largeCaptureLimitBytes,
+          updatedAt: Date.now()
+        });
+        store.put(next);
+      };
+      request.onerror = () => reject(request.error);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  } finally { releaseDb(db); }
+  invalidateSettingsCache();
+  invalidateLocalUserCache();
+  cachedSettings = next;
   if (next.autoPruneEnabled && next.htmlCacheEnabled) await pruneHtmlCache(next.htmlCacheLimitBytes);
   notifyUpdated(SETTINGS_STORE);
   return next;
@@ -1756,6 +1852,10 @@ export async function clearAllLocalAppData(): Promise<void> {
       tx.onabort = () => reject(tx.error);
     });
     releaseDb(db);
+    // Invalidate after deletion, immediately before rebuilding defaults, even
+    // when BroadcastChannel is missing in this browser.
+    invalidateSettingsCache();
+    invalidateLocalUserCache();
     await getOrCreateLocalUser();
     notifyUpdated("clear-all");
   } catch {

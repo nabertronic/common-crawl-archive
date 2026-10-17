@@ -15,6 +15,11 @@ export function formatBytes(value: string | number | undefined): string {
     size /= 1024;
     unit += 1;
   }
+  // 1023.99 KB would print as "1024 KB"; promote it to the next unit instead.
+  if (unit < units.length - 1 && Number(size >= 10 ? size.toFixed(0) : size.toFixed(1)) >= 1024) {
+    size /= 1024;
+    unit += 1;
+  }
   return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
 }
 
@@ -62,4 +67,17 @@ export function describeHttpStatus(status: string): string {
   if (/^4\d\d$/.test(status)) return `HTTP ${status} · Client error`;
   if (/^5\d\d$/.test(status)) return `HTTP ${status} · Server error`;
   return `HTTP ${status}`;
+}
+
+// Safari and Firefox can cancel a download whose object URL is revoked in the
+// same task as the click, so the URL is released after a grace period.
+const DOWNLOAD_URL_GRACE_MS = 40_000;
+
+export function downloadBlob(blob: Blob, filename: string): void {
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = filename;
+  link.click();
+  globalThis.setTimeout(() => URL.revokeObjectURL(objectUrl), DOWNLOAD_URL_GRACE_MS);
 }

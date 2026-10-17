@@ -155,6 +155,7 @@ import { ensureScanSession, findOrCreateLegacySession, getCoverage, getScanSessi
 import { fetchCollections, queryCollection, resetCommonCrawlRateLimitState } from "@/lib/common-crawl";
 import { robotsCacheKey } from "@/lib/robots-cache";
 import { declineStorageConsent, revokeStorageConsent, resetStorageConsentSession, grantStorageConsent, hasStorageConsent, STORAGE_CONSENT_STORAGE_KEY } from "@/lib/website-preferences";
+import { resetTemporaryScanStoreForTests, temporaryScanStore } from "@/lib/temporary-scan-store";
 
 vi.mock("next/navigation", () => ({
   usePathname: () => window.location.pathname,
@@ -199,6 +200,7 @@ describe("ArchiveSearchApp", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    resetTemporaryScanStoreForTests();
     settingsMocks.settings = {
       id: "active",
       activeUserId: "local",
@@ -278,6 +280,35 @@ describe("ArchiveSearchApp", () => {
         }
       ]
     }));
+  });
+
+  it("restores a visit-local PastPage scan after remount without touching persistent scan storage", async () => {
+    const collection = commonCrawlMocks.collections[0];
+    const session = await temporaryScanStore.ensureScanSession({
+      url: "https://example.org/report", matchType: "exact", mock: false, scope: "all",
+      collectionIds: [collection.id], collectionListFetchedAt: Date.now()
+    });
+    const capture = {
+      collectionId: collection.id, collectionName: collection.name,
+      collectionFrom: collection.from, collectionTo: collection.to,
+      timestamp: "20260512000000", url: "https://example.org/report",
+      status: "200", mime: "text/html", filename: "example.warc.gz", offset: "10", length: "100"
+    };
+    await temporaryScanStore.upsertCoverageResult(
+      { targetId: session.targetId, url: session.url, matchType: session.matchType, mock: session.mock },
+      { collection, status: "checked", captures: [capture], attempts: 1, runs: 1 }
+    );
+    revokeStorageConsent();
+    vi.mocked(getScanSession).mockClear();
+    vi.mocked(getCoverage).mockClear();
+    vi.mocked(queryCollection).mockClear();
+    window.history.replaceState({}, "", `/search?scan=${encodeURIComponent(session.scanId)}`);
+    const app = render(<StorageConsentGate><ArchiveSearchApp autoStart /></StorageConsentGate>);
+    expect(await screen.findByText("https://example.org/report")).toBeInTheDocument();
+    expect(queryCollection).not.toHaveBeenCalled();
+    expect(getScanSession).not.toHaveBeenCalled();
+    expect(getCoverage).not.toHaveBeenCalled();
+    app.unmount();
   });
 
   it.each(["undecided", "declined", "granted"])("starts the PastPage full scan with %s storage consent and shows the banner only without a decision", async (decision) => {

@@ -8,11 +8,19 @@ const DAY_MS = 86_400_000;
 
 /** Parses a Common Crawl `YYYYMMDDhhmmss` timestamp as UTC milliseconds. */
 export function parseCaptureTime(timestamp: string): number | null {
-  const match = /^(\d{4})(\d{2})(\d{2})(\d{2})?(\d{2})?(\d{2})?/.exec(timestamp);
+  const match = /^(\d{4})(\d{2})(\d{2})(?:(\d{2})(?:(\d{2})(\d{2})?)?)?$/.exec(timestamp);
   if (!match) return null;
   const [, y, mo, d, h = "0", mi = "0", s = "0"] = match;
-  const time = Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s));
-  return Number.isFinite(time) ? time : null;
+  const year = Number(y), month = Number(mo), day = Number(d);
+  const hour = Number(h), minute = Number(mi), second = Number(s);
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) return null;
+  // setUTCFullYear avoids Date.UTC's special handling of years 0 through 99.
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  date.setUTCHours(hour, minute, second, 0);
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day ||
+      date.getUTCHours() !== hour || date.getUTCMinutes() !== minute || date.getUTCSeconds() !== second) return null;
+  return date.getTime();
 }
 
 export type TimelineDomain = { start: number; end: number };

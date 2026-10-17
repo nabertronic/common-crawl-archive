@@ -7,6 +7,7 @@ import {
   type CachedHtmlCaptureRecord
 } from "@/lib/capture-store";
 import { measureSync } from "@/lib/performance";
+import { hasStorageConsent } from "@/lib/website-preferences";
 
 const HARD_COMPRESSED_LIMIT_BYTES = 64 * 1024 * 1024;
 const HARD_DECOMPRESSED_LIMIT_BYTES = 64 * 1024 * 1024;
@@ -25,6 +26,10 @@ export type LoadedCaptureRecord = {
 };
 
 export type CaptureCacheMode = "read-write" | "read-only" | "off";
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new DOMException("The operation was aborted.", "AbortError");
+}
 
 export function parseHeaderBlock(block: string): Record<string, string> {
   const headers: Record<string, string> = {};
@@ -181,11 +186,14 @@ function cancelResponse(response: Response): void {
 function wait(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) return Promise.resolve();
   return new Promise((resolve, reject) => {
-    const timeoutId = globalThis.setTimeout(resolve, ms);
     const abort = () => {
       globalThis.clearTimeout(timeoutId);
       reject(new DOMException("The operation was aborted.", "AbortError"));
     };
+    const timeoutId = globalThis.setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, ms);
     if (signal) {
       if (signal.aborted) {
         abort();
@@ -261,17 +269,22 @@ async function fetchWarcRangeResponse({
       if (signal?.aborted) abortRequest();
       else signal?.addEventListener("abort", onExternalAbort, { once: true });
       let timedOut = false;
-      const timeoutId = globalThis.setTimeout(() => {
-        timedOut = true;
-        requestController.abort();
-        rejectAbort?.(new Error("WARC response headers timed out."));
-      }, WARC_READ_TIMEOUT_MS);
+      let timeoutId: ReturnType<typeof globalThis.setTimeout> | undefined;
+      // Start the header timeout once the paced host slot is acquired, so a
+      // queued cooldown cannot time the request out before it is sent.
+      const startTimeout = () => {
+        timeoutId = globalThis.setTimeout(() => {
+          timedOut = true;
+          requestController.abort();
+          rejectAbort?.(new Error("WARC response headers timed out."));
+        }, WARC_READ_TIMEOUT_MS);
+      };
       const request = commonCrawlFetch(warcRecordUrl(filename), {
         headers: {
           Range: buildRangeHeader(offset, length)
         },
         signal: requestController.signal
-      });
+      }, { onSlotAcquired: startTimeout });
       void request.then((lateResponse) => { if (timedOut) cancelResponse(lateResponse); }, () => undefined);
       try {
         response = await Promise.race([request, aborted]);
@@ -320,6 +333,42 @@ async function fetchWarcRangeResponse({
   return response;
 }
 
+// Returns the offset just past the first blank line at or after `from`, or -1.
+function findHeaderEnd(bytes: Uint8Array, from: number): number {
+  for (let i = from; i < bytes.length - 1; i += 1) {
+    if (bytes[i] !== 0x0a) continue;
+    if (bytes[i + 1] === 0x0a) return i + 2;
+    if (bytes[i + 1] === 0x0d && bytes[i + 2] === 0x0a) return i + 3;
+  }
+  return -1;
+}
+
+function createTextDecoder(label: string | undefined): TextDecoder {
+  try {
+    return new TextDecoder(label ?? "utf-8");
+  } catch {
+    // Unsupported charset labels fall back to UTF-8 rather than failing the capture.
+    return new TextDecoder("utf-8");
+  }
+}
+
+// Decodes a decompressed WARC record in the archived page's charset instead of
+// assuming UTF-8. The WARC and HTTP header blocks are ASCII, so they are decoded
+// as UTF-8 and the body uses the HTTP Content-Type charset, else a <meta> charset
+// sniffed from the first 2 KB, else UTF-8 (a BOM is stripped by TextDecoder).
+export function decodeWarcRecordBytes(bytes: Uint8Array): string {
+  const warcEnd = findHeaderEnd(bytes, 0);
+  const httpEnd = warcEnd < 0 ? -1 : findHeaderEnd(bytes, warcEnd);
+  if (httpEnd < 0) return new TextDecoder("utf-8").decode(bytes);
+
+  const headerText = new TextDecoder("utf-8").decode(bytes.subarray(0, httpEnd));
+  const body = bytes.subarray(httpEnd);
+  const declared = headerText.match(/^content-type:[^\r\n]*charset\s*=\s*["']?([^"';\s]+)/im)?.[1]
+    ?? new TextDecoder("latin1").decode(body.subarray(0, 2048))
+      .match(/<meta\b[^>]*?charset\s*=\s*["']?\s*([\w-]+)/i)?.[1];
+  return headerText + createTextDecoder(declared).decode(body);
+}
+
 export async function fetchAndParseWarcRecord(input: {
   filename: string;
   offset: string;
@@ -333,7 +382,7 @@ export async function fetchAndParseWarcRecord(input: {
   const compressedLimit = Math.min(Number(input.length), HARD_COMPRESSED_LIMIT_BYTES);
   const compressed = await readWarcResponse(response, compressedLimit, Number(input.length), input.signal);
   const decompressed = await decompressGzip(compressed, input.signal);
-  return parseWarcRecord(new TextDecoder("utf-8").decode(decompressed));
+  return parseWarcRecord(decodeWarcRecordBytes(decompressed));
 }
 
 /**
@@ -368,24 +417,34 @@ export async function loadCaptureRecord({
   retryCount?: number;
   signal?: AbortSignal;
 }): Promise<LoadedCaptureRecord> {
-  const settings = await getSettings();
-  const canReadCache = cacheMode !== "off" && settings.htmlCacheEnabled;
-  const canWriteCache = cacheMode === "read-write" && settings.htmlCacheEnabled;
+  throwIfAborted(signal);
+  const consented = hasStorageConsent();
+  const settings = consented ? await getSettings() : undefined;
+  throwIfAborted(signal);
+  const canReadCache = consented && hasStorageConsent() && cacheMode !== "off" && settings?.htmlCacheEnabled === true;
+  const canWriteCache = consented && hasStorageConsent() && cacheMode === "read-write" && settings?.htmlCacheEnabled === true;
   if (canReadCache) {
+    throwIfAborted(signal);
     const cached = await getCachedCaptureRecord(capture);
+    throwIfAborted(signal);
     if (cached) return { record: parsedRecordFromCache(cached), source: "cache" };
   }
 
+  throwIfAborted(signal);
   const record = await fetchAndParseWarcRecord({
     filename: capture.filename,
     offset: capture.offset,
     length: capture.length,
-    largeCaptureLimitBytes: settings.largeCaptureLimitBytes,
+    largeCaptureLimitBytes: settings?.largeCaptureLimitBytes ?? LARGE_CAPTURE_LIMIT_BYTES,
     allowLarge,
     retryCount,
     signal
   });
-  if (canWriteCache) await putCachedCaptureRecord({ capture, record });
+  throwIfAborted(signal);
+  if (canWriteCache && hasStorageConsent()) {
+    await putCachedCaptureRecord({ capture, record });
+    throwIfAborted(signal);
+  }
   return { record, source: "network" };
 }
 

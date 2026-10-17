@@ -10,10 +10,53 @@ const MAX_PREFETCH_URLS = 500;
 const DEFAULT_PREFETCH_SPACING_MS = 1100;
 const MIN_PREFETCH_SPACING_MS = 1000;
 const MAX_PREFETCH_SPACING_MS = 60_000;
-let prefetchAbort = false;
-let prefetchController;
+const STATE_CACHE = "crawlback-sw-state";
+const AUTHORIZED_CLIENTS_URL = "/__crawlback-sw/authorized-clients";
+const MAX_AUTHORIZED_CLIENTS = 50;
+const prefetchJobs = new Map();
 const authorizedClients = new Set();
 const pendingCacheWrites = new Set();
+// Browsers stop an idle worker and restart it with fresh globals, so the
+// approved client ids are mirrored to Cache Storage and restored on demand.
+// Revocation bumps the generation so an in-flight restore cannot re-add them.
+let authorizationGeneration = 0;
+let authorizationRestore;
+
+function restoreAuthorizedClients() {
+  if (authorizationRestore) return authorizationRestore;
+  const generation = authorizationGeneration;
+  authorizationRestore = (async () => {
+    try {
+      // caches.match does not create the cache, so an unapproved client never
+      // causes a storage write here.
+      const stored = await caches.match(AUTHORIZED_CLIENTS_URL, { cacheName: STATE_CACHE });
+      const ids = stored ? await stored.json() : [];
+      if (!Array.isArray(ids)) return;
+      let live;
+      try { live = new Set((await self.clients.matchAll({ includeUncontrolled: true })).map((client) => client.id)); }
+      catch { live = undefined; }
+      if (generation !== authorizationGeneration) return;
+      for (const id of ids) if (typeof id === "string" && (!live || live.has(id))) authorizedClients.add(id);
+    } catch { /* Missing state just means no restored approvals. */ }
+  })();
+  return authorizationRestore;
+}
+
+async function persistAuthorizedClients() {
+  const generation = authorizationGeneration;
+  try {
+    const ids = Array.from(authorizedClients).slice(-MAX_AUTHORIZED_CLIENTS);
+    const cache = await caches.open(STATE_CACHE);
+    if (generation !== authorizationGeneration) return;
+    await cache.put(AUTHORIZED_CLIENTS_URL, new Response(JSON.stringify(ids), { headers: { "Content-Type": "application/json" } }));
+  } catch { /* Best effort: the page re-sends its approval on the next load. */ }
+}
+
+async function isAuthorizedClient(clientId) {
+  if (!clientId) return false;
+  if (!authorizedClients.has(clientId)) await restoreAuthorizedClients();
+  return authorizedClients.has(clientId);
+}
 
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(Promise.all([
@@ -47,7 +90,7 @@ self.addEventListener("fetch", (event) => {
 });
 
 async function cacheFirst(request, clientId) {
-  if (!clientId || !authorizedClients.has(clientId)) return fetch(request);
+  if (!(await isAuthorizedClient(clientId))) return fetch(request);
   let response;
   try {
     const cache = await caches.open(CDX_CACHE);
@@ -68,45 +111,82 @@ self.addEventListener("message", (event) => {
   const data = event.data;
   if (!data || typeof data !== "object") return;
   const clientId = event.source && "id" in event.source ? event.source.id : "";
-  if (data.type === "consent:grant" && clientId) { authorizedClients.add(clientId); return; }
+  if (data.type === "consent:grant" && clientId) {
+    authorizedClients.add(clientId);
+    const persisted = persistAuthorizedClients();
+    if (typeof event.waitUntil === "function") event.waitUntil(persisted);
+    return;
+  }
   if (data.type === "consent:revoke") {
     authorizedClients.clear();
-    prefetchAbort = true;
-    prefetchController?.abort();
+    authorizationGeneration += 1;
+    authorizationRestore = Promise.resolve();
+    for (const job of prefetchJobs.values()) job.controller.abort();
+    prefetchJobs.clear();
     event.waitUntil(clearCacheAfterWrites());
     return;
   }
-  if (data.type === "scan:cancel") { prefetchAbort = true; prefetchController?.abort(); return; }
-  if (data.type === "scan:prefetch" && Array.isArray(data.urls) && clientId && authorizedClients.has(clientId)) {
-    prefetchAbort = false;
-    prefetchController?.abort();
-    prefetchController = new AbortController();
-    const urls = data.urls.filter(isAllowedPrefetchUrl).slice(0, MAX_PREFETCH_URLS);
-    const spacingMs = clampPrefetchSpacing(data.spacingMs);
-    event.waitUntil(prefetchUrls(urls, spacingMs, clientId, prefetchController));
+  if (data.type === "scan:cancel") {
+    const job = prefetchJobs.get(clientId);
+    if (job) { job.controller.abort(); prefetchJobs.delete(clientId); }
+    return;
+  }
+  if (data.type === "scan:prefetch" && Array.isArray(data.urls) && clientId) {
+    const start = () => {
+      prefetchJobs.get(clientId)?.controller.abort();
+      const job = { controller: new AbortController(), client: event.source };
+      prefetchJobs.set(clientId, job);
+      const urls = data.urls.filter(isAllowedPrefetchUrl).slice(0, MAX_PREFETCH_URLS);
+      const spacingMs = clampPrefetchSpacing(data.spacingMs);
+      return prefetchUrls(urls, spacingMs, clientId, job);
+    };
+    if (authorizedClients.has(clientId)) event.waitUntil(start());
+    else event.waitUntil(restoreAuthorizedClients().then(() => (authorizedClients.has(clientId) ? start() : undefined)));
   }
 });
 
-async function prefetchUrls(urls, spacingMs, ownerClientId, controller) {
-  if (!authorizedClients.has(ownerClientId)) return;
+function isCurrentPrefetch(ownerClientId, job) {
+  return prefetchJobs.get(ownerClientId) === job && !job.controller.signal.aborted && authorizedClients.has(ownerClientId);
+}
+
+async function prefetchUrls(urls, spacingMs, ownerClientId, job) {
+  if (!isCurrentPrefetch(ownerClientId, job)) return;
   let cache;
   try { cache = await caches.open(CDX_CACHE); }
-  catch { await notifyClients({ type: "scan:prefetch-done" }); return; }
+  catch {
+    if (isCurrentPrefetch(ownerClientId, job)) notifyClient(job.client, { type: "scan:prefetch-done" });
+    if (prefetchJobs.get(ownerClientId) === job) prefetchJobs.delete(ownerClientId);
+    return;
+  }
+  if (!isCurrentPrefetch(ownerClientId, job)) return;
   for (let index = 0; index < urls.length; index += 1) {
-    if (prefetchAbort || !authorizedClients.has(ownerClientId)) break;
+    if (!isCurrentPrefetch(ownerClientId, job)) break;
     const url = urls[index];
     try {
       const existing = await getFreshCached(cache, url);
-      if (prefetchAbort || !authorizedClients.has(ownerClientId)) break;
+      if (!isCurrentPrefetch(ownerClientId, job)) break;
       if (!existing) {
-        const response = await fetch(url, { signal: controller.signal });
-        if (response.ok && !prefetchAbort && authorizedClients.has(ownerClientId)) await putInCache(cache, url, response.clone(), ownerClientId);
+        const response = await fetch(url, { signal: job.controller.signal });
+        if (!isCurrentPrefetch(ownerClientId, job)) break;
+        // Warming is optional: on a rate-limit or overload answer, stop instead
+        // of adding load. The page's own scan applies the shared backoff.
+        if (response.status === 429 || response.status === 503) {
+          void response.body?.cancel().catch(() => {});
+          break;
+        }
+        if (response.ok) await putInCache(cache, url, response.clone(), ownerClientId);
+        if (!isCurrentPrefetch(ownerClientId, job)) break;
       }
     } catch { /* Best-effort warming. */ }
-    await notifyClients({ type: "scan:prefetch-progress", completed: index + 1, total: urls.length });
-    if (index < urls.length - 1 && !prefetchAbort && authorizedClients.has(ownerClientId)) await delay(spacingMs);
+    if (!isCurrentPrefetch(ownerClientId, job)) break;
+    notifyClient(job.client, { type: "scan:prefetch-progress", completed: index + 1, total: urls.length });
+    if (index < urls.length - 1) {
+      await delay(spacingMs);
+      if (!isCurrentPrefetch(ownerClientId, job)) break;
+    }
   }
-  await notifyClients({ type: "scan:prefetch-done" });
+  if (isCurrentPrefetch(ownerClientId, job)) notifyClient(job.client, { type: "scan:prefetch-done" });
+  if (prefetchJobs.get(ownerClientId) === job) prefetchJobs.delete(ownerClientId);
 }
 
 function delay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
@@ -128,6 +208,7 @@ async function putInCache(cache, request, response, clientId) {
 }
 async function clearCacheAfterWrites() {
   await Promise.allSettled(Array.from(pendingCacheWrites));
+  await caches.delete(STATE_CACHE);
   await caches.delete(CDX_CACHE);
   await caches.delete(LEGACY_CDX_CACHE);
 }
@@ -193,7 +274,6 @@ async function pruneCache(cache) {
     totalBytes -= oldest.bytes;
   }
 }
-async function notifyClients(message) {
-  const clients = await self.clients.matchAll();
-  for (const client of clients) client.postMessage(message);
+function notifyClient(client, message) {
+  if (typeof client?.postMessage === "function") client.postMessage(message);
 }
