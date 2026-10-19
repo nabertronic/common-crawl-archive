@@ -121,7 +121,7 @@ describe("StorageConsentGate", () => {
   it("keeps the original centered home search and guide visible without mounting the app", async () => {
     navigation.pathname = "/";
     render(<><StorageConsentGate><p>Storage app contents</p></StorageConsentGate><WebsitePreferences /></>);
-    expect(screen.getByRole("heading", { name: /crawlback/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /crawlback/i, level: 1 })).toBeInTheDocument();
     expect(screen.getByText((_, el) => el?.tagName === "P" && el.textContent === "Find archived copies of pages the web forgot.")).toBeInTheDocument();
     expect(screen.getByLabelText("URL to search")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /start scan/i })).toBeInTheDocument();

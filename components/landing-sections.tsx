@@ -2,11 +2,13 @@
 
 import { useId, useEffect, useRef, useState, type ComponentType, type PointerEvent, type ReactNode } from "react";
 import { Archive, ChevronDown, Download, Eye, FileSearch, HardDrive, Radar, Terminal } from "lucide-react";
+import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { BrandWordmark } from "@/components/brand";
 import { TopRightMenu } from "@/components/top-right-menu";
 import { LandingBookmarkHint } from "@/components/landing-bookmark-hint";
 import { GITHUB_REPOSITORY_URL } from "@/lib/app-meta";
+import { PASTPAGE_CHROME, PASTPAGE_FIREFOX } from "@/lib/pastpage";
 
 const REVEAL_MARGIN_RATIO = 0.08;
 const REVEAL_FAILSAFE_MS = 2500;
@@ -246,6 +248,20 @@ function HowItWorksSection() {
   );
 }
 
+// Bookmarking only makes sense on the home page itself, not when the landing shows under /search.
+function LinkBreaksSection() {
+  const pathname = usePathname();
+  if (pathname !== "/") return null;
+  return (
+    <section id="link-breaks" aria-labelledby="link-breaks-title" className="scroll-mt-28">
+      <Reveal>
+        <SectionHeading label="Keep it close" title="Next time a link breaks" titleId="link-breaks-title" />
+        <LandingBookmarkHint />
+      </Reveal>
+    </section>
+  );
+}
+
 function DataSourceSection() {
   return (
     <section id="data-source" aria-labelledby="data-source-title" className="scroll-mt-28">
@@ -337,13 +353,21 @@ function BenefitsSection() {
             </li>
           ))}
         </ul>
-        <LandingBookmarkHint />
       </Reveal>
     </section>
   );
 }
 
-const FAQ_ITEMS: { question: string; answer: string }[] = [
+type FaqEntry = {
+  question: string;
+  /** Plain text for the JSON-LD; `content` replaces it on the page when the answer needs links. */
+  answer: string;
+  content?: ReactNode;
+};
+
+const FAQ_LINK_CLASS = "inline font-semibold text-amber-200 underline underline-offset-2 transition hover:text-amber-100 ledger:text-zinc-50 ledger:underline-offset-4 ledger:hover:text-amber-300";
+
+const FAQ_ITEMS: FaqEntry[] = [
   {
     question: "How is this different from the Wayback Machine?",
     answer:
@@ -370,6 +394,20 @@ const FAQ_ITEMS: { question: string; answer: string }[] = [
       "Crawlback checks whether Common Crawl is currently blocked or opted out for that URL. Even if it is blocked now, you can still find older snapshots from times when the page was crawlable."
   },
   {
+    question: "Is there a browser extension?",
+    answer:
+      "Yes. PastPage, a free Chrome extension and Firefox add-on, checks Crawlback, the Wayback Machine, and other web archives in one click.",
+    content: (
+      <>
+        Yes. PastPage, a free{" "}
+        <a href={PASTPAGE_CHROME.href} target="_blank" rel="noopener noreferrer" className={FAQ_LINK_CLASS}>Chrome extension</a>
+        {" "}and{" "}
+        <a href={PASTPAGE_FIREFOX.href} target="_blank" rel="noopener noreferrer" className={FAQ_LINK_CLASS}>Firefox add-on</a>
+        , checks Crawlback, the Wayback Machine, and other web archives in one click.
+      </>
+    )
+  },
+  {
     question: "Does a scan hit the target website?",
     answer:
       "Almost never. Your browser sends archive searches straight to Common Crawl's public index and data servers, not to the site you're researching. Crawlback's server makes one request to the target, a robots.txt check. For sensitive research targets, you can turn that off in Settings so the website is not contacted at all."
@@ -386,7 +424,7 @@ const FAQ_JSON_LD = JSON.stringify({
   }))
 }).replace(/</g, "\\u003c");
 
-function FaqItem({ item }: { item: { question: string; answer: string } }) {
+function FaqItem({ item }: { item: FaqEntry }) {
   const [open, setOpen] = useState(false);
   const buttonId = useId();
   const panelId = useId();
@@ -420,7 +458,7 @@ function FaqItem({ item }: { item: { question: string; answer: string } }) {
         className="landing-faq-panel"
       >
         <div className="landing-faq-panel__inner">
-          <p className="px-4 pb-5 text-[0.9375rem] leading-relaxed text-zinc-300 sm:px-5 ledger:px-0 ledger:sm:px-0 ledger:pb-6 ledger:max-w-[68ch] ledger:text-base ledger:pr-8 ledger:sm:pr-0">{item.answer}</p>
+          <p className="px-4 pb-5 text-[0.9375rem] leading-relaxed text-zinc-300 sm:px-5 ledger:px-0 ledger:sm:px-0 ledger:pb-6 ledger:max-w-[68ch] ledger:text-base ledger:pr-8 ledger:sm:pr-0">{item.content ?? item.answer}</p>
         </div>
       </div>
     </div>
@@ -457,6 +495,7 @@ export function LandingSections() {
       <div className="relative z-10 mx-auto w-full max-w-3xl space-y-20 px-5 pb-10 pt-8 sm:space-y-24 md:px-8 ledger:max-w-6xl ledger:space-y-16 ledger:sm:space-y-28 ledger:md:space-y-36 ledger:md:px-10">
         <HowItWorksSection />
         <BenefitsSection />
+        <LinkBreaksSection />
         <DataSourceSection />
         <FaqSection />
         <p className="text-center text-[0.9375rem] leading-relaxed text-zinc-300">

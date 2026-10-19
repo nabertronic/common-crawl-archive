@@ -5,6 +5,8 @@ import { usePathname } from "next/navigation";
 import { useLayoutEffect, useRef } from "react";
 import { BrandWordmark } from "@/components/brand";
 import { GITHUB_REPOSITORY_URL } from "@/lib/app-meta";
+import { usePastPageStore } from "@/lib/pastpage";
+import { cn } from "@/lib/utils";
 import { openWebsitePreferences } from "@/lib/website-preferences";
 
 const linkClass = "ledger-underline inline-flex min-h-11 items-center rounded-sm text-sm text-zinc-300 transition hover:text-amber-300 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-amber-300";
@@ -40,6 +42,7 @@ function ScrollToTopOnNavigate() {
 }
 
 export function SiteFooter() {
+  const pastPage = usePastPageStore();
   return (
     <footer className="[overflow-anchor:none] relative z-10 mx-auto w-full max-w-7xl px-4 pb-[max(2rem,env(safe-area-inset-bottom))] pt-6 md:px-8">
       <ScrollToTopOnNavigate />
@@ -48,6 +51,7 @@ export function SiteFooter() {
           <BrandWordmark className="text-base leading-none" />
         </Link>
         <nav aria-label="Website information" className="grid grid-cols-2 gap-x-6 sm:flex sm:flex-wrap sm:items-center sm:gap-x-5">
+          <a href={pastPage.href} target="_blank" rel="noopener noreferrer" title="PastPage: search 10+ web archives, Crawlback included" className={cn(linkClass, "font-semibold text-amber-300 hover:text-amber-200")}>Get the {pastPage.label}</a>
           <Link href="/#how-it-works" className={linkClass}>How it works</Link>
           <Link href="/#faq" className={linkClass}>FAQ</Link>
           <Link href="/privacy" className={linkClass}>Privacy</Link>

@@ -20,6 +20,7 @@ export const metadata: Metadata = {
 const sectionClass = "py-8 sm:py-9 ledger:space-y-5";
 const headingClass = "text-lg font-semibold leading-snug text-zinc-50 sm:text-xl ledger:font-serif ledger:font-normal ledger:text-[1.75rem] ledger:leading-[1.1] ledger:tracking-[-0.01em] ledger:text-balance ledger:sm:text-[40px]";
 const textClass = "mt-3 max-w-2xl text-base leading-7 text-zinc-300";
+const linkClass = "text-amber-300 underline decoration-amber-300/40 underline-offset-4 hover:text-amber-200 ledger:text-zinc-50 ledger:decoration-amber-300 ledger:decoration-[1.5px] ledger:hover:text-amber-300";
 
 export default function ImprintPage() {
   return (
@@ -30,7 +31,7 @@ export default function ImprintPage() {
         </h2>
         <div className="mt-5">
           <p className="text-base font-semibold text-zinc-50">Crawlback</p>
-          <p className="mt-1 text-base text-zinc-200">Alexander Nabert</p>
+          <p className="mt-1 text-base text-zinc-200"><a className={linkClass} href="https://alexander-nabert.de" target="_blank" rel="noopener noreferrer">Alexander Nabert</a></p>
           <img
             src="/legal/address.png"
             width="111"
@@ -45,7 +46,7 @@ export default function ImprintPage() {
       <section className={sectionClass} aria-labelledby="contact-heading">
         <h2 id="contact-heading" className={headingClass}>Contact</h2>
         <p className={textClass}>
-          Email: <a className="text-amber-300 underline decoration-amber-300/40 underline-offset-4 hover:text-amber-200 ledger:text-zinc-50 ledger:decoration-amber-300 ledger:decoration-[1.5px] ledger:hover:text-amber-300" href="mailto:nabert@pm.me">nabert@pm.me</a>
+          Email: <a className={linkClass} href="mailto:nabert@pm.me">nabert@pm.me</a>
         </p>
       </section>
     </LegalPage>

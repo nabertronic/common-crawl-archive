@@ -5,6 +5,7 @@ import { LandingSections } from "@/components/landing-sections";
 import { SiteFooter } from "@/components/site-footer";
 import { WebsitePreferences } from "@/components/website-preferences";
 import { detectBookmarkHint } from "@/components/landing-bookmark-hint";
+import { detectPastPageStore, PASTPAGE_CHROME, PASTPAGE_FIREFOX } from "@/lib/pastpage";
 
 vi.mock("next/navigation", async (importOriginal) => ({
   ...(await importOriginal<typeof import("next/navigation")>()),
@@ -71,13 +72,11 @@ describe("LandingSections", () => {
     expect(screen.getByText(/Crawlback is open source/)).toBeInTheDocument();
   });
 
-  it("places the bookmark hint below the benefit cards and reserves its space before hydration", () => {
+  it("puts the bookmark and PastPage panel in its own section after the benefits", () => {
     render(<LandingSections />);
-    const cards = screen.getByRole("heading", { name: "Alternative archive", level: 3 }).closest("ul");
-    const hintText = screen.getByText(/to bookmark Crawlback|Tap the Share button|Open your browser menu/);
-    expect(cards).not.toBeNull();
-    expect((cards?.compareDocumentPosition(hintText) ?? 0) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(cards?.nextElementSibling?.contains(hintText)).toBe(true);
+    const section = screen.getByRole("heading", { name: "Next time a link breaks", level: 2 }).closest("section");
+    expect(section?.previousElementSibling?.id).toBe("why-crawlback");
+    expect(within(section as HTMLElement).getByRole("heading", { name: "Bookmark Crawlback", level: 3 })).toBeInTheDocument();
   });
 
   it("exposes FAQ entries as h3 buttons with aria-expanded and aria-controls", () => {
@@ -106,7 +105,7 @@ describe("LandingSections", () => {
     const data = JSON.parse(script?.innerHTML ?? "{}");
     expect(data["@type"]).toBe("FAQPage");
     const questions = data.mainEntity.map((entry: { name: string }) => entry.name);
-    expect(questions).toHaveLength(6);
+    expect(questions).toHaveLength(7);
     expect(questions).not.toContain("What does OSINT mean here?");
     for (const question of questions) {
       expect(screen.getByRole("button", { name: question })).toBeInTheDocument();
@@ -127,6 +126,12 @@ describe("LandingSections", () => {
     expect(footer.querySelector('a[href="/privacy"]')).not.toBeNull();
     expect(footer.querySelector('a[href="/terms"]')).not.toBeNull();
     expect(footer.querySelector('a[href="/imprint"]')).not.toBeNull();
+    const footerLinks = within(footer).getByRole("navigation", { name: "Website information" }).querySelectorAll("a, button");
+    expect(footerLinks[0]).toHaveAttribute("target", "_blank");
+    expect(footerLinks[0]).toHaveTextContent(/^Get the (Chrome Extension|Firefox Add-on)$/);
+    for (const link of screen.getAllByRole("link", { name: /^Get the (PastPage )?(Chrome Extension|Firefox Add-on)/ })) expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(screen.getByRole("link", { name: "Chrome extension" })).toHaveAttribute("href", PASTPAGE_CHROME.href);
+    expect(screen.getByRole("link", { name: "Firefox add-on" })).toHaveAttribute("href", PASTPAGE_FIREFOX.href);
     const githubLink = within(footer).getByRole("link", { name: "GitHub" });
     expect(githubLink).toHaveAttribute("href", "https://github.com/nabertronic/common-crawl-archive");
     expect(githubLink).toHaveAttribute("target", "_blank");
@@ -137,6 +142,15 @@ describe("LandingSections", () => {
     expect(footer.querySelector('a[href="/history"]')).toBeNull();
     expect(footer.querySelector('a[href="/settings"]')).toBeNull();
     expect(footer.querySelector('a[href="https://commoncrawl.org"]')).toBeNull();
+  });
+});
+
+describe("detectPastPageStore", () => {
+  it("offers the Firefox add-on only in Firefox and the Chrome extension everywhere else", () => {
+    expect(detectPastPageStore("Mozilla/5.0 (Macintosh; Intel Mac OS X 14.0; rv:131.0) Gecko/20100101 Firefox/131.0")).toBe(PASTPAGE_FIREFOX);
+    expect(detectPastPageStore("Mozilla/5.0 (Android 14; Mobile; rv:131.0) Gecko/131.0 Firefox/131.0")).toBe(PASTPAGE_FIREFOX);
+    expect(detectPastPageStore(WINDOWS_UA)).toBe(PASTPAGE_CHROME);
+    expect(detectPastPageStore(MAC_UA)).toBe(PASTPAGE_CHROME);
   });
 });
 
